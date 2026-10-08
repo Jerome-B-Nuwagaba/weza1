@@ -1,0 +1,41 @@
+[project]
+name = "weza-core-api"
+version = "0.1.0"
+description = "WEZA core API — modular monolith (FastAPI)"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "sqlalchemy>=2.0.36",
+  "psycopg[binary]>=3.2",
+  "alembic>=1.13",
+  "pydantic>=2.8",
+  "pydantic-settings>=2.4",
+  "argon2-cffi>=23.1",
+  "pyjwt[crypto]>=2.9",
+  "cryptography>=43",
+  "pyotp>=2.9",
+  "anthropic>=1.0",
+  "httpx>=0.27",
+  "python-multipart>=0.0.9",
+  "pypdf>=5.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "pgserver>=0.1.4"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101", "S105", "S106", "B008", "E501", "S311"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "E402"]
+"weza/seed.py" = ["S"]

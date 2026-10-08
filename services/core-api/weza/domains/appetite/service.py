@@ -1,0 +1,217 @@
+"""Appetite Studio & capital mandates (FSD §20, TSD §17, §24, §37). Simulation is mandatory before approval;
+approval is human (HUMAN_APPROVE_APPETITE_CHANGE, maker-checker); WEZA never changes appetite autonomously."""
+
+import uuid
+from datetime import date
+from decimal import Decimal
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from weza.domains.appetite.models import Appetite, AppetiteVersion
+from weza.domains.institution.models import Institution
+from weza.domains.matching import engine
+from weza.domains.matching.rules import OPS, ruleset_hash
+from weza.domains.product.models import Product, ProductVersion
+from weza.domains.product.service import RULE_FIELDS
+from weza.domains.trust import policy
+from weza.domains.trust.service import audit
+from weza.platform.context import Actor
+from weza.platform.db import utcnow
+from weza.platform.errors import NotFound, ValidationFailed
+from weza.platform.events import emit
+
+
+def _validate(db: Session, actor: Actor, p: dict) -> dict:
+    pids = [uuid.UUID(x) for x in p.get("product_ids") or []]
+    if not pids:
+        raise ValidationFailed("Select at least one product for this appetite.", details=[{"field": "product_ids"}])
+    owned = db.execute(select(func.count()).select_from(Product).where(Product.id.in_(pids),
+                                                                       Product.institution_id == actor.institution_id)).scalar_one()
+    if owned != len(pids):
+        raise ValidationFailed("Unknown product.")
+    crit = []
+    for c in p.get("criteria") or []:
+        if c.get("field") not in RULE_FIELDS or c.get("op") not in OPS:
+            raise ValidationFailed(f"Unsupported criterion: {c.get('field')} {c.get('op')}.")
+        crit.append({"field": c["field"], "op": c["op"], "value": c.get("value"), "label": c.get("label"),
+                     "weight": float(c.get("weight") or 1), "must": bool(c.get("must"))})
+    mm = int(p.get("min_match_score") or 60)
+    if not 0 <= mm <= 100:
+        raise ValidationFailed("Minimum match must be between 0 and 100.")
+    limits = {k: int(v) for k, v in (p.get("capacity_limits") or {}).items()
+              if k in ("daily_count", "weekly_count", "monthly_count", "monthly_value") and v not in (None, "", 0)}
+
+    def d(x):
+        return date.fromisoformat(x) if x else None
+    return {"name": p["name"].strip()[:160], "product_ids": pids, "criteria": crit, "min_match_score": mm,
+            "target_count": int(p["target_count"]) if p.get("target_count") else None,
+            "target_value": Decimal(str(p["target_value"])) if p.get("target_value") else None,
+            "capacity_limits": limits, "campaign_from": d(p.get("campaign_from")), "campaign_to": d(p.get("campaign_to"))}
+
+
+def create(db: Session, actor: Actor, payload: dict) -> AppetiteVersion:
+    policy.require(actor, "appetite.edit")
+    v = _validate(db, actor, payload)
+    ap = Appetite(institution_id=actor.institution_id, name=v["name"], lifecycle_status="DRAFT")
+    db.add(ap)
+    db.flush()
+    av = AppetiteVersion(appetite_id=ap.id, institution_id=ap.institution_id, version=1, status="DRAFT",
+                         author_id=actor.id, **v)
+    av.ruleset_hash = ruleset_hash(av.criteria, av.min_match_score)
+    db.add(av)
+    db.flush()
+    audit(db, actor, "appetite.created", "appetite", ap.id, after={"version": 1})
+    return av
+
+
+def new_version(db: Session, actor: Actor, ap: Appetite, payload: dict) -> AppetiteVersion:
+    policy.require(actor, "appetite.edit")
+    policy.require_tenant(actor, ap.institution_id)
+    v = _validate(db, actor, payload)
+    draft = db.execute(select(AppetiteVersion).where(AppetiteVersion.appetite_id == ap.id,
+                                                     AppetiteVersion.status.in_(["DRAFT", "SIMULATED"]))).scalar_one_or_none()
+    if draft is not None:
+        for k, val in v.items():
+            setattr(draft, k, val)
+        draft.status, draft.simulation_run_id, draft.author_id = "DRAFT", None, actor.id  # edits require re-simulation
+        draft.ruleset_hash = ruleset_hash(draft.criteria, draft.min_match_score)
+        return draft
+    n = db.execute(select(func.max(AppetiteVersion.version)).where(AppetiteVersion.appetite_id == ap.id)).scalar_one() or 0
+    av = AppetiteVersion(appetite_id=ap.id, institution_id=ap.institution_id, version=n + 1, status="DRAFT",
+                         author_id=actor.id, **v)
+    av.ruleset_hash = ruleset_hash(av.criteria, av.min_match_score)
+    db.add(av)
+    db.flush()
+    audit(db, actor, "appetite.version_drafted", "appetite", ap.id, after={"version": av.version})
+    return av
+
+
+def _product_versions(db: Session, product_ids) -> list[ProductVersion]:
+    out = []
+    for p in db.execute(select(Product).where(Product.id.in_(product_ids))).scalars():
+        vid = p.active_version_id or db.execute(select(ProductVersion.id).where(ProductVersion.product_id == p.id)
+                                                .order_by(ProductVersion.version.desc()).limit(1)).scalar_one_or_none()
+        if vid:
+            out.append(db.get(ProductVersion, vid))
+    return out
+
+
+def simulate_version(db: Session, actor: Actor, av: AppetiteVersion) -> dict:
+    policy.require(actor, "appetite.simulate")
+    policy.require_tenant(actor, av.institution_id)
+    result = engine.simulate(db, av.institution_id, product_versions=_product_versions(db, av.product_ids),
+                             criteria=av.criteria, min_match_score=av.min_match_score)
+    run = engine.record_simulation(db, av.institution_id, "APPETITE", {"appetite_version_id": str(av.id),
+                                   "criteria": av.criteria, "min_match_score": av.min_match_score}, result,
+                                   actor.id, av.id)
+    if av.status == "DRAFT":
+        av.status = "SIMULATED"
+        ap = db.get(Appetite, av.appetite_id)
+        if ap.lifecycle_status == "DRAFT":
+            ap.lifecycle_status = "SIMULATED"
+    av.simulation_run_id = run.id
+    audit(db, actor, "appetite.simulated", "appetite", av.appetite_id,
+          after={"version": av.version, "inside": result["inside"]})
+    emit(db, "AppetiteSimulated", topic="institution", aggregate_type="appetite", aggregate_id=av.appetite_id,
+         institution_id=av.institution_id, data={"version": av.version})
+    return {"simulation_id": str(run.id), **result}
+
+
+def simulate_adhoc(db: Session, actor: Actor, payload: dict) -> dict:
+    """What-if simulation (no persistence of the appetite) — used by Radius 'simulate a change' and the assistant."""
+    policy.require(actor, "appetite.simulate")
+    v = _validate(db, actor, {**payload, "name": payload.get("name") or "what-if"})
+    result = engine.simulate(db, actor.institution_id, product_versions=_product_versions(db, v["product_ids"]),
+                             criteria=v["criteria"], min_match_score=v["min_match_score"])
+    engine.record_simulation(db, actor.institution_id, "WHAT_IF", {"criteria": v["criteria"]}, result, actor.id)
+    return result
+
+
+def approve(db: Session, actor: Actor, av: AppetiteVersion, approve_: bool, note: str | None) -> None:
+    policy.require(actor, "appetite.activate")
+    policy.require_tenant(actor, av.institution_id)
+    if av.status != "SIMULATED" or av.simulation_run_id is None:
+        raise ValidationFailed("Run a simulation before approving this appetite.", code="SIMULATION_REQUIRED")
+    if av.author_id == actor.id:
+        raise ValidationFailed("Maker-checker: someone other than the author must approve.", code="MAKER_CHECKER")
+    ap = db.get(Appetite, av.appetite_id)
+    av.review_note = note
+    if not approve_:
+        av.status = "REJECTED"
+        audit(db, actor, "appetite.rejected", "appetite", ap.id, after={"version": av.version}, reason=note)
+        return
+    av.status, av.approver_id, av.approved_at = "APPROVED", actor.id, utcnow()
+    audit(db, actor, "appetite.approved", "appetite", ap.id, after={"version": av.version}, reason=note)
+    inst = db.get(Institution, ap.institution_id)
+    if ap.lifecycle_status in ("ACTIVE", "PAUSED") or inst.status == "ACTIVE":
+        _make_current(db, actor, ap, av)
+    else:
+        ap.lifecycle_status = "APPROVED"
+        ap.active_version_id = av.id
+
+
+def _make_current(db: Session, actor: Actor, ap: Appetite, av: AppetiteVersion) -> None:
+    now = utcnow()
+    if ap.active_version_id and ap.active_version_id != av.id:
+        old = db.get(AppetiteVersion, ap.active_version_id)
+        if old and old.status == "APPROVED":
+            old.status, old.effective_to = "SUPERSEDED", now
+    av.effective_from = now
+    was_active = ap.lifecycle_status == "ACTIVE"
+    ap.active_version_id, ap.name = av.id, av.name
+    if ap.lifecycle_status != "PAUSED":
+        ap.lifecycle_status = "ACTIVE"
+    engine.refresh_capacity(db, ap)
+    emit(db, "AppetiteChanged" if was_active else "AppetiteActivated", topic="institution", aggregate_type="appetite",
+         aggregate_id=ap.id, institution_id=ap.institution_id, data={"version": av.version})
+
+
+def activate_appetite(db: Session, actor: Actor, ap: Appetite, from_institution_activation: bool = False) -> None:
+    if not from_institution_activation:
+        policy.require(actor, "appetite.activate")
+        policy.require_tenant(actor, ap.institution_id)
+    inst = db.get(Institution, ap.institution_id)
+    if inst.status != "ACTIVE":
+        raise ValidationFailed("Activate your institution on WEZA first.", code="INSTITUTION_NOT_ACTIVE")
+    av = db.get(AppetiteVersion, ap.active_version_id) if ap.active_version_id else None
+    if av is None or av.status != "APPROVED":
+        raise ValidationFailed("Approve a version of this appetite first.")
+    _make_current(db, actor, ap, av)
+    audit(db, actor, "appetite.activated", "appetite", ap.id, after={"version": av.version})
+
+
+def set_lifecycle(db: Session, actor: Actor, ap: Appetite, to: str, reason: str) -> None:
+    if not actor.is_weza:
+        policy.require(actor, "appetite.activate")
+        policy.require_tenant(actor, ap.institution_id)
+    allowed = {"ACTIVE": {"PAUSED", "EXPIRED", "ARCHIVED"}, "PAUSED": {"ACTIVE", "ARCHIVED"},
+               "APPROVED": {"ARCHIVED"}, "DRAFT": {"ARCHIVED"}, "SIMULATED": {"ARCHIVED"}}
+    if to not in allowed.get(ap.lifecycle_status, set()):
+        raise ValidationFailed(f"Appetite cannot move from {ap.lifecycle_status} to {to}.", code="INVALID_TRANSITION")
+    before, ap.lifecycle_status = ap.lifecycle_status, to
+    audit(db, actor, f"appetite.{to.lower()}", "appetite", ap.id, before={"status": before}, after={"status": to},
+          reason=reason)
+    emit(db, "AppetiteActivated" if to == "ACTIVE" else "AppetitePaused", topic="institution",
+         aggregate_type="appetite", aggregate_id=ap.id, institution_id=ap.institution_id, data={"status": to})
+
+
+def set_capacity_override(db: Session, actor: Actor, ap: Appetite, override: str | None, reason: str) -> None:
+    policy.require(actor, "appetite.edit")
+    policy.require_tenant(actor, ap.institution_id)
+    if override not in (None, "PAUSED", "LIMITED"):
+        raise ValidationFailed("Override must be PAUSED, LIMITED or cleared.")
+    ap.capacity_override = override
+    ap.capacity_state = override or "ACTIVE"
+    engine.refresh_capacity(db, ap)
+    audit(db, actor, "appetite.capacity_override", "appetite", ap.id, after={"override": override}, reason=reason)
+    emit(db, "CapacityChanged", topic="institution", aggregate_type="appetite", aggregate_id=ap.id,
+         institution_id=ap.institution_id, data={"to": ap.capacity_state, "manual": True})
+
+
+def get_owned(db: Session, actor: Actor, appetite_id: uuid.UUID) -> Appetite:
+    ap = db.get(Appetite, appetite_id)
+    if ap is None:
+        raise NotFound("Not found.")
+    policy.require_tenant(actor, ap.institution_id)
+    return ap
