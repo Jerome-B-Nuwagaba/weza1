@@ -21,7 +21,11 @@ _ph = PasswordHasher()
 
 
 def _master_key() -> bytes:
-    raw = base64.b64decode(get_settings().vault_master_key)
+    value = get_settings().vault_master_key
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except ValueError:
+        raw = value.encode()  # platform-generated secrets may not be base64; still high-entropy
     return hashlib.sha256(raw).digest()  # normalise to 32 bytes
 
 

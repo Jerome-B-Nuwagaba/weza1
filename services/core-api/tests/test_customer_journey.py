@@ -126,7 +126,7 @@ def test_otp_failures_and_lockout(journey):
     j.send("0772100004")
     code = j.cards("otp_input")[0]["dev_code"]
     wrong = "000000" if code != "000000" else "111111"
-    for i in range(4):
+    for _ in range(4):
         j.send(wrong)
         assert "incorrect" in j.texts()[-1].lower()
     j.send(wrong)

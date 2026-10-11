@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+/* WEZA design tokens (blueprint 02 §5.2): light blue for action & trust, gold reserved for meaning. */
+:root {
+  --blue-50: #eef7fd;
+  --blue-100: #d6ecfa;
+  --blue-400: #5aaee3;
+  --blue-600: #2e8bc9;
+  --blue-700: #2477ae;
+  --blue-800: #1b5e8c;
+  --navy-900: #0e2a3f;
+  --gold-100: #fbf3dc;
+  --gold-500: #c9a227;
+  --gold-700: #8f7012;
+  --surface: #ffffff;
+  --canvas: #f6f9fc;
+  --border: #dce5ee;
+  --muted: #5b6b7a;
+  --text: #0e2a3f;
+  --success: #1f8a5b;
+  --success-bg: #e6f4ed;
+  --warning: #b7791f;
+  --warning-bg: #fbf1e1;
+  --danger: #c0392b;
+  --danger-bg: #fbe9e7;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --blue-50: #0f2233;
+    --blue-100: #14324a;
+    --blue-600: #6db8e8;
+    --blue-700: #8cc7ee;
+    --blue-800: #a9d6f3;
+    --navy-900: #e8f1f8;
+    --gold-100: #2e2610;
+    --gold-500: #d9b647;
+    --gold-700: #e6cb72;
+    --surface: #0b1620;
+    --canvas: #07111a;
+    --border: #1e3242;
+    --muted: #8fa3b5;
+    --text: #e8f1f8;
+    --success: #3cc48a;
+    --success-bg: #0f2a1e;
+    --warning: #e0a54a;
+    --warning-bg: #2a2010;
+    --danger: #e5675a;
+    --danger-bg: #2c1412;
+  }
+}
+
+@theme inline {
+  --color-blue-50: var(--blue-50);
+  --color-blue-100: var(--blue-100);
+  --color-blue-400: var(--blue-400);
+  --color-blue-600: var(--blue-600);
+  --color-blue-700: var(--blue-700);
+  --color-blue-800: var(--blue-800);
+  --color-navy: var(--navy-900);
+  --color-gold-100: var(--gold-100);
+  --color-gold-500: var(--gold-500);
+  --color-gold-700: var(--gold-700);
+  --color-surface: var(--surface);
+  --color-canvas: var(--canvas);
+  --color-line: var(--border);
+  --color-muted: var(--muted);
+  --color-ink: var(--text);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-serif4), Georgia, serif;
+}
+
+html,
+body {
+  background: var(--canvas);
+  color: var(--text);
+}
+
+body {
+  font-feature-settings: "tnum" 1, "cv11" 1;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--blue-400);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.scroll-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 8px;
+}
+
+@keyframes weza-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+.skeleton {
+  background: var(--border);
+  border-radius: 8px;
+  animation: weza-pulse 1.4s ease-in-out infinite;
+}

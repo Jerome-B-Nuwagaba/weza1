@@ -3,6 +3,7 @@
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +17,18 @@ from weza.platform.errors import install_error_handlers
 from weza.platform.logging import configure_logging
 
 log = logging.getLogger("weza.api")
-_worker = None
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    worker = None
+    if getattr(app.state, "start_worker", False):
+        from weza.worker import Worker
+        worker = Worker()
+        worker.start_thread()
+    yield
+    if worker:
+        worker.stop()
 
 
 def create_app(start_worker: bool | None = None) -> FastAPI:
@@ -24,12 +36,17 @@ def create_app(start_worker: bool | None = None) -> FastAPI:
     configure_logging()
     if s.is_production and ("local-dev" in s.secret_key or "bG9jYWwtZGV2" in s.vault_master_key):
         raise RuntimeError("Refusing to start in production with development secrets.")
-    app = FastAPI(title="WEZA Core API", version="1.0.0",
+    app = FastAPI(title="WEZA Core API", version="1.0.0", lifespan=_lifespan,
                   description="Intelligent financial marketplace — zero core-system integration.",
                   docs_url=None if s.is_production else "/docs", openapi_url="/api/v1/openapi.json")
-    app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in s.cors_origins.split(",") if o.strip()],
-                       allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
-                       expose_headers=["X-Correlation-ID"])
+    origins = [o.strip() for o in s.cors_origins.split(",") if o.strip()]
+    if origins == ["*"]:
+        # Bearer-token clients only (Flutter web): any origin, but never with cookies.
+        app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"],
+                           allow_headers=["*"], expose_headers=["X-Correlation-ID"])
+    else:
+        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"],
+                           allow_headers=["*"], expose_headers=["X-Correlation-ID"])
 
     @app.middleware("http")
     async def context_and_headers(request: Request, call_next):
@@ -60,19 +77,7 @@ def create_app(start_worker: bool | None = None) -> FastAPI:
     def healthz():
         return {"status": "ok"}
 
-    should_start = s.run_worker_inprocess if start_worker is None else start_worker
-    if should_start:
-        @app.on_event("startup")
-        def _start_worker():
-            global _worker
-            from weza.worker import Worker
-            _worker = Worker()
-            _worker.start_thread()
-
-        @app.on_event("shutdown")
-        def _stop_worker():
-            if _worker:
-                _worker.stop()
+    app.state.start_worker = s.run_worker_inprocess if start_worker is None else start_worker
     return app
 
 
