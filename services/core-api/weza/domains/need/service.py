@@ -98,12 +98,13 @@ def system_resume(db: Session, journey_id: uuid.UUID, action: str, value: str | 
     return outputs
 
 
-def _persist(db: Session, inst: GraphInstance, direction: str, content: dict, channel: str, message_id: str | None):
+def _persist(db: Session, inst: GraphInstance, direction: str, content: dict, channel: str, message_id: str | None,
+             at=None):
     msg = ConversationMessage(message_id=message_id or f"weza:{uuid.uuid4()}", session_id=inst.id,
                               customer_id=inst.customer_id, channel=channel, direction=direction,
                               message_type="TEXT" if content.get("type") == "text" else "BUTTON_RESPONSE"
                               if direction == "IN" else "SYSTEM_MESSAGE", content=content,
-                              correlation_id=correlation_id())
+                              correlation_id=correlation_id(), **({"received_at": at} if at else {}))
     try:
         with db.begin_nested():
             db.add(msg)
@@ -112,8 +113,13 @@ def _persist(db: Session, inst: GraphInstance, direction: str, content: dict, ch
 
 
 def _persist_outputs(db: Session, inst: GraphInstance, outputs: list[dict], channel: str) -> None:
-    for o in journey.format_for_channel(outputs):
-        _persist(db, inst, "OUT", o, channel, None)
+    from datetime import timedelta
+
+    from weza.platform.db import utcnow
+    base = utcnow()
+    # Explicit microsecond offsets keep outputs in the order the graph produced them.
+    for i, o in enumerate(journey.format_for_channel(outputs), start=1):
+        _persist(db, inst, "OUT", o, channel, None, at=base + timedelta(microseconds=i))
     if channel == "whatsapp":
         _send_whatsapp(db, inst, outputs)
 
@@ -146,8 +152,9 @@ def view(db: Session, journey_id: uuid.UUID, limit: int = 200) -> dict:
     msgs = db.execute(select(ConversationMessage).where(ConversationMessage.session_id == journey_id)
                       .order_by(ConversationMessage.received_at, ConversationMessage.id).limit(limit)).scalars().all()
     need = db.get(FinancialNeed, uuid.UUID(inst.state["need_id"]))
-    last_out = [m.content for m in msgs if m.direction == "OUT"]
-    pending_qr = next((o.get("quick_replies") for o in reversed(last_out) if o.get("quick_replies")), [])
+    last_in = max((i for i, m in enumerate(msgs) if m.direction == "IN"), default=-1)
+    latest_outs = [m.content for m in msgs[last_in + 1:] if m.direction == "OUT"]
+    pending_qr = next((o.get("quick_replies") for o in reversed(latest_outs) if o.get("quick_replies")), [])
     return {
         "journey_id": str(inst.id), "node": inst.current_node, "status": inst.status,
         "waiting_for": inst.waiting_for, "need": need_summary(need),

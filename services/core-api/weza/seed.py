@@ -395,6 +395,18 @@ def seed_demo_customers(db: Session, inst_map: dict, n: int = 150) -> None:
             a.assigned_at = opp.routed_at
         _progress(db, opp, a, users_by_inst[opp.institution_id], rng, idx, reasons, back,
                   lake=opp.institution_id == inst_map["lakeside"]["inst"].id)
+        if opp.state in opp_svc.OPEN_STATES - {"REPORTED_APPROVED"}:
+            # Keep in-flight demo work recent so the demo opens on a live queue, not an expired one.
+            recent = timedelta(hours=rng.randint(2, 30))
+            opp.qualified_at, opp.routed_at = now - recent, now - recent + timedelta(minutes=1)
+            opp.last_activity_at = now - recent / 2
+            if a.first_contact_due_at:
+                st_minutes = 480 if opp.institution_id == inst_map["lakeside"]["inst"].id else 1440
+                a.first_contact_due_at = opp.routed_at + timedelta(minutes=st_minutes)
+            if a.assigned_at:
+                a.assigned_at = opp.routed_at
+            if a.first_contact_at:
+                a.first_contact_at = opp.routed_at + timedelta(hours=1)
     db.flush()
     # Backdate demand so trend charts and freshness look like a live market.
     for need, _, _, age in created:

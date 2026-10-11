@@ -398,7 +398,7 @@ def ask_profile(ctx: Ctx, st: dict, t: Trigger) -> Step:
 def _progress(ctx: Ctx, st: dict) -> dict:
     need = _need(ctx, st)
     remaining = len(customer_svc.missing_questions(ctx.db, need, uuid.UUID(st["customer_id"])))
-    asked = st.get("profile_questions", 0)
+    asked = st.get("profile_questions", 0) + 1  # this question included
     return {"asked": asked, "remaining": remaining}
 
 

@@ -125,9 +125,9 @@ def _briefing(cards: dict, unassigned: int, high: list, new: list, waiting: list
     parts = [f"{len(new)} new opportunit{'ies' if len(new) != 1 else 'y'} matched your active mandates in the last "
              f"24 hours — {fmt_money(cards['qualified_demand']['value'])} requested."]
     if high:
-        parts.append(f"{len(high)} open opportunit{'ies' if len(high) != 1 else 'y'} exceed a 90% match.")
+        parts.append(f"{len(high)} open opportunit{'ies exceed' if len(high) != 1 else 'y exceeds'} a 90% match.")
     if waiting:
-        parts.append(f"{len(waiting)} customer{'s' if len(waiting) != 1 else ''} have waited over 24 hours for first contact.")
+        parts.append(f"{len(waiting)} customer{'s have' if len(waiting) != 1 else ' has'} waited over 24 hours for first contact.")
     if unassigned:
         parts.append(f"{unassigned} opportunit{'ies remain' if unassigned != 1 else 'y remains'} unassigned.")
     return " ".join(parts)

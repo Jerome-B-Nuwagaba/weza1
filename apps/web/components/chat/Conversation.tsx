@@ -46,7 +46,11 @@ export function Conversation({ attribution, seed }: { attribution: Record<string
           setView(v);
           setToken(t);
         })
-        .catch(() => tokens.setLastJourney(null));
+        .catch((e: ApiError) => {
+          // Forget the conversation only if the server rejected it; keep it across transient outages.
+          if (e.status === 403 || e.status === 404) tokens.setLastJourney(null);
+          else setError("We couldn't load your conversation. Please refresh in a moment.");
+        });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

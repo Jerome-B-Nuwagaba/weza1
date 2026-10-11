@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "services/core-api/.venv/Scripts/python.exe",
+      "runtimeArgs": ["services/core-api/scripts/dev_api.py"],
+      "port": 8000
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "apps/web", "run", "dev"],
+      "port": 3000
+    }
+  ]
+}
