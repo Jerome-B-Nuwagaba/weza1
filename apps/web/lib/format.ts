@@ -1,9 +1,11 @@
+const trim = (s: string) => (s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s);
+
 export function money(v: number | null | undefined, currency = "UGX"): string {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
   const a = Math.abs(v);
   const sign = v < 0 ? "−" : "";
-  if (a >= 1e9) return `${sign}${currency} ${(a / 1e9).toFixed(a >= 1e10 ? 1 : 2).replace(/\.0+$/, "")}B`;
-  if (a >= 1e6) return `${sign}${currency} ${(a / 1e6).toFixed(a >= 1e8 ? 0 : 1).replace(/\.0$/, "")}M`;
+  if (a >= 1e9) return `${sign}${currency} ${trim((a / 1e9).toFixed(a >= 1e10 ? 1 : 2))}B`;
+  if (a >= 1e6) return `${sign}${currency} ${trim((a / 1e6).toFixed(a >= 1e8 ? 0 : 1))}M`;
   if (a >= 1e3) return `${sign}${currency} ${Math.round(a / 1e3)}K`;
   return `${sign}${currency} ${a.toLocaleString()}`;
 }
