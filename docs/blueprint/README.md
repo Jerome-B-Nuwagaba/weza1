@@ -1,6 +1,6 @@
 # WEZA V1 — Product, Graph & Loop Architecture Blueprint
 
-**Status:** DRAFT — awaiting Product Owner approval before implementation
+**Status:** APPROVED by the Product Owner (8 Oct 2026) — implemented in this repository; see [TESTING.md](../TESTING.md)
 **Version:** 0.1 · 8 October 2026
 **Sources of truth:** WEZA BRD v1.0 (WHY) · WEZA FSD v1.0 (WHAT) · WEZA TSD v1.0 (HOW) · WEZA Master Product Design, Graph & Loop Engineering Skill
 

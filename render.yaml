@@ -11,8 +11,8 @@ services:
     name: weza-api
     runtime: docker
     plan: free            # Free tier sleeps after ~15 min idle (first request then takes ~1 min). Starter keeps it warm.
-    rootDir: services/core-api
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./services/core-api/Dockerfile
+    dockerContext: ./services/core-api
     healthCheckPath: /healthz
     autoDeploy: true
     envVars:

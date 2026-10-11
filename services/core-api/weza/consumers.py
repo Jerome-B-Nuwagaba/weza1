@@ -301,3 +301,13 @@ def unread_count(db: Session, user_id) -> int:
     from sqlalchemy import func
     return db.execute(select(func.count()).select_from(Notification).where(
         Notification.recipient_id == user_id, Notification.channel == "in_app", Notification.read_at.is_(None))).scalar_one()
+
+
+@consumer("document_rematch", ["DocumentStored"])
+def on_document_stored(db: Session, ev: OutboxEvent) -> None:
+    """A newly stored document can turn ALMOST_READY options into READY ones — re-clear that customer's demand."""
+    cid = uuid.UUID(ev.aggregate_id)
+    ids = list(db.execute(select(FinancialNeed.id).where(FinancialNeed.customer_id == cid,
+                                                         FinancialNeed.status.in_(engine.ACTIVE_DEMAND))).scalars())
+    if ids:
+        engine.clear_market(db, "DocumentStored", trigger_ref=ev.aggregate_id, need_ids=ids)

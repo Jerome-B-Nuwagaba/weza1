@@ -48,7 +48,7 @@ Direct identifiers live only in `identity.vault_record`, encrypted with AES-256-
 
 ## 6. Authentication
 - Customers: phone OTP (6 digits, HMAC-hashed with per-challenge salt, 5 min, 5 attempts, resend 3/15 min, 30 s cooldown, IP/phone throttles), session token 30 days sliding, revocable.
-- Institution/WEZA users: argon2id passwords (min 12 chars, breached-pattern check list), TOTP MFA (required for inst. admins + all WEZA users; others per institution policy), lockout 5/15 min, access JWT 15 min (EdDSA), refresh rotation with reuse detection, step-up MFA for kill switches and vault lookup. Entra ID OIDC adapter planned (C5).
+- Institution/WEZA users: argon2id passwords (min 12 chars, breached-pattern check list), TOTP MFA (required for inst. admins + all WEZA users; others per institution policy), lockout 5/15 min, access JWT 15 min (HS256 with a platform-held secret; EdDSA with Key Vault keys planned for production), refresh rotation with reuse detection, step-up MFA for kill switches and vault lookup. Entra ID OIDC adapter planned (C5).
 
 ## 7. Data classification (TSD §49)
 Each field is classified in `trust/classification.py` (PUBLIC, INTERNAL, CONFIDENTIAL, PERSONAL, HIGHLY_SENSITIVE). The classification drives log redaction, disclosure categories, export restrictions and retention.
