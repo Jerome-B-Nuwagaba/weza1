@@ -1,6 +1,7 @@
 """Test harness: a disposable PostgreSQL database (CI service or local pgserver), migrated with Alembic and
 seeded once through the real services. Event delivery is drained explicitly so tests are deterministic."""
 
+import logging
 import os
 import subprocess
 import sys
@@ -14,6 +15,7 @@ os.environ.setdefault("RUN_WORKER_INPROCESS", "false")
 os.environ.setdefault("OTP_DELIVERY", "display")
 os.environ.setdefault("ENV", "test")
 os.environ.pop("ANTHROPIC_API_KEY", None)  # tests exercise the deterministic (AI-unavailable) path by default
+logging.getLogger("pgserver").setLevel(logging.CRITICAL)
 
 
 def _admin_url() -> str:

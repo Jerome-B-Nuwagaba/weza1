@@ -54,13 +54,12 @@ def describe(rule: dict) -> str:
         return rule["label"]
     f, op, v = rule["field"], rule["op"], rule.get("value")
     name = FIELD_LABELS.get(f, f)
-    return {
-        "gte": f"{name} at least {fmt(f, v)}", "lte": f"{name} at most {fmt(f, v)}",
-        "between": f"{name} between {fmt(f, v[0])} and {fmt(f, v[1])}" if isinstance(v, list) else name,
-        "in": f"{name}: {fmt(f, v)}", "not_in": f"{name} not {fmt(f, v)}", "eq": f"{name} is {fmt(f, v)}",
-        "neq": f"{name} is not {fmt(f, v)}", "is_true": name, "exists": f"{name} provided",
-        "contains": f"{name} includes {fmt(f, v)}",
-    }.get(op, name)
+    if op == "between":
+        return f"{name} between {fmt(f, v[0])} and {fmt(f, v[1])}" if isinstance(v, list) and len(v) == 2 else name
+    templates = {"gte": "{n} at least {v}", "lte": "{n} at most {v}", "in": "{n}: {v}", "not_in": "{n} not {v}",
+                 "eq": "{n} is {v}", "neq": "{n} is not {v}", "is_true": "{n}", "exists": "{n} provided",
+                 "contains": "{n} includes {v}"}
+    return templates.get(op, "{n}").format(n=name, v=fmt(f, v))
 
 
 def evaluate(rule: dict, fields: dict) -> dict:

@@ -1,0 +1,152 @@
+"""Trust plane: tenant isolation, disclosure gateway, preview allow-list, redaction, audit, error contract
+(AT-SEC-01…06, AT-31, AT-48, AT-49, AT-API-01)."""
+
+import logging
+import re
+from pathlib import Path
+
+import pytest
+import sqlalchemy as sa
+from sqlalchemy import select
+
+from weza.consumers import preview_payload
+from weza.domains.identity.models import User
+from weza.domains.institution.models import Institution
+from weza.domains.matching.models import Match
+from weza.domains.need.models import FinancialNeed
+from weza.domains.opportunity.models import Assignment, Opportunity
+from weza.platform.db import session_scope
+from weza.platform.logging import JsonFormatter, redact
+
+
+def _opp_for(inst_name: str, assigned: bool = True) -> tuple[str, str | None]:
+    with session_scope() as db:
+        inst = db.execute(select(Institution).where(Institution.display_name == inst_name)).scalar_one()
+        q = select(Opportunity, Assignment).join(Assignment, Assignment.opportunity_id == Opportunity.id).where(
+            Opportunity.institution_id == inst.id, Opportunity.state.in_(["ASSIGNED", "CONTACTED", "PROCEEDING"]))
+        q = q.where(Assignment.user_id.is_not(None)) if assigned else q
+        o, a = db.execute(q.limit(1)).first()
+        owner = db.get(User, a.user_id).email if a.user_id else None
+        return str(o.id), owner
+
+
+def test_cross_tenant_access_is_404(client, as_user):
+    """AT-SEC-01: Institution A cannot see that Institution B's opportunity exists."""
+    opp_id, _ = _opp_for("Pearl SACCO")
+    r = client.get(f"/api/v1/inst/opportunities/{opp_id}", headers=as_user("manager@lakeside.demo"))
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "NOT_FOUND"
+
+
+def test_assigned_officer_sees_consented_fields_unassigned_officer_does_not(client, as_user):
+    """AT-SEC-02 / TSD §29: disclosure depends on relationship + consent, enforced server-side."""
+    opp_id, owner = _opp_for("Lakeside Bank")
+    r = client.get(f"/api/v1/inst/opportunities/{opp_id}", headers=as_user(owner))
+    assert r.status_code == 200
+    cust = r.json()["customer"]
+    assert cust["restricted"] is False and cust["fields"].get("phone", "").startswith("+256")
+    other = next(e for e in ("officer@lakeside.demo", "officer2@lakeside.demo", "asset@lakeside.demo") if e != owner)
+    r2 = client.get(f"/api/v1/inst/opportunities/{opp_id}", headers=as_user(other))
+    assert r2.status_code == 200
+    assert r2.json()["customer"]["restricted"] is True and r2.json()["customer"]["fields"] == {}
+    # Executives get opportunity intelligence but never identity
+    r3 = client.get(f"/api/v1/inst/opportunities/{opp_id}", headers=as_user("exec@lakeside.demo"))
+    assert r3.json()["customer"]["fields"] == {}
+
+
+def test_consent_withdrawal_hides_identity(client, as_user, journey):
+    """AT-18: after withdrawal, new views no longer disclose identifiable fields."""
+    from tests.helpers import SME_ANSWERS
+    j = journey("I need UGX 20 million to buy stock for my pharmacy")
+    j.send(action="confirm")
+    j.verify("0772200001")
+    j.answer_profile({**SME_ANSWERS, "identity.nin": "CM0772200001AB"})
+    opt = next(o for o in j.cards("options")[0]["options"] if o["institution"] == "Lakeside Bank")
+    j.send(action="select", value=opt["match_id"])
+    j.send(action="agree", value=j.cards("consent")[0]["template_id"])
+    ref = j.cards("submitted")[0]["reference"]
+    from weza.platform.events import drain
+    drain()
+    with session_scope() as db:
+        o = db.execute(select(Opportunity).where(Opportunity.reference == ref)).scalar_one()
+        owner = db.get(User, db.get(Assignment, o.id).user_id).email
+        oid = str(o.id)
+    h = as_user(owner)
+    assert client.get(f"/api/v1/inst/opportunities/{oid}", headers=h).json()["customer"]["fields"]
+    consents = client.get("/api/v1/me/consents", headers=j.customer_headers).json()["consents"]
+    r = client.post(f"/api/v1/me/consents/{consents[0]['id']}/withdraw", headers=j.customer_headers)
+    assert r.status_code == 200
+    after = client.get(f"/api/v1/inst/opportunities/{oid}", headers=h).json()
+    assert after["customer"]["fields"] == {} and after["customer"]["restriction_reason"] == "consent_not_valid"
+
+
+def test_preview_payload_is_non_identifiable():
+    """AT-31 / FSD-PRV-001: preview never exposes direct identifiers."""
+    with session_scope() as db:
+        m = db.execute(select(Match).where(Match.state.in_(["RANKED", "PRESENTED", "SELECTED"])).limit(1)).scalar_one()
+        need = db.get(FinancialNeed, m.need_id)
+        payload = preview_payload(need, m)
+    assert set(payload) <= {"customer_type", "sector", "region", "purpose_category", "amount_band", "match_band",
+                            "readiness"}
+    assert "district" not in payload
+
+
+def test_staff_endpoints_require_auth_and_role(client, as_user):
+    assert client.get("/api/v1/inst/command-centre").status_code == 401
+    r = client.get("/api/v1/admin/overview", headers=as_user("manager@lakeside.demo"))
+    assert r.status_code == 403
+    r = client.post("/api/v1/inst/products", json={"name": "Officer product", "family": "SME_GROWTH", "terms": {"min_amount": 1, "max_amount": 2}},
+                    headers=as_user("officer@lakeside.demo"))
+    assert r.status_code == 403 and r.json()["error"]["code"] == "PERMISSION_DENIED"
+
+
+def test_error_contract_shape(client):
+    """AT-API-01 / TSD §59."""
+    r = client.post("/api/v1/journeys", json={"channel": "fax"})
+    body = r.json()
+    assert r.status_code == 422
+    assert set(body["error"]) >= {"code", "message", "correlation_id", "retryable", "details"}
+    assert r.headers["X-Correlation-ID"] == body["error"]["correlation_id"] or body["error"]["correlation_id"]
+
+
+def test_login_rate_limit_and_lockout(client):
+    """AT-SEC-05: brute-force controls."""
+    codes = [client.post("/api/v1/auth/login", json={"email": "compliance@pearl.demo", "password": "wrong-password-x"}
+                         ).status_code for _ in range(6)]
+    assert codes[:5] == [401] * 5
+    r = client.post("/api/v1/auth/login", json={"email": "compliance@pearl.demo", "password": "WezaDemo!2026"})
+    assert r.status_code == 401 and r.json()["error"]["code"] == "ACCOUNT_LOCKED"
+
+
+def test_log_redaction():
+    """AT-SEC-06 / TSD §66."""
+    rec = logging.LogRecord("t", logging.INFO, "", 0, "call +256772123456 nin CM1234567890AB a@b.co", None, None)
+    rec.data = {"phone": "+256772123456", "otp": "123456", "amount": 5}
+    out = JsonFormatter().format(rec)
+    assert "772123456" not in out and "CM1234567890AB" not in out and "123456" not in out and "a@b.co" not in out
+    assert redact({"nested": {"password": "x"}}) == {"nested": {"password": "[REDACTED]"}}
+
+
+def test_audit_is_append_only(database):
+    """AT-48 / TSD §53: audit rows cannot be updated or deleted."""
+    eng = sa.create_engine(database)
+    with pytest.raises(Exception, match="append-only"):
+        with eng.begin() as c:
+            c.execute(sa.text("UPDATE trust.audit_event SET action='tampered' WHERE id = (SELECT id FROM "
+                              "trust.audit_event LIMIT 1)"))
+    with pytest.raises(Exception, match="append-only"):
+        with eng.begin() as c:
+            c.execute(sa.text("DELETE FROM trust.audit_event WHERE id = (SELECT id FROM trust.audit_event LIMIT 1)"))
+
+
+def test_zero_core_integration_boundary():
+    """AT-49 / FR-039: the only outbound HTTP calls are the customer channel (WhatsApp) and the AI provider —
+    there is no connector to any institution core banking, CRM, LOS or database."""
+    root = Path(__file__).resolve().parents[1] / "weza"
+    offenders = []
+    for f in root.rglob("*.py"):
+        src = f.read_text(encoding="utf8")
+        if re.search(r"httpx\.(get|post|put|request|Client)|requests\.|urllib\.request", src):
+            offenders.append(f.relative_to(root).as_posix())
+    assert offenders == ["domains/notification/service.py"], offenders
+    assert "graph.facebook.com" in (root / "domains/notification/service.py").read_text(encoding="utf8")

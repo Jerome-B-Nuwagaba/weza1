@@ -437,8 +437,8 @@ def suppress(counter: Counter, k: int = K_ANON) -> dict:
             out[key] = n
         else:
             other += n
-    if other:
-        out["Other (fewer than 5 each)"] = other
+    if other >= k:
+        out[f"Other (fewer than {k} each)"] = other  # merged cells below k are dropped entirely
     return out
 
 

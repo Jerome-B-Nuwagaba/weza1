@@ -18,10 +18,16 @@ from weza.platform.models import FeatureFlag, IdempotencyKey, KillSwitch
 def rate_limit(db: Session, bucket: str, limit: int, window_seconds: int, message: str | None = None) -> None:
     now = utcnow()
     window_start = datetime.fromtimestamp(int(now.timestamp()) // window_seconds * window_seconds, tz=now.tzinfo)
-    count = db.execute(text(
-        "INSERT INTO platform.rate_counter(bucket, window_start, count) VALUES (:b, :w, 1) "
-        "ON CONFLICT (bucket, window_start) DO UPDATE SET count = platform.rate_counter.count + 1 RETURNING count"
-    ), {"b": bucket, "w": window_start}).scalar_one()
+    from weza.platform.db import SessionLocal
+    own = SessionLocal()  # independent transaction: the caller's rollback must not erase the attempt
+    try:
+        count = own.execute(text(
+            "INSERT INTO platform.rate_counter(bucket, window_start, count) VALUES (:b, :w, 1) "
+            "ON CONFLICT (bucket, window_start) DO UPDATE SET count = platform.rate_counter.count + 1 RETURNING count"
+        ), {"b": bucket, "w": window_start}).scalar_one()
+        own.commit()
+    finally:
+        own.close()
     if count > limit:
         raise RateLimited(message or "Too many attempts. Please wait a moment and try again.")
 

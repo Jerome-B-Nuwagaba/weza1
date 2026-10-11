@@ -214,6 +214,7 @@ def login(db: Session, email: str, password: str, ip: str = "") -> dict:
             user.failed_logins = 0
         audit(db, Actor(kind="ANONYMOUS", display=email), "auth.login_failed", "user", user.id,
               institution_id=None)
+        db.commit()  # failure counters & audit must survive the error response's rollback
         raise Unauthorized("Email or password is incorrect.", code="INVALID_CREDENTIALS")
     user.failed_logins = 0
     if mfa_required(user):

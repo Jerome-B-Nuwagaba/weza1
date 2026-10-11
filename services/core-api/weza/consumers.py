@@ -210,6 +210,13 @@ def on_approval_needed(db: Session, ev: OutboxEvent) -> None:
                               "ProductPaused", "InstitutionActivated", "InstitutionPaused", "InstitutionSuspended",
                               "KillSwitchChanged", "CustomerReactivated", "OpportunityExpired"])
 def on_market_change(db: Session, ev: OutboxEvent) -> None:
+    if ev.event_type in ("ProductPaused", "AppetitePaused", "InstitutionPaused", "InstitutionSuspended"):
+        # Never leave a withdrawn product/mandate/institution in anyone's options (Skill §21)
+        col = {"ProductPaused": Match.product_id, "AppetitePaused": Match.appetite_id}.get(ev.event_type, Match.institution_id)
+        for m in db.execute(select(Match).where(col == uuid.UUID(ev.aggregate_id),
+                                                Match.state.in_(["CANDIDATE", "ELIGIBLE", "RANKED", "PRESENTED",
+                                                                 "SELECTED"]))).scalars():
+            m.state, m.invalidated_reason = "INVALIDATED", f"{ev.event_type.lower()}"
     engine.clear_market(db, ev.event_type, trigger_ref=ev.aggregate_id)
 
 
