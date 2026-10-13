@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowRight, Building2, MessageCircle, ShieldCheck, Sparkles } from "lucide-react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { whatsappHref } from "@/lib/whatsapp";
@@ -9,21 +9,16 @@ import { PublicShell } from "@/components/PublicShell";
 import { Button, inputCls } from "@/components/ui";
 
 function Landing() {
-  const router = useRouter();
   const params = useSearchParams();
   const [text, setText] = useState("");
   const [stats, setStats] = useState<any>(null);
   const [waNumber, setWaNumber] = useState<string | null>(null);
+  const [sim, setSim] = useState(false);
+  const attribution = Object.fromEntries(["src", "cmp", "ptn", "ref"].filter((k) => params.get(k)).map((k) => [k, params.get(k)!]));
   useEffect(() => {
     api("/public/stats").then(setStats).catch(() => undefined);
-    api("/public/config").then((c: any) => setWaNumber(c?.whatsapp_number || null)).catch(() => undefined);
+    api("/public/config").then((c: any) => { setWaNumber(c?.whatsapp_number || null); setSim(!!c?.features?.whatsapp_simulator && !!c?.demo_mode); }).catch(() => undefined);
   }, []);
-  const qs = () => {
-    const p = new URLSearchParams();
-    ["src", "cmp", "ptn", "ref"].forEach((k) => params.get(k) && p.set(k, params.get(k)!));
-    if (text.trim()) p.set("q", text.trim());
-    return p.toString();
-  };
   return (
     <PublicShell>
       <section className="border-b border-line bg-surface">
@@ -34,13 +29,18 @@ function Landing() {
             <p className="mt-4 max-w-xl text-[17px] text-muted">
               Describe your need in your own words. WEZA asks only the questions that matter, shows you participating institutions that fit — and shares your request only with the one you choose.
             </p>
-            <form onSubmit={(e) => { e.preventDefault(); router.push(`/start?${qs()}`); }} className="mt-7 flex max-w-xl flex-col gap-2 sm:flex-row">
-              <input value={text} onChange={(e) => setText(e.target.value)} placeholder="e.g. I need UGX 30 million to expand my pharmacy" className={`${inputCls} h-12 text-[15px]`} aria-label="Describe your financing need" />
-              <Button type="submit" size="lg">Start <ArrowRight className="h-4 w-4" /></Button>
-            </form>
-            <div className="mt-3 flex items-center gap-3 text-[14px]">
-              <Button href={waNumber ? whatsappHref(waNumber, text, Object.fromEntries(["src", "cmp", "ptn", "ref"].filter((k) => params.get(k)).map((k) => [k, params.get(k)!]))) : `/whatsapp-sim?${qs()}`} variant="ghost" size="sm"><MessageCircle className="h-4 w-4" /> Continue on WhatsApp</Button>
+            <div className="mt-7 flex max-w-xl flex-col gap-2 sm:flex-row">
+              <input value={text} onChange={(e) => setText(e.target.value)} placeholder="e.g. I need UGX 30 million to expand my pharmacy" className={`${inputCls} h-12 text-[15px]`} aria-label="Describe your financing need (optional)" />
+              {waNumber ? (
+                <Button href={whatsappHref(waNumber, text, attribution)} size="lg"><MessageCircle className="h-4 w-4" /> Continue on WhatsApp <ArrowRight className="h-4 w-4" /></Button>
+              ) : (
+                <Button size="lg" disabled><MessageCircle className="h-4 w-4" /> WhatsApp coming soon</Button>
+              )}
             </div>
+            <p className="mt-3 max-w-xl text-[13.5px] text-muted">
+              {waNumber ? "This opens WhatsApp, as if you were texting a person. Your conversation with WEZA continues there." : "WEZA's WhatsApp number is not connected yet."}
+              {!waNumber && sim && <> Developers: <a className="text-blue-800 underline" href="/whatsapp-sim">open the local WhatsApp simulator</a>.</>}
+            </p>
           </div>
           <div className="rounded-2xl border border-line bg-canvas p-6">
             <div className="text-[13px] font-semibold text-muted">How it works</div>

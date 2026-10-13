@@ -283,7 +283,9 @@ def notify_customer(db: Session, customer_id: uuid.UUID, event_type: str, *, tit
                         status="DELIVERED"))
     phone = vault_read(db, cust.vault_token).get("phone")
     if phone:
-        text = f"WEZA: {body}" + (f" {get_settings().public_web_url}{link}" if link else "")
+        # WhatsApp customers live in the chat (no web session): no web link, just tell them where to reply.
+        text = (f"WEZA: {body} Reply here any time." if ch == "whatsapp"
+                else f"WEZA: {body}" + (f" {get_settings().public_web_url}{link}" if link else ""))
         send_customer_message(db, phone, text, channel=ch, kind=event_type, payload={"quick_replies": quick_replies or []})
 
 

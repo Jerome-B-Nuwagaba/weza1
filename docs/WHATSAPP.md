@@ -4,6 +4,15 @@ How WhatsApp works in WEZA, how to run it locally against the simulator, and how
 Real values live ONLY in `services/core-api/.env` (untracked). Anything that is empty, unset or `REPLACE_ME` means
 "not configured": the app stays in simulator mode and never calls Meta or an SMS provider.
 
+## How customers use WEZA
+The conversation happens only on WhatsApp. Anyone can message the organisation's WhatsApp number directly, describe the financing
+they need and be answered — no website needed. The website only hands people over: the landing page's *Continue on WhatsApp*
+button and `/start` (used by QR codes and campaign/partner links, e.g. `/start?src=qr&cmp=Q4SME&q=...`) open
+`wa.me/<WHATSAPP_BUSINESS_NUMBER>` with the need and the campaign reference pre-filled, as if texting a person. The institution
+side (sign-in, workspace, opportunity feed) stays on the web. Outcome updates reach the customer inside WhatsApp (no web links).
+Note: Meta only allows free-form business messages within 24 hours of the customer's last message; later updates need approved
+templates (not yet built).
+
 ## Flow
 Meta → `POST /api/v1/channels/whatsapp/webhook` (signature checked, message stored once in `notification.whatsapp_inbox`,
 200 returned) → outbox event → worker → `public.inbound()` → `need.service.handle_input()` → replies through

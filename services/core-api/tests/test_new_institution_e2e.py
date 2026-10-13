@@ -95,6 +95,7 @@ def test_new_institution_receives_a_whatsapp_customers_opportunity(client, as_us
     detail = client.get(f"/api/v1/inst/opportunities/{opp_id}", headers=inst["mgr"]).json()
     assert detail["customer"]["fields"]["full_name"] == "Grace Nakato"
     assert detail["customer"]["fields"]["phone"].endswith(phone[-9:])
+    assert detail["customer"]["fields"]["contact_channel"] == "whatsapp"  # reach them where they are
     assert detail["consent"]["status"] == "GRANTED"
     assert detail["state"] in ("ASSIGNED", "ROUTED", "RECEIVED")
 
@@ -104,3 +105,22 @@ def test_new_institution_receives_a_whatsapp_customers_opportunity(client, as_us
     assert client.get(f"/api/v1/inst/opportunities/{opp_id}", headers=other).status_code == 404
     with session_scope() as db:
         assert db.execute(select(Opportunity).where(Opportunity.id == uuid.UUID(opp_id))).scalar_one().institution_id
+
+
+def test_whatsapp_customers_get_self_contained_notifications_without_web_links(client, as_user, wa_inbound):
+    """After consent the customer is notified of institution outcomes inside WhatsApp: no web link (they have no web
+    session) and an invitation to reply in the chat."""
+    from weza.domains.customer.models import Customer
+    from weza.domains.notification import service as notify
+    suffix = uuid.uuid4().hex[:6]
+    _onboard(client, as_user, suffix)
+    phone = fake_phone()
+    verified_journey(client, phone)
+    with session_scope() as db:
+        from weza.platform.models import GraphInstance
+        gi = db.get(GraphInstance, journeys_for(phone)[0][0])
+        cust = db.get(Customer, uuid.UUID(gi.state["customer_id"]))
+        notify.notify_customer(db, cust.id, "OutcomeReported", title="Update", body="Acacia reported your request approved.",
+                               link="/c/status", channel="whatsapp")
+    last = [m for m in out_messages(phone) if m.channel == "whatsapp"][-1].body
+    assert "Reply here any time" in last and "/c/status" not in last and "http" not in last
