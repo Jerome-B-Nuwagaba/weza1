@@ -20,6 +20,9 @@ from weza.platform.db import utcnow
 
 log = logging.getLogger("weza.notify")
 MAX_ATTEMPTS = 5
+RETRY_BACKOFF_SECONDS = 60  # multiplied by the attempt number
+RETRY_MAX_RESENDS = 2
+RETRY_WINDOW_MINUTES = 30  # conversation messages go stale; never replay them hours later
 PRIORITY_ORDER = {"NORMAL": 0, "HIGH": 1, "URGENT": 2}
 
 
@@ -50,6 +53,11 @@ def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: s
         res = _whatsapp_send(phone_e164, body, payload)
         status = "SENT" if res.ok else "FAILED"
         wamid, error_code = res.provider_message_id, res.error_code
+        if not res.ok:  # names/flags only — never the number or the message text
+            log.warning("whatsapp_send_failed", extra={"data": {"err": res.error_code, "retryable": res.retryable}})
+            if res.retryable:
+                payload = {**(payload or {}), "_retry_to": _enc_phone(phone_e164), "_retries": 0,
+                           "_retry_after": (utcnow() + timedelta(seconds=RETRY_BACKOFF_SECONDS)).isoformat()}
     elif channel == "sms" and s.sms_provider_name != "console":
         # >>> USER INPUT REQUIRED: real SMS delivery is not implemented yet (step e) — choose a provider and set
         # SMS_PROVIDER + its credentials in services/core-api/.env. Until then nothing is sent to a provider.
@@ -58,6 +66,49 @@ def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: s
                           payload={"kind": kind, **(payload or {})}, provider=provider, status=status,
                           provider_message_id=wamid, error_code=error_code))
     return status == "SENT"
+
+
+def _enc_phone(phone_e164: str) -> str:
+    from weza.domains.need.journey import _enc
+    return _enc(phone_e164)
+
+
+def _dec_phone(token: str) -> str:
+    from weza.domains.need.journey import _dec
+    return _dec(token)
+
+
+def retry_failed_channel_messages(db: Session, now: datetime | None = None) -> int:
+    """Re-send recent WhatsApp messages that failed with a retryable error (429/5xx/network), a couple of times."""
+    now = now or utcnow()
+    s = get_settings()
+    if not s.whatsapp_send_ready:
+        return 0
+    rows = db.execute(select(ChannelMessage).where(
+        ChannelMessage.provider == "whatsapp_cloud", ChannelMessage.status == "FAILED",
+        ChannelMessage.payload.has_key("_retry_to"),  # noqa: W601 — JSONB key test, not dict.has_key
+        ChannelMessage.created_at >= now - timedelta(minutes=RETRY_WINDOW_MINUTES))
+        .order_by(ChannelMessage.created_at).limit(50).with_for_update(skip_locked=True)).scalars().all()
+    n = 0
+    for m in rows:
+        meta = m.payload
+        if datetime.fromisoformat(meta["_retry_after"]) > now:
+            continue
+        n += 1
+        res = _whatsapp_send(_dec_phone(meta["_retry_to"]), m.body, meta)
+        clean = {k: v for k, v in meta.items() if not k.startswith("_retry")}
+        if res.ok:
+            m.status, m.provider_message_id, m.error_code, m.payload = "SENT", res.provider_message_id, None, clean
+        else:
+            m.error_code = res.error_code
+            tries = meta["_retries"] + 1
+            if res.retryable and tries < RETRY_MAX_RESENDS:
+                m.payload = {**meta, "_retries": tries,
+                             "_retry_after": (now + timedelta(seconds=RETRY_BACKOFF_SECONDS * (tries + 1))).isoformat()}
+            else:
+                m.payload = clean
+                log.warning("whatsapp_retry_gave_up", extra={"data": {"err": res.error_code}})
+    return n
 
 
 def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> SendResult:

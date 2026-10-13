@@ -10,6 +10,7 @@ import hmac
 import itertools
 import json
 import logging
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -23,7 +24,7 @@ from weza.domains.need.models import ConversationMessage
 from weza.domains.notification import service as notify
 from weza.platform import crypto
 from weza.platform.controls import rate_limit
-from weza.platform.db import session_scope
+from weza.platform.db import session_scope, utcnow
 from weza.platform.events import drain
 from weza.platform.logging import JsonFormatter
 from weza.platform.models import GraphInstance
@@ -59,10 +60,13 @@ class Http:
         self.calls.append({"url": url, "json": json, "headers": headers})
         if self.behaviour == "timeout":
             raise httpx.ConnectTimeout("fake timeout")
-        code = 500 if self.behaviour == "http500" else 200
         self.n += 1
-        return httpx.Response(code, json={"messages": [{"id": f"wamid.FAKE_OUT_{next(_wamid)}"}]},
-                              request=httpx.Request("POST", url))
+        req = httpx.Request("POST", url)
+        errors = {"http500": (500, 0), "http429": (429, 130429), "http400": (400, 131030)}
+        if self.behaviour in errors:
+            code, err = errors[self.behaviour]
+            return httpx.Response(code, json={"error": {"code": err, "message": "fake"}} if err else {}, request=req)
+        return httpx.Response(200, json={"messages": [{"id": f"wamid.FAKE_OUT_{next(_wamid)}"}]}, request=req)
 
 
 @pytest.fixture(autouse=True)
@@ -564,3 +568,86 @@ def test_processing_failure_keeps_message_pending_for_retry(client, wa_inbound, 
     monkeypatch.setattr(public, "inbound", boom)
     assert text_msg(client, phone, "I need 5 million for stock for my shop").status_code == 200
     assert [r.status for r in inbox_rows(phone)] == ["PENDING"] and journeys_for(phone) == []
+
+
+# ------------------------------------------------------------------ outbound failures and retries (step d)
+
+
+def _send_one(phone, body="Your request is moving along."):
+    with session_scope() as db:
+        return notify.send_customer_message(db, "+" + phone, body, channel="whatsapp", kind="test")
+
+
+def _retry_sweep(minutes=2):
+    with session_scope() as db:
+        return notify.retry_failed_channel_messages(db, now=utcnow() + timedelta(minutes=minutes))
+
+
+@pytest.mark.parametrize("behaviour,code,retryable", [("http429", "130429", True), ("http500", "HTTP_500", True),
+                                                      ("timeout", "NETWORK", True), ("http400", "131030", False)])
+def test_failure_classification_and_recording(wa_live, http, behaviour, code, retryable):
+    http.behaviour = behaviour
+    phone = fake_phone()
+    assert _send_one(phone) is False
+    (m,) = out_messages(phone)
+    assert m.status == "FAILED" and m.provider == "whatsapp_cloud" and m.error_code == code
+    assert m.provider_message_id is None
+    assert ("_retry_to" in m.payload) is retryable
+
+
+def test_retryable_failure_is_resent_by_the_sweep_and_recorded(wa_live, http):
+    http.behaviour = "http500"
+    phone = fake_phone()
+    _send_one(phone)
+    _retry_sweep(minutes=0)  # backoff: not due yet
+    assert out_messages(phone)[0].status == "FAILED"
+    http.behaviour = "ok"
+    _retry_sweep()
+    (m,) = out_messages(phone)
+    assert m.status == "SENT" and m.error_code is None and m.provider_message_id.startswith("wamid.FAKE_OUT_")
+    assert "_retry_to" not in m.payload
+    n = http.n
+    _retry_sweep()
+    assert http.n == n  # nothing left to retry for this message
+
+
+def test_retries_are_capped(wa_live, http):
+    http.behaviour = "http500"
+    phone = fake_phone()
+    _send_one(phone)
+    for minutes in (2, 10, 20, 25):
+        _retry_sweep(minutes=minutes)
+    (m,) = out_messages(phone)
+    assert m.status == "FAILED" and "_retry_to" not in m.payload
+    assert len(http.calls) >= 3 and "_retry_to" not in m.payload  # initial send + retries, then it gives up
+
+
+def test_stale_failed_messages_are_not_retried(wa_live, http):
+    http.behaviour = "http500"
+    phone = fake_phone()
+    _send_one(phone)
+    http.behaviour = "ok"
+    with session_scope() as db:
+        notify.retry_failed_channel_messages(db, now=utcnow() + timedelta(hours=2))
+    assert out_messages(phone)[0].status == "FAILED"
+
+
+def test_permanent_failure_is_not_retried(wa_live, http):
+    http.behaviour = "http400"
+    phone = fake_phone()
+    _send_one(phone)
+    http.behaviour = "ok"
+    _retry_sweep()
+    assert out_messages(phone)[0].status == "FAILED" and out_messages(phone)[0].error_code == "131030"
+
+
+def test_outbound_failure_logs_carry_no_pii(wa_live, http, caplog, capsys):
+    http.behaviour = "http500"
+    phone, body = fake_phone(), "Secret body ZEBRA-MARKER-5512"
+    with caplog.at_level(logging.DEBUG):
+        _send_one(phone, body)
+        _retry_sweep()
+    blob = capsys.readouterr().out + " ".join(
+        JsonFormatter().format(r) + r.getMessage() + str(getattr(r, "data", "")) for r in caplog.records)
+    assert phone not in blob and phone[3:] not in blob and "ZEBRA-MARKER-5512" not in blob
+    assert any(r.getMessage() == "whatsapp_send_failed" for r in caplog.records)
