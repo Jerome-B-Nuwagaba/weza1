@@ -49,7 +49,7 @@ def public_config(db: Session = DB):
             "regions": cfg["regions"], "sectors": cfg["sectors"], "purpose_categories": cfg["purpose_categories"],
             "institution_types": cfg["institution_types"], "regulators": cfg["regulators"],
             "demo_mode": s.demo_mode and not s.is_production, "ai_mode": ai_mode(db),
-            "whatsapp_live": bool(s.whatsapp_token), "features": {
+            "whatsapp_live": s.whatsapp_send_ready, "features": {
                 "whatsapp_simulator": flag(db, "channel.whatsapp_simulator", True),
                 "preview": flag(db, "marketplace.preview", False)}}
 
@@ -138,7 +138,7 @@ def post_message(journey_id: uuid.UUID, body: JourneyInput, x_journey_token: str
 def whatsapp_verify(hub_mode: str = Query(None, alias="hub.mode"), hub_token: str = Query(None, alias="hub.verify_token"),
                     hub_challenge: str = Query("", alias="hub.challenge")):
     s = get_settings()
-    if hub_mode == "subscribe" and s.whatsapp_verify_token and hmac.compare_digest(hub_token or "", s.whatsapp_verify_token):
+    if hub_mode == "subscribe" and s.whatsapp_verify_ready and hmac.compare_digest(hub_token or "", s.whatsapp_verify_token):
         return hub_challenge
     raise Forbidden("Verification failed.")
 
@@ -147,7 +147,7 @@ def whatsapp_verify(hub_mode: str = Query(None, alias="hub.mode"), hub_token: st
 async def whatsapp_webhook(request: Request, x_hub_signature_256: str | None = Header(None), db: Session = DB):
     s = get_settings()
     raw = await request.body()
-    if not s.whatsapp_app_secret:
+    if not s.whatsapp_webhook_ready:
         raise Forbidden("WhatsApp is not configured.")
     expected = "sha256=" + hmac.new(s.whatsapp_app_secret.encode(), raw, hashlib.sha256).hexdigest()
     if not x_hub_signature_256 or not hmac.compare_digest(expected, x_hub_signature_256):

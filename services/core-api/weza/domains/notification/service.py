@@ -35,11 +35,13 @@ def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: s
         return False
     provider = "simulator"
     status = "SENT"
-    if channel == "whatsapp" and s.whatsapp_token and s.whatsapp_phone_number_id:
+    if channel == "whatsapp" and s.whatsapp_send_ready:
         provider = "whatsapp_cloud"
         status = "SENT" if _whatsapp_send(phone_e164, body, payload) else "FAILED"
-    elif channel == "sms" and s.sms_provider not in ("console", "simulator"):
-        provider = s.sms_provider  # adapter slot: Africa's Talking / Twilio — configured at deployment
+    elif channel == "sms" and s.sms_provider_name != "console":
+        # >>> USER INPUT REQUIRED: real SMS delivery is not implemented yet (step e) — choose a provider and set
+        # SMS_PROVIDER + its credentials in services/core-api/.env. Until then nothing is sent to a provider.
+        provider = s.sms_provider_name
     db.add(ChannelMessage(channel=channel, to_index=crypto.blind_index("phone", phone_e164), body=body,
                           payload={"kind": kind, **(payload or {})}, provider=provider, status=status))
     return status == "SENT"
@@ -47,7 +49,7 @@ def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: s
 
 def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> bool:
     s = get_settings()
-    url = f"https://graph.facebook.com/v21.0/{s.whatsapp_phone_number_id}/messages"
+    url = f"https://graph.facebook.com/{s.graph_api_version}/{s.whatsapp_phone_number_id}/messages"
     buttons = (payload or {}).get("quick_replies") or []
     if buttons and len(buttons) <= 3:
         msg = {"messaging_product": "whatsapp", "to": phone_e164.lstrip("+"), "type": "interactive",
