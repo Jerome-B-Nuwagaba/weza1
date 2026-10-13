@@ -3,7 +3,8 @@ Domain event → Notification policy → Recipient resolution → Channel select
 
 import logging
 import uuid
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy import select
@@ -25,6 +26,14 @@ PRIORITY_ORDER = {"NORMAL": 0, "HIGH": 1, "URGENT": 2}
 # ------------------------------------------------------------------ customer channel adapters
 
 
+@dataclass
+class SendResult:
+    ok: bool
+    provider_message_id: str | None = None
+    error_code: str | None = None
+    retryable: bool = False
+
+
 def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: str = "sms", kind: str = "info",
                           payload: dict | None = None) -> bool:
     """SMS/WhatsApp to a customer. Without provider credentials, messages go to the simulator inbox
@@ -35,19 +44,23 @@ def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: s
         return False
     provider = "simulator"
     status = "SENT"
+    wamid = error_code = None
     if channel == "whatsapp" and s.whatsapp_send_ready:
         provider = "whatsapp_cloud"
-        status = "SENT" if _whatsapp_send(phone_e164, body, payload) else "FAILED"
+        res = _whatsapp_send(phone_e164, body, payload)
+        status = "SENT" if res.ok else "FAILED"
+        wamid, error_code = res.provider_message_id, res.error_code
     elif channel == "sms" and s.sms_provider_name != "console":
         # >>> USER INPUT REQUIRED: real SMS delivery is not implemented yet (step e) — choose a provider and set
         # SMS_PROVIDER + its credentials in services/core-api/.env. Until then nothing is sent to a provider.
         provider = s.sms_provider_name
     db.add(ChannelMessage(channel=channel, to_index=crypto.blind_index("phone", phone_e164), body=body,
-                          payload={"kind": kind, **(payload or {})}, provider=provider, status=status))
+                          payload={"kind": kind, **(payload or {})}, provider=provider, status=status,
+                          provider_message_id=wamid, error_code=error_code))
     return status == "SENT"
 
 
-def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> bool:
+def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> SendResult:
     s = get_settings()
     url = f"https://graph.facebook.com/{s.graph_api_version}/{s.whatsapp_phone_number_id}/messages"
     buttons = (payload or {}).get("quick_replies") or []
@@ -64,9 +77,52 @@ def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> bool:
                "text": {"body": body[:4096]}}
     try:
         r = httpx.post(url, json=msg, headers={"Authorization": f"Bearer {s.whatsapp_token}"}, timeout=10)
-        return r.status_code < 300
     except httpx.HTTPError:
+        return SendResult(False, error_code="NETWORK", retryable=True)
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if r.status_code < 300:
+        wamid = ((data.get("messages") or [{}])[0] or {}).get("id")
+        return SendResult(True, provider_message_id=wamid)
+    err = data.get("error") or {}
+    code = str(err.get("code") or f"HTTP_{r.status_code}")[:32]
+    return SendResult(False, error_code=code, retryable=r.status_code == 429 or r.status_code >= 500)
+
+
+# Delivery-status callbacks (Cloud API `statuses`): forward-only so retried/out-of-order callbacks can't regress.
+_STATUS_RANK = {"sent": 1, "failed": 2, "delivered": 3, "read": 4}
+
+
+def apply_delivery_status(db: Session, wamid: str, status: str, at: datetime | None = None,
+                          error_code: str | None = None) -> bool:
+    """Record a provider delivery status on the outbound ChannelMessage. Returns True if it changed anything."""
+    new = _STATUS_RANK.get(status)
+    if not wamid or new is None:
         return False
+    msg = db.execute(select(ChannelMessage).where(ChannelMessage.provider_message_id == wamid)
+                     .with_for_update()).scalars().first()
+    if msg is None or new <= _STATUS_RANK.get(msg.provider_status or "", 0):
+        return False
+    msg.provider_status = status
+    msg.status_at = at or utcnow()
+    if status == "failed":
+        msg.status = "FAILED"
+        msg.error_code = (error_code or "")[:32] or None
+    else:
+        msg.status = "SENT"
+        msg.error_code = None
+    return True
+
+
+def parse_status_time(ts) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(int(ts), UTC)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 # ------------------------------------------------------------------ staff notifications

@@ -3,6 +3,7 @@ institution applications."""
 
 import hashlib
 import hmac
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -19,6 +20,7 @@ from weza.domains.institution import service as inst_svc
 from weza.domains.institution.models import Institution
 from weza.domains.misc_models import ChannelMessage
 from weza.domains.need import service as journeys
+from weza.domains.notification import service as notify
 from weza.domains.need.models import ConversationMessage
 from weza.domains.product.models import Product
 from weza.platform import crypto
@@ -27,6 +29,7 @@ from weza.platform.errors import Forbidden, NotFound, ValidationFailed
 from weza.platform.models import GraphInstance
 
 router = APIRouter(tags=["public"])
+log = logging.getLogger("weza.whatsapp")
 
 
 @router.get("/health")
@@ -153,14 +156,24 @@ async def whatsapp_webhook(request: Request, x_hub_signature_256: str | None = H
     if not x_hub_signature_256 or not hmac.compare_digest(expected, x_hub_signature_256):
         raise Forbidden("Invalid signature.")
     payload = await request.json()
+    n_status = 0
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
-            for msg in (change.get("value") or {}).get("messages", []):
+            value = change.get("value") or {}
+            for st in value.get("statuses") or []:  # delivery receipts: update the message, never touch a journey
+                errs = st.get("errors") or [{}]
+                code = errs[0].get("code")
+                n_status += notify.apply_delivery_status(
+                    db, st.get("id", ""), st.get("status", ""), notify.parse_status_time(st.get("timestamp")),
+                    str(code) if code is not None else None)
+            for msg in value.get("messages", []):
                 phone = "+" + msg.get("from", "").lstrip("+")
                 text_ = (msg.get("text") or {}).get("body")
                 reply = ((msg.get("interactive") or {}).get("button_reply") or {})
                 inbound(db, phone, text=text_, button_id=reply.get("id"), button_title=reply.get("title"),
                         message_id=msg.get("id"))
+    if n_status:
+        log.info("whatsapp_statuses_applied", extra={"data": {"count": n_status}})
     return {"ok": True}
 
 

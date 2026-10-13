@@ -29,6 +29,7 @@ from weza.platform.models import GraphInstance
 
 URL = "/api/v1/channels/whatsapp/webhook"
 _seq = itertools.count(1)
+_wamid = itertools.count(1)
 
 
 def fake_phone() -> str:
@@ -49,6 +50,7 @@ class Http:
     def __init__(self):
         self.calls: list[dict] = []
         self.behaviour = "unexpected"  # unexpected | ok | http500 | timeout
+        self.n = 0
 
     def __call__(self, url, json=None, headers=None, timeout=None, **kw):
         if self.behaviour == "unexpected":
@@ -57,7 +59,9 @@ class Http:
         if self.behaviour == "timeout":
             raise httpx.ConnectTimeout("fake timeout")
         code = 500 if self.behaviour == "http500" else 200
-        return httpx.Response(code, json={"messages": [{"id": "wamid.FAKE_OUT"}]}, request=httpx.Request("POST", url))
+        self.n += 1
+        return httpx.Response(code, json={"messages": [{"id": f"wamid.FAKE_OUT_{next(_wamid)}"}]},
+                              request=httpx.Request("POST", url))
 
 
 @pytest.fixture(autouse=True)
@@ -385,3 +389,64 @@ def test_provider_success_is_recorded_as_sent(client, wa_live, http):
     outs = out_messages(phone)
     assert outs and all(m.provider == "whatsapp_cloud" and m.status == "SENT" for m in outs)
     assert http.calls, "configured outbound should call the (mocked) Graph API"
+
+
+# ------------------------------------------------------------------ delivery status callbacks (step b)
+
+
+def _live_conversation(client, phone):
+    text_msg(client, phone, "I need 5 million for stock for my shop")
+    return [m for m in out_messages(phone) if m.provider_message_id]
+
+
+def test_outbound_records_provider_message_id(client, wa_live):
+    phone = fake_phone()
+    sent = _live_conversation(client, phone)
+    assert sent and all(m.provider_message_id.startswith("wamid.FAKE_OUT_") for m in sent)
+    assert len({m.provider_message_id for m in sent}) == len(sent)
+
+
+def test_status_callbacks_update_message_and_do_not_touch_journey(client, wa_live):
+    phone = fake_phone()
+    (m, *_) = _live_conversation(client, phone)
+    ((jid, node),) = journeys_for(phone)
+    n_in, n_out = len(in_messages(jid)), len(out_messages(phone))
+    wamid = m.provider_message_id
+    for st in ("sent", "delivered", "read"):
+        payload = rw.status_payload(wamid, st, phone)
+        assert send(client, payload).status_code == 200
+        got = next(x for x in out_messages(phone) if x.provider_message_id == wamid)
+        assert got.provider_status == st and got.status_at is not None
+    # out-of-order retry of an older status must not move the state backwards
+    send(client, rw.status_payload(wamid, "delivered", phone))
+    assert next(x for x in out_messages(phone) if x.provider_message_id == wamid).provider_status == "read"
+    assert journeys_for(phone) == [(jid, node)] and len(in_messages(jid)) == n_in and len(out_messages(phone)) == n_out
+
+
+def test_failed_status_stores_error_code(client, wa_live):
+    phone = fake_phone()
+    (m, *_) = _live_conversation(client, phone)
+    assert send(client, rw.status_payload(m.provider_message_id, "failed", phone, error_code=131026)).status_code == 200
+    got = next(x for x in out_messages(phone) if x.provider_message_id == m.provider_message_id)
+    assert got.provider_status == "failed" and got.error_code == "131026" and got.status == "FAILED"
+
+
+def test_failed_status_does_not_override_delivered(client, wa_live):
+    phone = fake_phone()
+    (m, *_) = _live_conversation(client, phone)
+    send(client, rw.status_payload(m.provider_message_id, "delivered", phone))
+    send(client, rw.status_payload(m.provider_message_id, "failed", phone, error_code=131026))
+    got = next(x for x in out_messages(phone) if x.provider_message_id == m.provider_message_id)
+    assert got.provider_status == "delivered" and got.error_code is None
+
+
+def test_status_for_unknown_message_is_ignored(client, wa_inbound):
+    assert send(client, rw.status_payload("wamid.FAKE_UNKNOWN", "delivered")).status_code == 200
+
+
+def test_unknown_status_value_is_ignored(client, wa_live):
+    phone = fake_phone()
+    (m, *_) = _live_conversation(client, phone)
+    assert send(client, rw.status_payload(m.provider_message_id, "weird", phone)).status_code == 200
+    got = next(x for x in out_messages(phone) if x.provider_message_id == m.provider_message_id)
+    assert got.provider_status is None

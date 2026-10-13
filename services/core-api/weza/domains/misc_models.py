@@ -51,6 +51,11 @@ class ChannelMessage(IdMixin, Base):
     provider: Mapped[str] = mapped_column(String(20), default="simulator")
     status: Mapped[str] = mapped_column(String(16), default="SENT")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    # Provider delivery tracking (WhatsApp Cloud API): wamid, last callback status (sent|delivered|read|failed)
+    provider_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    provider_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class IntegritySignal(IdMixin, Base):
