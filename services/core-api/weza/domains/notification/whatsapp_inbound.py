@@ -9,11 +9,16 @@ Message content is kept encrypted only until processed, then wiped. Nothing here
 import json
 import logging
 
+import re
+import uuid
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from weza.domains.customer import documents as docs
 from weza.domains.misc_models import WhatsappInbox
+from weza.domains.notification import whatsapp_media
 from weza.domains.notification.service import send_customer_message
 from weza.platform import crypto
 from weza.platform.controls import rate_limit
@@ -32,7 +37,8 @@ _IGNORED_TYPES = {"reaction", "system", "ephemeral", "request_welcome"}
 def classify(msg: dict) -> dict:
     """Normalise a Cloud API message → {kind: message|unsupported|ignored, type, text, button_id, button_title}."""
     mtype = str(msg.get("type") or "unknown")[:24]
-    out = {"type": mtype, "text": None, "button_id": None, "button_title": None}
+    out = {"type": mtype, "text": None, "button_id": None, "button_title": None, "media_id": None, "mime": None,
+           "filename": None, "caption": None}
     if mtype == "text":
         body = ((msg.get("text") or {}).get("body") or "")
         out.update(kind="message" if body.strip() else "ignored", text=body)
@@ -46,6 +52,13 @@ def classify(msg: dict) -> dict:
     elif mtype == "button":  # template quick-reply tap
         b = msg.get("button") or {}
         out.update(kind="message" if (b.get("text") or "").strip() else "ignored", text=b.get("text"))
+    elif mtype in ("image", "document"):  # customer documents: downloaded and stored by the document pipeline
+        m = msg.get(mtype) or {}
+        if m.get("id"):
+            out.update(kind="media", media_id=str(m["id"])[:200], mime=m.get("mime_type"),
+                       filename=m.get("filename"), caption=m.get("caption"))
+        else:
+            out["kind"] = "unsupported"
     elif mtype in _IGNORED_TYPES:
         out["kind"] = "ignored"
     else:
@@ -96,6 +109,8 @@ def _process_one(db: Session, row: WhatsappInbox) -> None:
     phone, kind = data["phone"], data["kind"]
     if kind == "ignored":
         return _finish(row, "IGNORED")
+    if kind == "media":
+        return _process_media(db, row, data)
     if kind == "unsupported":
         try:  # at most a few "can't read that" replies per number, so media floods don't become reply floods
             rate_limit(db, f"wa:unsup:{row.phone_index}", 3, 600)
@@ -111,3 +126,92 @@ def _process_one(db: Session, row: WhatsappInbox) -> None:
         log.info("whatsapp_inbound_dropped", extra={"data": {"reason": exc.code}})
         return _finish(row, "DROPPED", str(exc.code)[:40])
     _finish(row, "DONE")
+
+
+# ------------------------------------------------------------------ customer documents (photos / PDFs)
+
+VERIFY_FIRST = "Thanks. Please finish verifying your phone number first, then send the document again."
+NEED_JOURNEY = ("Please tell me what financing you need first (for example: I need UGX 5 million for stock). "
+                "Then you can send your documents here.")
+DOWNLOAD_FAILED = "Sorry, I couldn't download that file. Please send it again."
+TOO_LARGE = "That file is larger than 10 MB. Please send a smaller photo or PDF."
+
+# caption / filename hints → document type (first match wins); otherwise the first document still outstanding
+_HINTS = [
+    (r"\bpay ?slip|salary", "payslip"), (r"mobile ?money|momo|airtel|\bmtn\b", "mobile_money_statement"),
+    (r"bank|statement", "bank_statement"), (r"\bnin\b|national|\bid\b|identity|passport", "national_id"),
+    (r"registration|certificate|ursb|\btin\b", "business_registration"), (r"licen[cs]e|trading", "trading_licence"),
+    (r"employment|appointment|letter", "employment_letter"), (r"\bfarm|\bland\b|title", "farm_records"),
+]
+
+
+def guess_doc_type(caption: str | None, filename: str | None, outstanding: list[str]) -> str:
+    text = f"{caption or ''} {filename or ''}".lower()
+    for pattern, doc_type in _HINTS:
+        if re.search(pattern, text):
+            return doc_type
+    return outstanding[0] if outstanding else "other"
+
+
+def _active_journey(db: Session, phone_index: str):
+    from weza.platform.models import GraphInstance
+    return db.execute(select(GraphInstance).where(
+        GraphInstance.graph_type == "customer_journey", GraphInstance.status.in_(["WAITING", "RUNNING"]),
+        GraphInstance.state["wa_index"].astext == phone_index).order_by(GraphInstance.updated_at.desc()).limit(1)
+    ).scalar_one_or_none()
+
+
+def _outstanding_doc_types(db: Session, need_id: uuid.UUID, customer_id: uuid.UUID) -> list[str]:
+    from weza.domains.customer.models import Document
+    from weza.domains.matching.models import Match
+    have = set(db.execute(select(Document.doc_type).where(Document.customer_id == customer_id,
+                                                          Document.pipeline_state == "STORED")).scalars())
+    out: list[str] = []
+    for m in db.execute(select(Match).where(Match.need_id == need_id, Match.state.in_(["RANKED", "PRESENTED"]),
+                                            Match.readiness == "ALMOST")).scalars():
+        for o in (m.explanation or {}).get("outstanding", []):
+            t = o.get("doc_type")
+            if t and t not in have and t not in out:
+                out.append(t)
+    return out
+
+
+def _process_media(db: Session, row: WhatsappInbox, data: dict) -> None:
+    from weza.domains.need import service as journeys
+    phone = data["phone"]
+
+    def reply(text: str, reason: str) -> None:
+        send_customer_message(db, phone, text, channel="whatsapp", kind="document")
+        _finish(row, "DONE", reason)
+
+    try:
+        rate_limit(db, f"wa:media:{row.phone_index}", 10, 600)
+    except RateLimited:
+        return _finish(row, "DROPPED", "RATE_LIMITED")
+    gi = _active_journey(db, row.phone_index)
+    if gi is None:
+        return reply(NEED_JOURNEY, "NO_JOURNEY")
+    if not gi.state.get("customer_id"):
+        return reply(VERIFY_FIRST, "NOT_VERIFIED")
+    customer_id, need_id = uuid.UUID(gi.state["customer_id"]), uuid.UUID(gi.state["need_id"])
+    try:
+        media = whatsapp_media.fetch(data["media_id"])
+    except whatsapp_media.MediaError as exc:
+        log.warning("whatsapp_media_failed", extra={"data": {"err": exc.code}})
+        return reply(TOO_LARGE if exc.code == "TOO_LARGE" else DOWNLOAD_FAILED, f"MEDIA_{exc.code}"[:40])
+    doc_type = guess_doc_type(data.get("caption"), data.get("filename"),
+                              _outstanding_doc_types(db, need_id, customer_id))
+    d = docs.ingest(db, customer_id, doc_type=doc_type, filename=(data.get("filename") or "whatsapp-upload")[:200],
+                    declared_mime=media.mime or data.get("mime") or "", data=media.data, need_id=need_id)
+    if d.pipeline_state != "STORED":
+        return reply((d.reject_reason or "I couldn't accept that file.") + " Please send a clear PDF, JPG or PNG.",
+                     "DOC_REJECTED")
+    label = docs.DOC_TYPES[doc_type]
+    journeys._persist(db, gi, "IN", {"type": "text", "text": f"[Document sent: {label}]"}, "whatsapp",
+                      row.provider_message_id)
+    send_customer_message(db, phone, f"Got it. I've saved your {label.lower()} securely. "
+                          "If it's the wrong type, just tell me which document it was.",
+                          channel="whatsapp", kind="document")
+    if gi.current_node == "REQUEST_MISSING_ITEM" and gi.status == "WAITING":
+        journeys.system_resume(db, gi.id, "document_uploaded")
+    _finish(row, "DONE", "DOC_STORED")

@@ -875,7 +875,7 @@ def whatsapp_text(o: dict) -> str | None:
     if card == "otp_input" and d.get("dev_code"):
         return f"(Test mode) Your code is {d['dev_code']}"
     if card == "documents_needed":
-        return "Upload documents securely here: {web}/c/documents"
+        return "You can send each document right here in this chat as a clear photo or PDF (up to 10 MB), or upload it securely at {web}/c/documents"
     return None
 
 

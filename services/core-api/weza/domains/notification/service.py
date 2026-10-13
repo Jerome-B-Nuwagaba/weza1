@@ -147,6 +147,11 @@ def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> SendResu
     return _graph_post(msg)
 
 
+def http_get(url: str, headers: dict, timeout: float) -> httpx.Response:
+    """The only outbound GET in the codebase (zero-core-integration boundary test): WhatsApp media download."""
+    return httpx.get(url, headers=headers, timeout=timeout)
+
+
 def _graph_post(msg: dict) -> SendResult:
     s = get_settings()
     url = f"https://graph.facebook.com/{s.graph_api_version}/{s.whatsapp_phone_number_id}/messages"

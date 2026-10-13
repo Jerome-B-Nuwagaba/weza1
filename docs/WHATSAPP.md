@@ -27,6 +27,14 @@ Set the same fake values in the API terminal, restart, then replay payloads:
     .venv\Scripts\python scripts\dev_api.py
     .venv\Scripts\python scripts\replay_whatsapp_webhook.py list
 
+## Photos and documents
+After the phone is verified, a customer can send photos (JPG/PNG) and PDFs in the chat (up to 10 MB). WEZA downloads the file
+from Meta with `WHATSAPP_TOKEN`, runs the normal document pipeline (quarantine → scan → type check → encrypted storage) and
+replies "Got it". The document type comes from the caption/filename ("my payslip", "bank statement.pdf") or else the first
+document still outstanding. A journey waiting for a missing document resumes automatically. Before verification, or with no
+open request, the customer gets a short instruction instead. Voice notes, video, stickers, locations and contacts get the
+"typed messages" reply. Sending a photo as a *document* in WhatsApp keeps its full quality.
+
 ## Verification codes (OTP) through Meta
 Set `SMS_PROVIDER=whatsapp` and the codes are sent through the WhatsApp Cloud API with the same `WHATSAPP_*` credentials.
 Meta only delivers free-form messages inside 24 h of the customer's last message, so for journeys started on the web/app

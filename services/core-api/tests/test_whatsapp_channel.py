@@ -8,6 +8,7 @@ behaviour lands the strict xfail flips to a failure, forcing the marker to be re
 
 import hmac
 import itertools
+import re
 import json
 import logging
 from datetime import timedelta
@@ -18,7 +19,10 @@ from sqlalchemy import func, select
 
 from scripts import replay_whatsapp_webhook as rw
 from weza.config import get_settings, is_configured
+from weza.domains.customer import documents as docs
+from weza.domains.customer.models import Document
 from weza.domains.intelligence.parsing import parse_phone
+from weza.domains.notification import whatsapp_inbound as wa_in
 from weza.domains.misc_models import ChannelMessage, WhatsappInbox
 from weza.domains.need.models import ConversationMessage
 from weza.domains.notification import service as notify
@@ -53,6 +57,24 @@ class Http:
         self.calls: list[dict] = []
         self.behaviour = "unexpected"  # unexpected | ok | http500 | timeout
         self.n = 0
+        self.media: dict[str, tuple[bytes, str]] = {}  # media id -> (bytes, mime)
+        self.media_mode = "ok"  # ok | fail
+        self.media_host = "https://lookaside.fbsbx.com/fake/"
+        self.gets: list[str] = []
+
+    def get(self, url, headers=None, timeout=None, **kw):
+        self.gets.append(url)
+        req = httpx.Request("GET", url)
+        if self.media_mode == "fail":
+            raise httpx.ConnectError("fake")
+        mid = url.rsplit("/", 1)[1]
+        if mid not in self.media:
+            return httpx.Response(404, json={}, request=req)
+        data, mime = self.media[mid]
+        if url.startswith("https://graph.facebook.com/"):
+            return httpx.Response(200, json={"url": self.media_host + mid, "mime_type": mime, "file_size": len(data)},
+                                  request=req)
+        return httpx.Response(200, content=data, request=req)
 
     def __call__(self, url, json=None, headers=None, timeout=None, **kw):
         if self.behaviour == "unexpected":
@@ -74,6 +96,7 @@ class Http:
 def http(monkeypatch):
     rec = Http()
     monkeypatch.setattr(httpx, "post", rec)
+    monkeypatch.setattr(httpx, "get", rec.get)
     return rec
 
 
@@ -506,7 +529,7 @@ def test_provider_retry_of_same_message_creates_one_inbox_row(client, wa_inbound
     assert len(journeys_for(phone)) == 1
 
 
-@pytest.mark.parametrize("kind", ["image", "audio", "video", "document", "sticker", "location", "contacts"])
+@pytest.mark.parametrize("kind", ["audio", "video", "sticker", "location", "contacts"])
 def test_each_unsupported_type_gets_the_polite_reply(client, wa_inbound, kind):
     phone = fake_phone()
     p = rw.message_payload({"id": f"wamid.FAKE_{kind}_{phone}", "type": kind, kind: {"id": "FAKE"}}, phone)
@@ -521,7 +544,7 @@ def test_each_unsupported_type_gets_the_polite_reply(client, wa_inbound, kind):
 def test_unsupported_replies_are_capped_per_number(client, wa_inbound):
     phone = fake_phone()
     for i in range(6):
-        send(client, rw.message_payload({"id": f"wamid.FAKE_img_{phone}_{i}", "type": "image", "image": {}}, phone))
+        send(client, rw.message_payload({"id": f"wamid.FAKE_img_{phone}_{i}", "type": "audio", "audio": {}}, phone))
     assert len(out_messages(phone)) == 3 and len(inbox_rows(phone)) == 6
 
 
@@ -844,3 +867,196 @@ def test_otp_journey_via_whatsapp_provider(client, journey, otp_wa, http):
     assert code and sent and code in sent[0]["text"]["body"]
     j.send(code)
     assert j.node == "ASK_PROFILE"
+
+
+# ------------------------------------------------------------------ photos and documents over WhatsApp
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"fake-image-bytes" * 8
+PDF = b"%PDF-1.4\n" + b"fake-pdf-bytes" * 8
+
+
+def media_msg(client, phone, kind, media_id, **fields):
+    body = {"id": media_id, "mime_type": "image/png" if kind == "image" else "application/pdf", **fields}
+    return send(client, rw.message_payload({"id": f"wamid.FAKE_{kind}_{media_id}_{phone}_{next(_wamid)}", "type": kind, kind: body}, phone))
+
+
+def verified_journey(client, phone) -> dict:
+    """Walk a WhatsApp journey through OTP verification; returns {'id', 'customer_id'}."""
+    text_msg(client, phone, "I need 5 million for stock for my shop")
+    send(client, rw.build("button", phone=phone, button_id="confirm"))
+    text_msg(client, phone, "0" + phone[3:])
+    otp = next(re.search(r"code is (\d{6})", m.body).group(1) for m in reversed(out_messages(phone))
+               if m.channel == "sms" and "verification code" in m.body)
+    text_msg(client, phone, otp)
+    ((jid, node),) = journeys_for(phone)
+    with session_scope() as db:
+        cid = db.get(GraphInstance, jid).state.get("customer_id")
+    assert node == "ASK_PROFILE" and cid
+    return {"id": jid, "customer_id": cid}
+
+
+def stored_docs(customer_id):
+    with session_scope() as db:
+        rows = db.execute(select(Document).where(Document.customer_id == customer_id)).scalars().all()
+        db.expunge_all()
+        return rows
+
+
+def last_reply(phone) -> str:
+    return [m for m in out_messages(phone) if m.channel == "whatsapp"][-1].body
+
+
+@pytest.mark.parametrize("raw,expected", [("my payslip", "payslip"), ("March bank statement", "bank_statement"),
+                                          ("MTN MoMo statement", "mobile_money_statement"),
+                                          ("front of my ID", "national_id"), ("trading licence", "trading_licence"),
+                                          ("here you go", "other"), (None, "other")])
+def test_guess_doc_type_from_caption(raw, expected):
+    assert wa_in.guess_doc_type(raw, None, []) == expected
+
+
+def test_guess_doc_type_falls_back_to_first_outstanding():
+    assert wa_in.guess_doc_type("here", "scan001.pdf", ["bank_statement", "payslip"]) == "bank_statement"
+    assert wa_in.guess_doc_type("my payslip", None, ["bank_statement"]) == "payslip"
+
+
+def test_media_without_a_journey_gets_guidance(client, wa_live, http):
+    phone = fake_phone()
+    http.media["M1"] = (PNG, "image/png")
+    assert media_msg(client, phone, "image", "M1").status_code == 200
+    assert journeys_for(phone) == [] and "tell me what financing" in last_reply(phone)
+    assert http.gets == []  # nothing downloaded for someone who has no request
+
+
+def test_media_before_phone_verification_is_not_stored(client, wa_live, http):
+    phone = fake_phone()
+    text_msg(client, phone, "I need 5 million for stock for my shop")
+    http.media["M2"] = (PNG, "image/png")
+    media_msg(client, phone, "image", "M2")
+    assert "verifying your phone number" in last_reply(phone) and http.gets == []
+
+
+def test_photo_is_downloaded_scanned_stored_encrypted_and_acknowledged(client, wa_live, http):
+    phone = fake_phone()
+    j = verified_journey(client, phone)
+    http.media["M3"] = (PNG, "image/png")
+    assert media_msg(client, phone, "image", "M3", caption="my payslip").status_code == 200
+    (d,) = stored_docs(j["customer_id"])
+    assert d.doc_type == "payslip" and d.pipeline_state == "STORED" and d.mime == "image/png"
+    assert d.scan_result.endswith("clean") and d.size == len(PNG)
+    with session_scope() as db:
+        assert docs.read_bytes(db, d.id) == PNG
+    assert "saved your recent payslip" in last_reply(phone)
+    assert http.gets[0].endswith("/M3") and http.gets[1].startswith("https://lookaside.fbsbx.com/")
+    assert any("Document sent" in str(x) for x in in_messages_text(j["id"]))
+    assert [r.reason for r in inbox_rows(phone)][-1] == "DOC_STORED"
+
+
+def in_messages_text(journey_id):
+    with session_scope() as db:
+        return [m.content for m in db.execute(select(ConversationMessage).where(
+            ConversationMessage.session_id == journey_id, ConversationMessage.direction == "IN")).scalars()]
+
+
+def test_pdf_document_with_filename_is_stored(client, wa_live, http):
+    phone = fake_phone()
+    j = verified_journey(client, phone)
+    http.media["M4"] = (PDF, "application/pdf")
+    media_msg(client, phone, "document", "M4", filename="Bank statement March.pdf")
+    (d,) = stored_docs(j["customer_id"])
+    assert d.doc_type == "bank_statement" and d.mime == "application/pdf" and d.filename == "Bank statement March.pdf"
+
+
+def test_malware_signature_is_rejected_and_not_kept(client, wa_live, http):
+    phone = fake_phone()
+    j = verified_journey(client, phone)
+    http.media["M5"] = (b"%PDF-" + docs.EICAR, "application/pdf")
+    media_msg(client, phone, "document", "M5", filename="x.pdf")
+    (d,) = stored_docs(j["customer_id"])
+    assert d.pipeline_state == "REJECTED"
+    with session_scope() as db:
+        assert docs.read_bytes(db, d.id) is None
+    assert "security check" in last_reply(phone)
+
+
+def test_unsupported_file_format_is_rejected_politely(client, wa_live, http):
+    phone = fake_phone()
+    j = verified_journey(client, phone)
+    http.media["M6"] = (b"RIFF....WEBPxxxxxxxx", "image/webp")
+    media_msg(client, phone, "image", "M6")
+    assert stored_docs(j["customer_id"])[0].pipeline_state == "REJECTED"
+    assert "PDF, JPG or PNG" in last_reply(phone)
+
+
+@pytest.mark.parametrize("mode", ["unknown_id", "network"])
+def test_download_failure_asks_to_resend_and_does_not_block(client, wa_live, http, mode):
+    phone = fake_phone()
+    j = verified_journey(client, phone)
+    http.media_mode = "fail" if mode == "network" else "ok"
+    media_msg(client, phone, "image", "NOPE")
+    assert "couldn't download" in last_reply(phone) and stored_docs(j["customer_id"]) == []
+    assert inbox_rows(phone)[-1].status == "DONE"
+    http.media_mode = "ok"
+    http.media["M7"] = (PNG, "image/png")
+    media_msg(client, phone, "image", "M7")  # the next upload works
+    assert len(stored_docs(j["customer_id"])) == 1
+
+
+def test_media_url_must_be_https_and_not_an_ip(client, wa_live, http):
+    phone = fake_phone()
+    j = verified_journey(client, phone)
+    http.media["M8"] = (PNG, "image/png")
+    for host in ("http://lookaside.fbsbx.com/fake/", "https://127.0.0.1/fake/", "https://localhost/fake/"):
+        http.media_host = host
+        media_msg(client, phone, "image", "M8")
+    assert stored_docs(j["customer_id"]) == [] and len(http.gets) == 3  # only the Graph metadata calls
+
+
+def test_oversized_media_is_refused_before_download(client, wa_live, http, monkeypatch):
+    phone = fake_phone()
+    j = verified_journey(client, phone)
+    monkeypatch.setattr("weza.domains.notification.whatsapp_media.MAX_BYTES", 10)
+    http.media["M9"] = (PNG, "image/png")
+    media_msg(client, phone, "image", "M9")
+    assert "larger than 10 MB" in last_reply(phone) and stored_docs(j["customer_id"]) == []
+    assert len(http.gets) == 1
+
+
+def test_media_uploads_are_rate_limited(client, wa_live, http):
+    phone = fake_phone()
+    verified_journey(client, phone)
+    with session_scope() as db:
+        for _ in range(10):
+            rate_limit(db, f"wa:media:{idx_of(phone)}", 10, 600)
+    http.media["M10"] = (PNG, "image/png")
+    media_msg(client, phone, "image", "M10")
+    assert inbox_rows(phone)[-1].reason == "RATE_LIMITED" and http.gets == []
+
+
+def test_media_logs_carry_no_pii_or_tokens(client, wa_live, http, caplog, capsys):
+    phone = fake_phone()
+    verified_journey(client, phone)
+    capsys.readouterr()
+    http.media["M11"] = (PNG, "image/png")
+    with caplog.at_level(logging.DEBUG):
+        media_msg(client, phone, "image", "M11", caption="my ZEBRA-MARKER-7731 payslip")
+        http.media_mode = "fail"
+        media_msg(client, phone, "image", "M12")
+    blob = capsys.readouterr().out + " ".join(
+        JsonFormatter().format(r) + r.getMessage() + str(getattr(r, "data", "")) for r in caplog.records)
+    for secret in (phone, phone[3:], "ZEBRA-MARKER-7731", "FAKE_token_not_real", "M11", "lookaside"):
+        assert secret not in blob
+
+
+def test_missing_item_journey_resumes_when_document_arrives(client, wa_live, http, monkeypatch):
+    """A journey waiting at REQUEST_MISSING_ITEM is resumed (READINESS_CHECK re-run) by a WhatsApp upload."""
+    from weza.domains.need import service as journeys_svc
+    phone = fake_phone()
+    j = verified_journey(client, phone)
+    resumed = []
+    monkeypatch.setattr(journeys_svc, "system_resume", lambda db, jid, action, *a, **k: resumed.append((str(jid), action)))
+    with session_scope() as db:
+        gi = db.get(GraphInstance, j["id"])
+        gi.current_node, gi.status = "REQUEST_MISSING_ITEM", "WAITING"
+    http.media["M13"] = (PDF, "application/pdf")
+    media_msg(client, phone, "document", "M13", filename="payslip.pdf")
+    assert resumed == [(j["id"], "document_uploaded")]

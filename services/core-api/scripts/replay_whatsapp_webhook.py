@@ -27,6 +27,7 @@ FAKE_VERIFY_TOKEN = "FAKE_local_verify_token_not_real"
 FAKE_PHONE = "256772000111"  # obviously fake Ugandan-format number (digits, no +)
 FAKE_PHONE_NUMBER_ID = "000000000000000"
 DEFAULT_URL = "http://localhost:8000/api/v1/channels/whatsapp/webhook"
+DEFAULT_TEXT = "I need 5 million for stock for my shop"
 
 
 def _envelope(value: dict) -> dict:
@@ -47,7 +48,7 @@ def status_payload(wamid: str, status: str = "delivered", phone: str = FAKE_PHON
     return _envelope({"statuses": [st]})
 
 
-def build(name: str, *, phone: str = FAKE_PHONE, text: str = "I need 5 million for stock for my shop",
+def build(name: str, *, phone: str = FAKE_PHONE, text: str = DEFAULT_TEXT,
           message_id: str | None = None, button_id: str = "confirm", status_for: str = "wamid.FAKE_OUT_1") -> dict:
     mid = message_id or f"wamid.FAKE_{uuid.uuid4().hex[:16]}"
     if name in ("text", "duplicate"):
@@ -55,8 +56,14 @@ def build(name: str, *, phone: str = FAKE_PHONE, text: str = "I need 5 million f
     if name == "button":
         return message_payload({"id": mid, "type": "interactive", "interactive": {
             "type": "button_reply", "button_reply": {"id": button_id, "title": "Yes, that's right"}}}, phone)
-    if name == "unsupported":
-        return message_payload({"id": mid, "type": "image", "image": {"id": "FAKE_MEDIA", "mime_type": "image/jpeg"}}, phone)
+    if name == "unsupported":  # a voice note: a type WEZA cannot read
+        return message_payload({"id": mid, "type": "audio", "audio": {"id": "FAKE_MEDIA", "mime_type": "audio/ogg"}}, phone)
+    if name == "image":  # needs a real media id from Meta to be downloaded; against a local fake it fails politely
+        return message_payload({"id": mid, "type": "image", "image": {
+            "id": "FAKE_MEDIA", "mime_type": "image/jpeg", "caption": text if text != DEFAULT_TEXT else "my payslip"}}, phone)
+    if name == "document":
+        return message_payload({"id": mid, "type": "document", "document": {
+            "id": "FAKE_MEDIA", "mime_type": "application/pdf", "filename": "bank-statement.pdf"}}, phone)
     if name == "status":
         return status_payload(status_for, "delivered", phone)
     if name == "status_failed":
@@ -64,8 +71,8 @@ def build(name: str, *, phone: str = FAKE_PHONE, text: str = "I need 5 million f
     raise KeyError(name)
 
 
-FIXTURES = ["verify", "text", "button", "duplicate", "unsupported", "status", "status_failed", "bad_signature",
-            "no_signature"]
+FIXTURES = ["verify", "text", "button", "duplicate", "unsupported", "image", "document", "status", "status_failed",
+            "bad_signature", "no_signature"]
 
 
 def sign(raw: bytes, secret: str = FAKE_APP_SECRET) -> str:
@@ -101,7 +108,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("fixture", choices=[*FIXTURES, "list"])
     ap.add_argument("--url", default=DEFAULT_URL)
-    ap.add_argument("--text", default="I need 5 million for stock for my shop")
+    ap.add_argument("--text", default=DEFAULT_TEXT)
     ap.add_argument("--button", default="confirm", help="button id, e.g. confirm or select:<match_id>")
     ap.add_argument("--phone", default=FAKE_PHONE, help="digits; defaults to a fake number")
     ap.add_argument("--status-for", default="wamid.FAKE_OUT_1", help="provider message id a status refers to")
