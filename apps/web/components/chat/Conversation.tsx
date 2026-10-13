@@ -1,8 +1,9 @@
 "use client";
 
-import { ArrowUp, FileUp, RotateCcw, ShieldCheck } from "lucide-react";
+import { ArrowUp, FileUp, MessageCircle, RotateCcw, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { whatsappHref } from "@/lib/whatsapp";
 import { api, ApiError, tokens } from "@/lib/api";
 import { money } from "@/lib/format";
 import { Badge, Banner, Button, cx, inputCls, ScoreRing, Select } from "@/components/ui";
@@ -148,6 +149,7 @@ export function Conversation({ attribution, seed }: { attribution: Record<string
       </div>
     );
 
+  const firstNeed = ((view.messages as any[]).find((m) => m.direction === "IN" && m.type === "text")?.text as string | undefined) || seed || "";
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col">
       <div className="sticky top-0 z-10 border-b border-line bg-canvas/95 px-4 py-2 backdrop-blur">
@@ -158,6 +160,9 @@ export function Conversation({ attribution, seed }: { attribution: Record<string
               <span className={cx("hidden whitespace-nowrap sm:inline", i === step ? "font-semibold text-ink" : "text-muted")}>{name}</span>
             </li>
           ))}
+          {cfg?.whatsapp_number && (
+            <li><a href={whatsappHref(cfg.whatsapp_number, firstNeed, attribution)} className="ml-2 inline-flex items-center gap-1 text-muted hover:text-ink" title="Continue this request on WhatsApp"><MessageCircle className="h-3.5 w-3.5" /><span className="hidden sm:inline">WhatsApp</span></a></li>
+          )}
           <li><button onClick={restart} className="ml-2 inline-flex items-center gap-1 text-muted hover:text-ink" title="Start a new request"><RotateCcw className="h-3.5 w-3.5" /><span className="hidden sm:inline">New</span></button></li>
         </ol>
       </div>

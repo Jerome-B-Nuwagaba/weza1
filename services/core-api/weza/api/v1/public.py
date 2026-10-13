@@ -184,7 +184,7 @@ async def whatsapp_webhook(request: Request, x_hub_signature_256: str | None = H
 
 
 def inbound(db: Session, phone: str, *, text: str | None, button_id: str | None = None, button_title: str | None = None,
-            message_id: str | None = None) -> list[dict]:
+            message_id: str | None = None, attribution: dict | None = None) -> list[dict]:
     """Canonical inbound handling for WhatsApp (real or simulated): find the active journey for this number or start one."""
     from weza.domains.intelligence.parsing import parse_phone
     phone_e164 = parse_phone(phone) or phone
@@ -199,7 +199,7 @@ def inbound(db: Session, phone: str, *, text: str | None, button_id: str | None 
         from weza.domains.identity.service import vault_find_by_phone
         rec = vault_find_by_phone(db, phone_e164)
         cust = db.execute(select(Customer).where(Customer.vault_token == rec.id)).scalar_one_or_none() if rec else None
-        inst, outputs = journeys.start_journey(db, channel="whatsapp", attribution={"src": "whatsapp"},
+        inst, outputs = journeys.start_journey(db, channel="whatsapp", attribution={"src": "whatsapp", **(attribution or {})},
                                                customer_id=cust.id if cust else None,
                                                first_text=text if text and text.strip().lower() not in
                                                ("hi", "hello", "hey", "restart", "start", "new request", "start over")

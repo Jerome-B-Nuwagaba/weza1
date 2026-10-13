@@ -15,7 +15,7 @@ export default function Notifications() {
   const [prefs, setPrefs] = useState<any[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const { toast, node } = useToast();
-  useEffect(() => p.data && setPrefs(p.data.prefs), [p.data]);
+  useEffect(() => { if (p.data) setPrefs(p.data.prefs); }, [p.data]);
   if (p.loading) return <Loading />;
   if (p.error) return <ErrorState error={p.error} />;
   const set = (i: number, patch: any) => setPrefs(prefs.map((x, j) => (j === i ? { ...x, ...patch } : x)));

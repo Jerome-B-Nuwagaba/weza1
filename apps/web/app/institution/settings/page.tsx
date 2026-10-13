@@ -15,7 +15,7 @@ export default function Settings() {
   const [p, setP] = useState<any>(null);
   const [err, setErr] = useState<string | null>(null);
   const { toast, node } = useToast();
-  useEffect(() => w.data && setP({ display_name: w.data.institution.display_name, description: w.data.institution.profile.description || "", website: w.data.institution.profile.website || "", regions_served: w.data.institution.profile.regions_served || [] }), [w.data]);
+  useEffect(() => { if (w.data) setP({ display_name: w.data.institution.display_name, description: w.data.institution.profile.description || "", website: w.data.institution.profile.website || "", regions_served: w.data.institution.profile.regions_served || [] }); }, [w.data]);
   if (w.loading || !p) return <Loading />;
   if (w.error) return <ErrorState error={w.error} />;
   const i = w.data.institution;

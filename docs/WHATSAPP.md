@@ -27,6 +27,22 @@ Set the same fake values in the API terminal, restart, then replay payloads:
     .venv\Scripts\python scripts\dev_api.py
     .venv\Scripts\python scripts\replay_whatsapp_webhook.py list
 
+## Real (non-demo) environment: from sign-up to first opportunity
+1. **First WEZA administrator** (once): `python -m weza.bootstrap` asks for an email and a hidden password, or set
+   `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD` (the container start script runs it). Demo data is never created
+   when `SEED_DEMO=false`. Sign in at `/login`.
+2. **Institution joins**: `/for-institutions` → *Join WEZA* → application → the institution administrator can sign in at once.
+3. **WEZA verifies**: sign in as the WEZA administrator → *Institutions* → open the application → *Approve* (reason required).
+4. **Institution configures** (Activation page lists who can do each step; maker-checker applies): add users (a manager/admin,
+   an officer, a Business/Product or Credit/Risk lead, and a second approver) → product (draft, submit, a *different* person
+   approves) → appetite (draft, run simulation, a different person approves) → routing → notification preferences → **ACTIVATE**.
+5. **Customers arrive** from the website's *Continue on WhatsApp* link (it carries the need and the campaign/QR reference)
+   or by messaging the business number. They verify by OTP, answer the profile questions, send documents in the chat,
+   choose an institution and consent. The opportunity then appears in that institution's *Opportunity Feed*, assigned by
+   its routing rules; the officer sees the consented identity, the manager can reassign, and outcomes are reported back.
+An institution with no matching product or appetite simply receives nothing: customers whose request fits nobody are offered
+the Waiting Room.
+
 ## Photos and documents
 After the phone is verified, a customer can send photos (JPG/PNG) and PDFs in the chat (up to 10 MB). WEZA downloads the file
 from Meta with `WHATSAPP_TOKEN`, runs the normal document pipeline (quarantine → scan → type check → encrypted storage) and

@@ -131,6 +131,16 @@ def checklist(db: Session, inst: Institution) -> dict:
         {"key": "terms", "label": "Marketplace data-sharing terms accepted", "done": inst.terms_accepted_at is not None,
          "link": "/institution/settings"},
     ]
+    who = {  # who can do each step (separation of duties) — shown on the Activation page
+        "verified": "WEZA Operations verifies your licence and representative.",
+        "users": "Administrator. Add at least one officer, a manager or admin, and people for the roles below — one person can hold several roles.",
+        "product": "A Business/Product or Credit/Risk lead (or Administrator) drafts it; a DIFFERENT Administrator, Executive, Business or Credit/Risk lead approves it.",
+        "appetite": "A Business/Product or Credit/Risk lead drafts and simulates it; a DIFFERENT Administrator, Executive or Credit/Risk lead approves it.",
+        "routing": "Administrator or Team manager.", "notifications": "Administrator.",
+        "terms": "Accepted by the Administrator when applying.",
+    }
+    for i in items:
+        i["who"] = who[i["key"]]
     ready = all(i["done"] for i in items)
     return {"status": inst.status, "items": items, "ready": ready,
             "next": next((i for i in items if not i["done"]), None)}

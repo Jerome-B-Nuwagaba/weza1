@@ -66,6 +66,20 @@ def classify(msg: dict) -> dict:
     return out
 
 
+_REF = re.compile(r"\s*\(ref:([A-Za-z0-9_.\-~]{0,163})\)\s*$")
+
+
+def split_ref(text: str | None) -> tuple[str, dict]:
+    """The website's "Continue on WhatsApp" link appends "(ref:src~cmp~ptn~ref)" to the first message. Returns the
+    text without it plus the acquisition attribution (only non-empty parts)."""
+    m = _REF.search(text or "")
+    if not m:
+        return text or "", {}
+    parts = (m.group(1).split("~") + ["", "", "", ""])[:4]
+    attribution = {k: v[:40] for k, v in zip(("src", "cmp", "ptn", "ref"), parts) if v}
+    return (text or "")[:m.start()].strip(), attribution
+
+
 def receive(db: Session, msg: dict) -> WhatsappInbox | None:
     """Store a provider message once and queue it for processing. Returns None for duplicates/invalid input."""
     from weza.domains.intelligence.parsing import parse_phone
@@ -118,10 +132,11 @@ def _process_one(db: Session, row: WhatsappInbox) -> None:
         except RateLimited:
             pass
         return _finish(row, "DONE", "UNSUPPORTED_TYPE")
+    text, attribution = split_ref(data["text"])
     try:
         with db.begin_nested():
-            public.inbound(db, phone, text=data["text"], button_id=data["button_id"],
-                           button_title=data["button_title"], message_id=row.provider_message_id)
+            public.inbound(db, phone, text=text, button_id=data["button_id"], button_title=data["button_title"],
+                           message_id=row.provider_message_id, attribution=attribution or None)
     except WezaError as exc:  # rate limited / invalid message: permanent for this message → acknowledge, don't retry
         log.info("whatsapp_inbound_dropped", extra={"data": {"reason": exc.code}})
         return _finish(row, "DROPPED", str(exc.code)[:40])

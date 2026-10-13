@@ -28,7 +28,7 @@ function Inner() {
   const [val, setVal] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [prefs, setPrefs] = useState<any>(null);
-  useEffect(() => p.data && setPrefs(p.data.preferences), [p.data]);
+  useEffect(() => { if (p.data) setPrefs(p.data.preferences); }, [p.data]);
 
   async function save(key: string) {
     try {

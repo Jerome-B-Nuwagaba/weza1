@@ -1060,3 +1060,29 @@ def test_missing_item_journey_resumes_when_document_arrives(client, wa_live, htt
     http.media["M13"] = (PDF, "application/pdf")
     media_msg(client, phone, "document", "M13", filename="payslip.pdf")
     assert resumed == [(j["id"], "document_uploaded")]
+
+
+# ------------------------------------------------------------------ web -> WhatsApp hand-over (acquisition reference)
+
+
+def test_parse_ref_marker():
+    text, attr = wa_in.split_ref("I need UGX 5 million for stock\n(ref:qr~Q4SME~partner1~friend)")
+    assert text == "I need UGX 5 million for stock"
+    assert attr == {"src": "qr", "cmp": "Q4SME", "ptn": "partner1", "ref": "friend"}
+    assert wa_in.split_ref("Hi\n(ref:~~~)") == ("Hi", {})
+    assert wa_in.split_ref("plain message") == ("plain message", {})
+    assert wa_in.split_ref("(ref:<script>)") == ("(ref:<script>)", {})  # invalid characters: left untouched
+
+
+def test_first_whatsapp_message_records_web_attribution_and_strips_marker(client, wa_inbound):
+    from weza.domains.commercial.models import Attribution
+    phone = fake_phone()
+    campaign = f"CMP{phone[-5:]}"
+    text_msg(client, phone, f"I need 5 million for stock for my shop\n(ref:landing~{campaign}~~)")
+    ((jid, node),) = journeys_for(phone)
+    assert node == "CONFIRM_INTENT"  # the need was understood without the marker getting in the way
+    with session_scope() as db:
+        a = db.execute(select(Attribution).where(Attribution.campaign_code == campaign)).scalar_one()
+        assert a.source == "landing" and a.channel == "whatsapp"
+    first = in_messages_text(jid)[0]
+    assert "(ref:" not in json.dumps(first)
