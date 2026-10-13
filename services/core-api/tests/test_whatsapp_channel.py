@@ -62,7 +62,8 @@ class Http:
             raise httpx.ConnectTimeout("fake timeout")
         self.n += 1
         req = httpx.Request("POST", url)
-        errors = {"http500": (500, 0), "http429": (429, 130429), "http400": (400, 131030)}
+        errors = {"http500": (500, 0), "http429": (429, 130429), "http400": (400, 131030),
+                  "http131047": (400, 131047)}
         if self.behaviour in errors:
             code, err = errors[self.behaviour]
             return httpx.Response(code, json={"error": {"code": err, "message": "fake"}} if err else {}, request=req)
@@ -781,3 +782,65 @@ def test_config_summary_flags_unreachable_otp_in_production(monkeypatch):
 def test_public_config_exposes_business_number_digits_only(client, monkeypatch, raw, expected):
     monkeypatch.setattr(get_settings(), "whatsapp_business_number", raw)
     assert client.get("/api/v1/public/config").json()["whatsapp_number"] == expected
+
+
+# ------------------------------------------------------------------ OTP through the Meta WhatsApp API
+
+
+@pytest.fixture()
+def otp_wa(wa_live, monkeypatch):
+    """SMS_PROVIDER=whatsapp: verification codes go out through the (mocked) Cloud API."""
+    monkeypatch.setattr(wa_live, "sms_provider", "whatsapp")
+    return wa_live
+
+
+def test_whatsapp_otp_free_form_when_no_template(otp_wa, http):
+    phone = fake_phone()
+    assert _sms(phone, "Your WEZA verification code is 482913. It expires in 5 minutes.") is True
+    (c,) = http.calls
+    assert c["json"]["type"] == "text" and "482913" in c["json"]["text"]["body"]
+    (m,) = out_messages(phone)
+    assert m.channel == "sms" and m.provider == "whatsapp" and m.status == "SENT"
+    assert m.provider_message_id.startswith("wamid.FAKE_OUT_") and "482913" not in m.body
+
+
+def test_whatsapp_otp_uses_authentication_template_when_configured(otp_wa, http, monkeypatch):
+    monkeypatch.setattr(otp_wa, "whatsapp_otp_template_name", "weza_login_code")
+    monkeypatch.setattr(otp_wa, "whatsapp_otp_template_language", "en")
+    phone = fake_phone()
+    assert _sms(phone, "Your WEZA verification code is 482913. It expires in 5 minutes.") is True
+    msg = http.calls[0]["json"]
+    assert msg["type"] == "template" and msg["template"]["name"] == "weza_login_code"
+    assert msg["template"]["language"] == {"code": "en"} and msg["to"] == phone
+    body_param, button = msg["template"]["components"]
+    assert body_param["parameters"][0]["text"] == "482913"
+    assert button["sub_type"] == "url" and button["parameters"][0]["text"] == "482913"
+
+
+def test_whatsapp_otp_outside_window_fails_honestly(otp_wa, http):
+    http.behaviour = "http131047"
+    phone = fake_phone()
+    assert _sms(phone) is False
+    (m,) = out_messages(phone)
+    assert m.status == "FAILED" and m.error_code == "131047" and "123456" not in m.body
+
+
+def test_whatsapp_otp_not_configured_fails_in_production_and_falls_back_in_dev(wa_inbound, monkeypatch, http):
+    monkeypatch.setattr(wa_inbound, "sms_provider", "whatsapp")  # no token / phone id => not ready
+    dev = fake_phone()
+    assert _sms(dev) is True and out_messages(dev)[0].provider == "simulator"
+    monkeypatch.setattr(wa_inbound, "env", "production")
+    prod = fake_phone()
+    assert _sms(prod) is False and out_messages(prod)[0].error_code == "NOT_CONFIGURED"
+    assert http.calls == []
+
+
+def test_otp_journey_via_whatsapp_provider(client, journey, otp_wa, http):
+    j = journey("I need UGX 30 million to expand my pharmacy.")
+    j.send(action="confirm")
+    j.send("0772100888")
+    code = j.cards("otp_input")[0]["dev_code"]
+    sent = [c["json"] for c in http.calls if "verification code" in json.dumps(c["json"])]
+    assert code and sent and code in sent[0]["text"]["body"]
+    j.send(code)
+    assert j.node == "ASK_PROFILE"

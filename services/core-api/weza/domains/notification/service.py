@@ -132,8 +132,6 @@ def retry_failed_channel_messages(db: Session, now: datetime | None = None) -> i
 
 
 def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> SendResult:
-    s = get_settings()
-    url = f"https://graph.facebook.com/{s.graph_api_version}/{s.whatsapp_phone_number_id}/messages"
     buttons = (payload or {}).get("quick_replies") or []
     if buttons and len(buttons) <= 3:
         msg = {"messaging_product": "whatsapp", "to": phone_e164.lstrip("+"), "type": "interactive",
@@ -146,6 +144,12 @@ def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> SendResu
             body = body + "\n\nReply with: " + " / ".join(b["label"] for b in buttons)
         msg = {"messaging_product": "whatsapp", "to": phone_e164.lstrip("+"), "type": "text",
                "text": {"body": body[:4096]}}
+    return _graph_post(msg)
+
+
+def _graph_post(msg: dict) -> SendResult:
+    s = get_settings()
+    url = f"https://graph.facebook.com/{s.graph_api_version}/{s.whatsapp_phone_number_id}/messages"
     try:
         r = httpx.post(url, json=msg, headers={"Authorization": f"Bearer {s.whatsapp_token}"}, timeout=10)
     except httpx.HTTPError:

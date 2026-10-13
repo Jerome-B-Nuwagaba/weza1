@@ -27,6 +27,14 @@ Set the same fake values in the API terminal, restart, then replay payloads:
     .venv\Scripts\python scripts\dev_api.py
     .venv\Scripts\python scripts\replay_whatsapp_webhook.py list
 
+## Verification codes (OTP) through Meta
+Set `SMS_PROVIDER=whatsapp` and the codes are sent through the WhatsApp Cloud API with the same `WHATSAPP_*` credentials.
+Meta only delivers free-form messages inside 24 h of the customer's last message, so for journeys started on the web/app
+create an Authentication template in WhatsApp Manager (copy-code button), wait for approval and set
+`WHATSAPP_OTP_TEMPLATE_NAME` (+ `WHATSAPP_OTP_TEMPLATE_LANGUAGE`). Without it only WhatsApp-started journeys work and a web
+OTP fails with Meta error 131047. Dev mode (`OTP_DELIVERY=display`) still shows the code in the UI. The template payload shape is
+UNVERIFIED AGAINST REAL META.
+
 ## Real end-to-end test with Meta
 1. Fill `.env` (configure_env.py), restart the API; the startup log line `channel_config` should list the names as configured.
 2. Expose the local API: `ngrok http 8000` (or `cloudflared tunnel --url http://localhost:8000`).
@@ -41,4 +49,4 @@ Set the same fake values in the API terminal, restart, then replay payloads:
 - **Templates**: required to message customers first or after 24 h of silence (WEZA reminders, waiting-room notices). Needs
   approved template names/languages, a WABA id, and a send path that maps events → templates.
 - **Opt-in policy**: how/when customers consent to WhatsApp messages, how opt-out ("STOP") is honoured, and where it is recorded.
-- **Real SMS provider** for OTP (slot: `weza/domains/notification/sms.py`), and OTP wording/sender id rules from the telecom.
+- **Other SMS gateway** (only if you ever want a non-Meta fallback): slot in `weza/domains/notification/sms.py`.

@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     whatsapp_verify_token: str | None = None  # any string you choose; must match the Meta webhook form
     whatsapp_api_version: str = "v21.0"  # Graph API version, e.g. v21.0
     whatsapp_business_account_id: str | None = None  # WABA id — only needed later for templates
+    # Verification codes through WhatsApp (SMS_PROVIDER=whatsapp). Outside the 24-hour window Meta only delivers an
+    # approved AUTHENTICATION template; leave the name blank to send a plain message (WhatsApp-started journeys only).
+    # >>> USER INPUT REQUIRED: create the template in Meta (WhatsApp Manager → Message templates → Authentication,
+    # with the copy-code button), wait for approval, then put its exact name here.
+    whatsapp_otp_template_name: str | None = None
+    whatsapp_otp_template_language: str = "en"
     whatsapp_business_number: str | None = None  # public business number (digits) for the "Continue on WhatsApp" link
     # >>> USER INPUT REQUIRED: SMS provider for real OTP delivery. console/simulator = no real SMS.
     sms_provider: str = "console"
@@ -109,6 +115,8 @@ class Settings(BaseSettings):
     @property
     def sms_ready(self) -> bool:
         """A real SMS provider is named and has an API key (provider classes may require more)."""
+        if self.sms_provider_name == "whatsapp":  # codes ride the WhatsApp Cloud API credentials
+            return self.whatsapp_send_ready
         return self.sms_provider_name != "console" and is_configured(self.sms_api_key)
 
     def channel_config_summary(self) -> dict:
@@ -118,6 +126,7 @@ class Settings(BaseSettings):
             "WHATSAPP_TOKEN": is_configured(self.whatsapp_token),
             "WHATSAPP_PHONE_NUMBER_ID": is_configured(self.whatsapp_phone_number_id),
             "WHATSAPP_BUSINESS_NUMBER": is_configured(self.whatsapp_business_number),
+            "WHATSAPP_OTP_TEMPLATE_NAME": is_configured(self.whatsapp_otp_template_name),
             "WHATSAPP_BUSINESS_ACCOUNT_ID": is_configured(self.whatsapp_business_account_id),
             "SMS_PROVIDER": self.sms_provider_name != "console", "SMS_API_KEY": is_configured(self.sms_api_key),
             "SMS_USERNAME": is_configured(self.sms_username), "SMS_SENDER_ID": is_configured(self.sms_sender_id),
