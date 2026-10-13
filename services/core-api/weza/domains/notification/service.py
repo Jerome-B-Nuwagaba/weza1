@@ -59,9 +59,29 @@ def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: s
                 payload = {**(payload or {}), "_retry_to": _enc_phone(phone_e164), "_retries": 0,
                            "_retry_after": (utcnow() + timedelta(seconds=RETRY_BACKOFF_SECONDS)).isoformat()}
     elif channel == "sms" and s.sms_provider_name != "console":
-        # >>> USER INPUT REQUIRED: real SMS delivery is not implemented yet (step e) — choose a provider and set
-        # SMS_PROVIDER + its credentials in services/core-api/.env. Until then nothing is sent to a provider.
+        # Real SMS goes through the provider-agnostic slot in notification/sms.py.
+        from weza.domains.notification import sms
+        sender, why = sms.resolve(s)
         provider = s.sms_provider_name
+        if sender is None and not s.is_production and s.otp_delivery == "display":
+            # Dev convenience: a half-configured provider must not block local journeys — show it in the simulator.
+            log.warning("sms_provider_unavailable_dev_fallback", extra={"data": {"why": why}})
+            provider = "simulator"
+        elif sender is None:
+            status, error_code = "FAILED", why
+            log.error("sms_provider_unavailable", extra={"data": {"provider": provider, "why": why}})
+        else:
+            try:
+                res = sender.send(phone_e164, body)
+            except Exception:  # noqa: BLE001 — a provider bug must not break the journey
+                log.exception("sms_send_crashed")
+                res = SendResult(False, error_code="PROVIDER_ERROR")
+            status = "SENT" if res.ok else "FAILED"
+            wamid, error_code = res.provider_message_id, res.error_code
+            if not res.ok:
+                log.warning("sms_send_failed", extra={"data": {"err": res.error_code}})
+    if kind == "otp" and provider != "simulator":
+        body = "Verification code sent."  # never keep a real one-time code in the database
     db.add(ChannelMessage(channel=channel, to_index=crypto.blind_index("phone", phone_e164), body=body,
                           payload={"kind": kind, **(payload or {})}, provider=provider, status=status,
                           provider_message_id=wamid, error_code=error_code))

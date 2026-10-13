@@ -651,3 +651,122 @@ def test_outbound_failure_logs_carry_no_pii(wa_live, http, caplog, capsys):
         JsonFormatter().format(r) + r.getMessage() + str(getattr(r, "data", "")) for r in caplog.records)
     assert phone not in blob and phone[3:] not in blob and "ZEBRA-MARKER-5512" not in blob
     assert any(r.getMessage() == "whatsapp_send_failed" for r in caplog.records)
+
+
+# ------------------------------------------------------------------ SMS / OTP adapter slot (step e)
+
+
+class FakeSms:
+    def __init__(self, ok=True):
+        self.sent, self.ok = [], ok
+
+    def __call__(self, settings):
+        return self
+
+    def send(self, to, body):
+        self.sent.append((to, body))
+        return notify.SendResult(self.ok, provider_message_id="sms-FAKE-1" if self.ok else None,
+                                 error_code=None if self.ok else "FAKE_ERR")
+
+
+@pytest.fixture()
+def sms_registry(monkeypatch):
+    from weza.domains.notification import sms
+    monkeypatch.setattr(sms, "_PROVIDERS", {})
+    return sms
+
+
+def _sms(phone, body="Your WEZA verification code is 123456.", kind="otp"):
+    with session_scope() as db:
+        return notify.send_customer_message(db, "+" + phone, body, channel="sms", kind=kind)
+
+
+def test_sms_console_default_goes_to_simulator_with_code_visible():
+    phone = fake_phone()
+    assert _sms(phone) is True
+    (m,) = out_messages(phone)
+    assert m.provider == "simulator" and "123456" in m.body
+
+
+def test_sms_provider_sends_and_never_stores_the_otp(sms_registry, monkeypatch):
+    s = get_settings()
+    fake = FakeSms()
+    sms_registry.register_sms_provider("fakesms", fake)
+    monkeypatch.setattr(s, "sms_provider", "fakesms")
+    monkeypatch.setattr(s, "sms_api_key", "FAKE_key_not_real")
+    phone = fake_phone()
+    assert _sms(phone) is True
+    assert fake.sent == [("+" + phone, "Your WEZA verification code is 123456.")]
+    (m,) = out_messages(phone)
+    assert m.provider == "fakesms" and m.status == "SENT" and m.provider_message_id == "sms-FAKE-1"
+    assert "123456" not in m.body
+
+
+def test_sms_provider_failure_is_recorded(sms_registry, monkeypatch):
+    s = get_settings()
+    sms_registry.register_sms_provider("fakesms", FakeSms(ok=False))
+    monkeypatch.setattr(s, "sms_provider", "fakesms")
+    monkeypatch.setattr(s, "sms_api_key", "FAKE_key_not_real")
+    phone = fake_phone()
+    assert _sms(phone) is False
+    (m,) = out_messages(phone)
+    assert m.status == "FAILED" and m.error_code == "FAKE_ERR"
+
+
+def test_sms_provider_crash_does_not_raise(sms_registry, monkeypatch):
+    class Crash:
+        def __init__(self, s): ...
+        def send(self, *a):
+            raise RuntimeError("boom")
+    s = get_settings()
+    sms_registry.register_sms_provider("fakesms", Crash)
+    monkeypatch.setattr(s, "sms_provider", "fakesms")
+    monkeypatch.setattr(s, "sms_api_key", "FAKE_key_not_real")
+    phone = fake_phone()
+    assert _sms(phone) is False and out_messages(phone)[0].error_code == "PROVIDER_ERROR"
+
+
+def test_sms_placeholder_key_means_provider_not_called(sms_registry, monkeypatch):
+    s = get_settings()
+    fake = FakeSms()
+    sms_registry.register_sms_provider("fakesms", fake)
+    monkeypatch.setattr(s, "sms_provider", "fakesms")
+    monkeypatch.setattr(s, "sms_api_key", "REPLACE_ME")
+    monkeypatch.setattr(s, "env", "production")
+    phone = fake_phone()
+    assert _sms(phone) is False and fake.sent == []
+    assert out_messages(phone)[0].error_code == "NOT_CONFIGURED"
+
+
+def test_sms_unimplemented_provider_fails_in_production_but_falls_back_in_dev(monkeypatch):
+    s = get_settings()
+    monkeypatch.setattr(s, "sms_provider", "someprovider")
+    monkeypatch.setattr(s, "sms_api_key", "FAKE_key_not_real")
+    dev = fake_phone()
+    assert _sms(dev) is True and out_messages(dev)[0].provider == "simulator"
+    monkeypatch.setattr(s, "env", "production")
+    prod = fake_phone()
+    assert _sms(prod) is False
+    (m,) = out_messages(prod)
+    assert m.status == "FAILED" and m.error_code == "PROVIDER_NOT_IMPLEMENTED" and "123456" not in m.body
+
+
+def test_otp_journey_still_shows_dev_code_and_uses_provider(client, journey, sms_registry, monkeypatch):
+    s = get_settings()
+    fake = FakeSms()
+    sms_registry.register_sms_provider("fakesms", fake)
+    monkeypatch.setattr(s, "sms_provider", "fakesms")
+    monkeypatch.setattr(s, "sms_api_key", "FAKE_key_not_real")
+    j = journey("I need UGX 30 million to expand my pharmacy.")
+    j.send(action="confirm")
+    j.send("0772100777")
+    code = j.cards("otp_input")[0]["dev_code"]  # dev mode (OTP_DELIVERY=display) still shows it
+    assert code and fake.sent and code in fake.sent[0][1]
+    j.send(code)
+    assert j.node == "ASK_PROFILE"
+
+
+def test_config_summary_flags_unreachable_otp_in_production(monkeypatch):
+    s = get_settings()
+    monkeypatch.setattr(s, "env", "production")
+    assert s.channel_config_summary()["verification_sms"] is False

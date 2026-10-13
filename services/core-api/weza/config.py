@@ -98,6 +98,11 @@ class Settings(BaseSettings):
         p = (self.sms_provider or "").strip().lower()
         return "console" if p in ("", "console", "simulator") or not is_configured(p) else p
 
+    @property
+    def sms_ready(self) -> bool:
+        """A real SMS provider is named and has an API key (provider classes may require more)."""
+        return self.sms_provider_name != "console" and is_configured(self.sms_api_key)
+
     def channel_config_summary(self) -> dict:
         """Names only, never values — safe to log."""
         flags = {
@@ -112,7 +117,9 @@ class Settings(BaseSettings):
         return {"configured": [k for k, v in flags.items() if v], "missing": [k for k, v in flags.items() if not v],
                 "whatsapp_outbound": "live" if self.whatsapp_send_ready else "simulator",
                 "whatsapp_webhook": "enabled" if self.whatsapp_webhook_ready else "disabled",
-                "sms_outbound": "provider" if self.sms_provider_name != "console" else "console"}
+                "sms_outbound": ("provider" if self.sms_ready else "provider_incomplete")
+                if self.sms_provider_name != "console" else "console",
+                "verification_sms": self.sms_ready or not self.is_production}
 
     @property
     def sqlalchemy_url(self) -> str:
