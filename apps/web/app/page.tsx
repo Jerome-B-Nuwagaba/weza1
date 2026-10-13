@@ -12,8 +12,10 @@ function Landing() {
   const params = useSearchParams();
   const [text, setText] = useState("");
   const [stats, setStats] = useState<any>(null);
+  const [waNumber, setWaNumber] = useState<string | null>(null);
   useEffect(() => {
     api("/public/stats").then(setStats).catch(() => undefined);
+    api("/public/config").then((c: any) => setWaNumber(c?.whatsapp_number || null)).catch(() => undefined);
   }, []);
   const qs = () => {
     const p = new URLSearchParams();
@@ -36,7 +38,7 @@ function Landing() {
               <Button type="submit" size="lg">Start <ArrowRight className="h-4 w-4" /></Button>
             </form>
             <div className="mt-3 flex items-center gap-3 text-[14px]">
-              <Button href={`/whatsapp-sim?${qs()}`} variant="ghost" size="sm"><MessageCircle className="h-4 w-4" /> Continue on WhatsApp</Button>
+              <Button href={waNumber ? `https://wa.me/${waNumber}?text=${encodeURIComponent(text.trim() || "Hi")}` : `/whatsapp-sim?${qs()}`} variant="ghost" size="sm"><MessageCircle className="h-4 w-4" /> Continue on WhatsApp</Button>
             </div>
           </div>
           <div className="rounded-2xl border border-line bg-canvas p-6">

@@ -91,7 +91,7 @@ def _summary(label: str, r: httpx.Response) -> None:
     code = ""
     try:
         body = r.json()
-        code = str(body.get("code") or body.get("ok") or "")
+        code = str((body.get("error") or {}).get("code") or body.get("ok") or "")
     except ValueError:
         pass
     print(f"{label:<14} HTTP {r.status_code}  {code}")

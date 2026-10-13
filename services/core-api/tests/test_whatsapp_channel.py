@@ -770,3 +770,14 @@ def test_config_summary_flags_unreachable_otp_in_production(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "env", "production")
     assert s.channel_config_summary()["verification_sms"] is False
+
+
+# ------------------------------------------------------------------ landing "Continue on WhatsApp" (step f)
+
+
+@pytest.mark.parametrize("raw,expected", [("+256 772 000 111", "256772000111"), ("256772000111", "256772000111"),
+                                          ("REPLACE_ME", None), ("", None), (None, None), ("12345", None),
+                                          ("not a number", None)])
+def test_public_config_exposes_business_number_digits_only(client, monkeypatch, raw, expected):
+    monkeypatch.setattr(get_settings(), "whatsapp_business_number", raw)
+    assert client.get("/api/v1/public/config").json()["whatsapp_number"] == expected

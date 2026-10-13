@@ -54,7 +54,7 @@ def public_config(db: Session = DB):
             "regions": cfg["regions"], "sectors": cfg["sectors"], "purpose_categories": cfg["purpose_categories"],
             "institution_types": cfg["institution_types"], "regulators": cfg["regulators"],
             "demo_mode": s.demo_mode and not s.is_production, "ai_mode": ai_mode(db),
-            "whatsapp_live": s.whatsapp_send_ready, "features": {
+            "whatsapp_live": s.whatsapp_send_ready, "whatsapp_number": s.whatsapp_public_number, "features": {
                 "whatsapp_simulator": flag(db, "channel.whatsapp_simulator", True),
                 "preview": flag(db, "marketplace.preview", False)}}
 

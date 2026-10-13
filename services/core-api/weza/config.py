@@ -99,6 +99,14 @@ class Settings(BaseSettings):
         return "console" if p in ("", "console", "simulator") or not is_configured(p) else p
 
     @property
+    def whatsapp_public_number(self) -> str | None:
+        """Business number for the landing-page wa.me link: digits only (country code, no +), 8–15 digits."""
+        if not is_configured(self.whatsapp_business_number):
+            return None
+        digits = re.sub(r"\D", "", self.whatsapp_business_number or "")
+        return digits if 8 <= len(digits) <= 15 else None
+
+    @property
     def sms_ready(self) -> bool:
         """A real SMS provider is named and has an API key (provider classes may require more)."""
         return self.sms_provider_name != "console" and is_configured(self.sms_api_key)
