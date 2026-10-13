@@ -1,0 +1,44 @@
+# WhatsApp channel runbook
+
+How WhatsApp works in WEZA, how to run it locally against the simulator, and how to connect a real Meta test number.
+Real values live ONLY in `services/core-api/.env` (untracked). Anything that is empty, unset or `REPLACE_ME` means
+"not configured": the app stays in simulator mode and never calls Meta or an SMS provider.
+
+## Flow
+Meta → `POST /api/v1/channels/whatsapp/webhook` (signature checked, message stored once in `notification.whatsapp_inbox`,
+200 returned) → outbox event → worker → `public.inbound()` → `need.service.handle_input()` → replies through
+`notification.send_customer_message()` (Cloud API when configured, otherwise the simulator inbox).
+Delivery receipts (`statuses`) update `notification.channel_message` only; they never advance a journey.
+The simulator (`/whatsapp-sim`) calls `public.inbound()` directly and synchronously.
+
+## Settings (names only)
+`WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_API_VERSION`,
+`WHATSAPP_BUSINESS_NUMBER`, `WHATSAPP_BUSINESS_ACCOUNT_ID` (templates only), `SMS_PROVIDER`, `SMS_API_KEY`, `SMS_USERNAME`,
+`SMS_SENDER_ID`. Fill them with `python scripts/configure_env.py` (hidden input, writes only `.env`).
+
+>>> USER INPUT REQUIRED: the real values above (Meta developer dashboard → your app → WhatsApp → API Setup / Configuration;
+App settings → Basic for the app secret) and your SMS provider's name and credentials.
+
+## Local replay (fake secrets, simulator mode)
+Set the same fake values in the API terminal, restart, then replay payloads:
+
+    set WHATSAPP_APP_SECRET=FAKE_local_app_secret_not_real
+    set WHATSAPP_VERIFY_TOKEN=FAKE_local_verify_token_not_real
+    .venv\Scripts\python scripts\dev_api.py
+    .venv\Scripts\python scripts\replay_whatsapp_webhook.py list
+
+## Real end-to-end test with Meta
+1. Fill `.env` (configure_env.py), restart the API; the startup log line `channel_config` should list the names as configured.
+2. Expose the local API: `ngrok http 8000` (or `cloudflared tunnel --url http://localhost:8000`).
+3. Meta dashboard → WhatsApp → Configuration → Webhook: callback URL `https://<tunnel>/api/v1/channels/whatsapp/webhook`,
+   verify token = your `WHATSAPP_VERIFY_TOKEN`; click Verify, then subscribe to the `messages` field.
+4. API Setup → "To" field: add and verify your own phone as a test recipient (test numbers can only message verified recipients).
+5. Message the test business number from that phone. Expected: a reply within a few seconds; `channel_message` rows
+   gain `provider_status` sent → delivered → read. Send an image or voice note: you get the "typed messages" reply.
+6. Outside the 24-hour customer-service window Meta rejects free-form messages (needs templates — not implemented).
+
+## Not implemented (decisions needed from your team)
+- **Templates**: required to message customers first or after 24 h of silence (WEZA reminders, waiting-room notices). Needs
+  approved template names/languages, a WABA id, and a send path that maps events → templates.
+- **Opt-in policy**: how/when customers consent to WhatsApp messages, how opt-out ("STOP") is honoured, and where it is recorded.
+- **Real SMS provider** for OTP (slot: `weza/domains/notification/sms.py`), and OTP wording/sender id rules from the telecom.
