@@ -58,6 +58,23 @@ class ChannelMessage(IdMixin, Base):
     status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class WhatsappInbox(IdMixin, Base):
+    """One row per inbound WhatsApp message id (Meta retries are deduplicated by the unique key).
+    Content is stored encrypted until processed, then wiped. See notification/whatsapp_inbound.py."""
+
+    __tablename__ = "whatsapp_inbox"
+    __table_args__ = ({"schema": "notification"},)
+
+    provider_message_id: Mapped[str] = mapped_column(String(128), unique=True)
+    msg_type: Mapped[str] = mapped_column(String(24))
+    phone_index: Mapped[str] = mapped_column(String(64), index=True)  # blind index — never the raw number
+    payload_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(12), default="PENDING", index=True)  # PENDING|DONE|DROPPED|IGNORED
+    reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class IntegritySignal(IdMixin, Base):
     __tablename__ = "signal"
     __table_args__ = ({"schema": "integrity"},)

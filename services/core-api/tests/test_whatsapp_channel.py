@@ -18,12 +18,13 @@ from sqlalchemy import func, select
 from scripts import replay_whatsapp_webhook as rw
 from weza.config import get_settings, is_configured
 from weza.domains.intelligence.parsing import parse_phone
-from weza.domains.misc_models import ChannelMessage
+from weza.domains.misc_models import ChannelMessage, WhatsappInbox
 from weza.domains.need.models import ConversationMessage
 from weza.domains.notification import service as notify
 from weza.platform import crypto
 from weza.platform.controls import rate_limit
 from weza.platform.db import session_scope
+from weza.platform.events import drain
 from weza.platform.logging import JsonFormatter
 from weza.platform.models import GraphInstance
 
@@ -89,8 +90,7 @@ def wa_live(wa_inbound, monkeypatch, http):
     return wa_inbound
 
 
-def send(client, payload: dict, *, signature="auto"):
-    raw = json.dumps(payload).encode()
+def post_raw(client, raw: bytes, *, signature="auto"):
     headers = {"Content-Type": "application/json"}
     if signature == "auto":
         headers["X-Hub-Signature-256"] = rw.sign(raw)
@@ -99,8 +99,24 @@ def send(client, payload: dict, *, signature="auto"):
     return client.post(URL, content=raw, headers=headers)
 
 
-def text_msg(client, phone, text, mid=None):
-    return send(client, rw.build("text", phone=phone, text=text, message_id=mid))
+def send(client, payload: dict, *, signature="auto", process=True):
+    """POST a signed webhook; by default also run the worker (drain) so queued inbound messages are processed."""
+    r = post_raw(client, json.dumps(payload).encode(), signature=signature)
+    if process:
+        drain()
+    return r
+
+
+def text_msg(client, phone, text, mid=None, process=True):
+    return send(client, rw.build("text", phone=phone, text=text, message_id=mid), process=process)
+
+
+def inbox_rows(digits: str) -> list[WhatsappInbox]:
+    with session_scope() as db:
+        rows = db.execute(select(WhatsappInbox).where(WhatsappInbox.phone_index == idx_of(digits))
+                          .order_by(WhatsappInbox.received_at, WhatsappInbox.id)).scalars().all()
+        db.expunge_all()
+        return rows
 
 
 def journeys_for(digits: str) -> list[tuple[str, str]]:
@@ -174,8 +190,13 @@ def test_config_summary_lists_names_only(monkeypatch, capsys):
     assert "WHATSAPP_TOKEN" in summary["configured"] and "WHATSAPP_APP_SECRET" in summary["missing"]
     assert "FAKE_VALUE_MUST_NOT_APPEAR" not in json.dumps(summary)
     from weza.main import create_app
-    create_app(start_worker=False)  # configure_logging() installs the JSON stdout handler
-    out = capsys.readouterr().out
+    root = logging.getLogger()
+    saved = root.handlers[:]
+    try:
+        create_app(start_worker=False)  # configure_logging() installs the JSON stdout handler
+        out = capsys.readouterr().out
+    finally:
+        root.handlers[:] = saved  # don't leave a handler bound to pytest's captured stdout
     line = next(ln for ln in out.splitlines() if '"channel_config"' in ln)
     assert "FAKE_VALUE_MUST_NOT_APPEAR" not in out
     assert "WHATSAPP_TOKEN" in line and "WHATSAPP_APP_SECRET" in line  # names survive redaction (lists, not key/values)
@@ -270,7 +291,6 @@ def test_duplicate_provider_message_id_processed_once(client, wa_inbound):
     assert len(in_messages(jid)) == 2
 
 
-@pytest.mark.xfail(strict=True, reason="step c: retry of the FIRST message is processed again (no provider inbox)")
 def test_duplicate_of_first_message_processed_once(client, wa_inbound):
     phone = fake_phone()
     mid = "wamid.FAKE_dup_first"
@@ -281,7 +301,6 @@ def test_duplicate_of_first_message_processed_once(client, wa_inbound):
     assert len(in_messages(jid)) == 1 and len(out_messages(phone)) == n_out
 
 
-@pytest.mark.xfail(strict=True, reason="step c: unsupported message types are not handled gracefully yet")
 def test_unsupported_type_gets_graceful_reply_without_advancing_journey(client, wa_inbound):
     phone = fake_phone()
     text_msg(client, phone, "I need money for school fees.")
@@ -289,7 +308,7 @@ def test_unsupported_type_gets_graceful_reply_without_advancing_journey(client, 
     before = len(in_messages(jid))
     assert send(client, rw.build("unsupported", phone=phone)).status_code == 200
     assert journeys_for(phone) == [(jid, node)] and len(in_messages(jid)) == before
-    assert "text" in (out_messages(phone)[-1].body or "").lower()
+    assert "typed messages" in (out_messages(phone)[-1].body or "")
 
 
 def test_status_only_payload_is_ok_and_creates_nothing(client, wa_inbound):
@@ -307,14 +326,14 @@ def test_rate_limit_applies_per_phone_on_simulator(client):
     assert r.status_code == 429
 
 
-@pytest.mark.xfail(strict=True, reason="step c: a rate-limited message currently fails the whole webhook with 429 "
-                                       "(Meta would retry); it should be dropped and acknowledged")
 def test_rate_limited_message_is_acknowledged_not_retried(client, wa_inbound):
     phone = fake_phone()
     with session_scope() as db:
         for _ in range(40):
             rate_limit(db, f"wa:{idx_of(phone)}", 40, 600)
     assert text_msg(client, phone, "hello").status_code == 200
+    assert journeys_for(phone) == []  # dropped, not processed
+    assert [(r.status, r.reason) for r in inbox_rows(phone)] == [("DROPPED", "RATE_LIMITED")]
 
 
 def test_no_pii_in_logs(client, wa_inbound, caplog, capsys):
@@ -450,3 +469,98 @@ def test_unknown_status_value_is_ignored(client, wa_live):
     assert send(client, rw.status_payload(m.provider_message_id, "weird", phone)).status_code == 200
     got = next(x for x in out_messages(phone) if x.provider_message_id == m.provider_message_id)
     assert got.provider_status is None
+
+
+# ------------------------------------------------------------------ inbound hardening (step c)
+
+
+def test_webhook_acknowledges_before_processing(client, wa_inbound):
+    phone = fake_phone()
+    assert text_msg(client, phone, "I need 5 million for stock for my shop", process=False).status_code == 200
+    assert journeys_for(phone) == [] and [r.status for r in inbox_rows(phone)] == ["PENDING"]
+    drain()
+    assert [r.status for r in inbox_rows(phone)] == ["DONE"] and len(journeys_for(phone)) == 1
+
+
+def test_inbox_keeps_no_plaintext_and_wipes_after_processing(client, wa_inbound):
+    phone, marker = fake_phone(), "ZEBRA-MARKER-9921"
+    text_msg(client, phone, f"I need money for {marker}", process=False)
+    (row,) = inbox_rows(phone)
+    assert row.payload_enc and marker not in row.payload_enc and phone not in row.payload_enc
+    drain()
+    assert inbox_rows(phone)[0].payload_enc is None
+
+
+def test_provider_retry_of_same_message_creates_one_inbox_row(client, wa_inbound):
+    phone = fake_phone()
+    payload = rw.build("text", phone=phone, message_id="wamid.FAKE_retry_1")
+    for _ in range(3):
+        assert send(client, payload, process=False).status_code == 200
+    assert len(inbox_rows(phone)) == 1
+    drain()
+    assert len(journeys_for(phone)) == 1
+
+
+@pytest.mark.parametrize("kind", ["image", "audio", "video", "document", "sticker", "location", "contacts"])
+def test_each_unsupported_type_gets_the_polite_reply(client, wa_inbound, kind):
+    phone = fake_phone()
+    p = rw.message_payload({"id": f"wamid.FAKE_{kind}_{phone}", "type": kind, kind: {"id": "FAKE"}}, phone)
+    assert send(client, p).status_code == 200
+    assert journeys_for(phone) == []
+    (m,) = out_messages(phone)
+    assert m.body == "Sorry, I can only read typed messages and button taps for now. " \
+                     "Please type your message or tap one of the options."
+    assert inbox_rows(phone)[0].reason == "UNSUPPORTED_TYPE"
+
+
+def test_unsupported_replies_are_capped_per_number(client, wa_inbound):
+    phone = fake_phone()
+    for i in range(6):
+        send(client, rw.message_payload({"id": f"wamid.FAKE_img_{phone}_{i}", "type": "image", "image": {}}, phone))
+    assert len(out_messages(phone)) == 3 and len(inbox_rows(phone)) == 6
+
+
+def test_reaction_is_ignored_without_reply(client, wa_inbound):
+    phone = fake_phone()
+    p = rw.message_payload({"id": f"wamid.FAKE_react_{phone}", "type": "reaction", "reaction": {"emoji": "x"}}, phone)
+    assert send(client, p).status_code == 200
+    assert journeys_for(phone) == [] and out_messages(phone) == []
+    assert inbox_rows(phone)[0].status == "IGNORED"
+
+
+def test_messages_are_processed_in_arrival_order(client, wa_inbound):
+    phone = fake_phone()
+    text_msg(client, phone, "I need money for school fees.", mid=f"wamid.FAKE_o1_{phone}", process=False)
+    text_msg(client, phone, "2.5 million", mid=f"wamid.FAKE_o2_{phone}", process=False)
+    drain()
+    ((jid, node),) = journeys_for(phone)
+    assert node == "ASK_INTENT" and len(in_messages(jid)) == 2
+    a, b = inbox_rows(phone)
+    assert a.processed_at <= b.processed_at
+
+
+def test_malformed_payloads_do_not_crash(client, wa_inbound):
+    assert post_raw(client, b"not json").status_code == 422
+    assert post_raw(client, b"[1,2]").status_code == 422
+    junk = {"entry": [{"changes": [{"value": {"messages": ["x", {"type": "text"}, {"id": "w", "from": ""}]}},
+                                    {"value": None}, {}]}, {}]}
+    assert send(client, junk).status_code == 200
+
+
+def test_one_bad_message_in_a_batch_does_not_block_the_others(client, wa_inbound):
+    phone = fake_phone()
+    good = rw.message_payload({"id": f"wamid.FAKE_good_{phone}", "type": "text", "text": {"body": "hi there friend"}}, phone)
+    good["entry"][0]["changes"][0]["value"]["messages"].insert(0, {"type": "text"})  # no id/from
+    assert send(client, good).status_code == 200
+    assert len(inbox_rows(phone)) == 1 and len(journeys_for(phone)) == 1
+
+
+def test_processing_failure_keeps_message_pending_for_retry(client, wa_inbound, monkeypatch):
+    from weza.api.v1 import public
+    phone = fake_phone()
+
+    def boom(*a, **k):
+        raise RuntimeError("simulated crash")
+    monkeypatch.setattr(public, "inbound", boom)
+    assert text_msg(client, phone, "I need 5 million for stock for my shop").status_code == 200
+    assert [r.status for r in inbox_rows(phone)] == ["PENDING"] and journeys_for(phone) == []

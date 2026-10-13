@@ -3,6 +3,7 @@ institution applications."""
 
 import hashlib
 import hmac
+import json
 import logging
 import uuid
 
@@ -21,6 +22,7 @@ from weza.domains.institution.models import Institution
 from weza.domains.misc_models import ChannelMessage
 from weza.domains.need import service as journeys
 from weza.domains.notification import service as notify
+from weza.domains.notification import whatsapp_inbound as wa_inbound
 from weza.domains.need.models import ConversationMessage
 from weza.domains.product.models import Product
 from weza.platform import crypto
@@ -155,8 +157,13 @@ async def whatsapp_webhook(request: Request, x_hub_signature_256: str | None = H
     expected = "sha256=" + hmac.new(s.whatsapp_app_secret.encode(), raw, hashlib.sha256).hexdigest()
     if not x_hub_signature_256 or not hmac.compare_digest(expected, x_hub_signature_256):
         raise Forbidden("Invalid signature.")
-    payload = await request.json()
-    n_status = 0
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        raise ValidationFailed("Malformed payload.") from None
+    if not isinstance(payload, dict):
+        raise ValidationFailed("Malformed payload.")
+    n_status = n_new = n_dup = 0
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value") or {}
@@ -166,14 +173,13 @@ async def whatsapp_webhook(request: Request, x_hub_signature_256: str | None = H
                 n_status += notify.apply_delivery_status(
                     db, st.get("id", ""), st.get("status", ""), notify.parse_status_time(st.get("timestamp")),
                     str(code) if code is not None else None)
-            for msg in value.get("messages", []):
-                phone = "+" + msg.get("from", "").lstrip("+")
-                text_ = (msg.get("text") or {}).get("body")
-                reply = ((msg.get("interactive") or {}).get("button_reply") or {})
-                inbound(db, phone, text=text_, button_id=reply.get("id"), button_title=reply.get("title"),
-                        message_id=msg.get("id"))
-    if n_status:
-        log.info("whatsapp_statuses_applied", extra={"data": {"count": n_status}})
+            for msg in value.get("messages") or []:  # acknowledge fast: store + queue, the worker processes
+                # Storage errors propagate on purpose (500 → Meta retries; the unique key makes that safe).
+                if isinstance(msg, dict) and wa_inbound.receive(db, msg):
+                    n_new += 1
+                else:
+                    n_dup += 1
+    log.info("whatsapp_webhook", extra={"data": {"received": n_new, "skipped": n_dup, "statuses": n_status}})
     return {"ok": True}
 
 
@@ -197,7 +203,8 @@ def inbound(db: Session, phone: str, *, text: str | None, button_id: str | None 
                                                customer_id=cust.id if cust else None,
                                                first_text=text if text and text.strip().lower() not in
                                                ("hi", "hello", "hey", "restart", "start", "new request", "start over")
-                                               else None, channel_phone=phone_e164)
+                                               else None, channel_phone=phone_e164,
+                                               message_id=message_id)
         inst.state = {**inst.state, "wa_index": idx}
         return outputs
     payload: dict = {"text": text or button_title or ""}
