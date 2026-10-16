@@ -131,6 +131,13 @@ def qualify(db: Session, actor: Actor, need: FinancialNeed, match: Match, consen
     customer = db.get(Customer, need.customer_id)
     if customer is None or customer.verification_level == "NONE":
         raise ValidationFailed("Phone verification is required.", code="VERIFICATION_REQUIRED")
+    from weza.config import get_settings
+    if get_settings().identity_verification_required:
+        from weza.domains.verification.service import is_verified
+        if not is_verified(db, customer.id):
+            raise ValidationFailed("We need to confirm your National ID before sharing your request. This usually "
+                                   "takes a moment — please try again shortly, or check the number in your profile.",
+                                   code="IDENTITY_NOT_VERIFIED")
     if need.intent_confirmed_at is None:
         raise ValidationFailed("Please confirm your request first.", code="INTENT_NOT_CONFIRMED")
     active_for_need = db.execute(select(func.count()).select_from(Opportunity).where(
@@ -706,9 +713,12 @@ def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
             "annual_income": facts.get("farm.annual_income"), "monthly_repayments": facts.get("finance.monthly_repayments"),
         }
         customer_block["fields"] = {k: v for k, v in available.items() if k in decision.fields and v is not None}
+        from weza.domains.verification.service import summary as identity_summary
         customer_block["verification"] = {"phone": True, "nin_provided": bool(vault.get("nin")),
                                           "level": cust.verification_level,
-                                          "note": "Marketplace verification only — not institution KYC."}
+                                          "identity": identity_summary(db, opp.customer_id),
+                                          "note": "Identity checked against the national register where shown. "
+                                                  "This is not institution KYC or a credit decision."}
         if "documents" in decision.fields:
             customer_block["documents"] = [
                 {"id": str(d.id), "doc_type": d.doc_type, "filename": d.filename, "size": d.size}
@@ -742,12 +752,16 @@ def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
 
 
 def summary(db: Session, opp: Opportunity, a: Assignment | None = None, product_names: dict | None = None,
-            users: dict | None = None, open_requests: dict | None = None) -> dict:
+            users: dict | None = None, open_requests: dict | None = None,
+            identity_statuses: dict | None = None) -> dict:
     """Non-identifiable opportunity card (safe for any role with opportunity.read_meta). `open_requests` is a
     pre-fetched {opportunity_id: count} for list views; otherwise it is looked up."""
     if a is None:
         a = db.get(Assignment, opp.id)
     pending = (open_requests if open_requests is not None else open_info_request_counts(db, [opp.id])).get(opp.id, 0)
+    if identity_statuses is None:
+        from weza.domains.verification.service import latest_statuses
+        identity_statuses = latest_statuses(db, [opp.customer_id])
     snap = opp.snapshot or {}
     expl = (snap.get("match") or {}).get("explanation") or {}
     from weza.domains.identity.models import User
@@ -776,6 +790,8 @@ def summary(db: Session, opp: Opportunity, a: Assignment | None = None, product_
         "integrity_hold": opp.integrity_hold, "is_demo": opp.is_demo,
         # PENDING_INFO is derived, not a state: queue rank and service targets are unaffected.
         "awaiting_customer": pending > 0, "open_info_requests": pending,
+        # Registry check status only (VERIFIED/MISMATCH/NOT_FOUND/PENDING/NOT_CHECKED) — never the NIN itself
+        "identity_status": identity_statuses.get(opp.customer_id, "NOT_CHECKED"),
         "next_action": _next_action(opp, a, awaiting_customer=pending > 0),
     }
 

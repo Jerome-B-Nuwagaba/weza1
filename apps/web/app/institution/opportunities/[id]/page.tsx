@@ -6,7 +6,7 @@ import { use, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { dateTime, money, moneyFull, STATE_LABEL } from "@/lib/format";
-import { AwaitingBadge, FreshnessBadge, PriorityBadge, TargetBadge, TermsLine } from "@/components/opportunity";
+import { AwaitingBadge, FreshnessBadge, IdentityBadge, PriorityBadge, TargetBadge, TermsLine } from "@/components/opportunity";
 import { Badge, Banner, Bar, Button, Card, ErrorState, Field, Input, KV, Loading, Modal, ReasonChips, ScoreRing, Select, StateBadge, Textarea, useToast } from "@/components/ui";
 
 const COMPONENTS: [string, string][] = [["product_fit", "Product fit"], ["appetite_fit", "Appetite fit"], ["preference_fit", "Preference fit"], ["readiness", "Readiness"], ["capacity_fit", "Capacity"]];
@@ -104,8 +104,9 @@ export default function Opportunity360({ params }: { params: Promise<{ id: strin
               <KV items={Object.entries(cust.fields).map(([k, v]) => [FIELD_LABEL[k] || k, typeof v === "number" ? moneyFull(v as number) : typeof v === "boolean" ? (v ? "Yes" : "No") : String(v).replace(/_/g, " ")])} />
               <div className="mt-3 flex flex-wrap gap-1.5">
                 <Badge tone="success">Phone verified</Badge>
-                {cust.verification?.nin_provided ? <Badge tone="success">NIN provided</Badge> : <Badge tone="muted">NIN not provided</Badge>}
+                <IdentityBadge status={cust.verification?.identity?.status} label={cust.verification?.identity?.label} />
               </div>
+              {cust.verification?.identity?.checked_at && <p className="mt-1 text-[12px] text-muted">Checked {dateTime(cust.verification.identity.checked_at)}. {cust.verification.note}</p>}
               {cust.documents?.length > 0 && (
                 <div className="mt-4">
                   <div className="mb-1 text-[13px] font-medium">Authorised documents</div>

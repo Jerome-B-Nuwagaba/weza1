@@ -7,7 +7,8 @@ import { date } from "@/lib/format";
 import { PublicShell } from "@/components/PublicShell";
 import { Badge, Banner, Button, Card, EmptyState, ErrorState, Input, Loading, PageHeader, Select } from "@/components/ui";
 
-const SOURCE: Record<string, string> = { CUSTOMER: "You told us", AI_EXTRACTED: "Understood by WEZA", DOCUMENT: "From a document", OPS: "WEZA support" };
+const SOURCE: Record<string, string> = { CUSTOMER: "You told us", AI_EXTRACTED: "Understood by WEZA", DOCUMENT: "From a document", OPS: "WEZA support", REGISTRY: "Checked with the national register" };
+const ID_TONE: Record<string, "success" | "danger" | "warning" | "muted"> = { VERIFIED: "success", MISMATCH: "danger", NOT_FOUND: "danger", PENDING: "warning", NOT_CHECKED: "muted" };
 const PREFS: Record<string, string> = { LOWER_MONTHLY_PAYMENT: "Lower monthly payment", LOW_COLLATERAL: "Little or no collateral", FAST_RESPONSE: "Fast response", DIGITAL: "Digital process", NEAR_ME: "Near me", SHORTER_TENOR: "Shorter repayment" };
 
 export default function ProfilePage() {
@@ -28,7 +29,9 @@ function Inner() {
   const [val, setVal] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [prefs, setPrefs] = useState<any>(null);
-  useEffect(() => p.data && setPrefs(p.data.preferences), [p.data]);
+  useEffect(() => {
+    if (p.data) setPrefs(p.data.preferences);
+  }, [p.data]);
 
   async function save(key: string) {
     try {
@@ -52,7 +55,7 @@ function Inner() {
     <>
       <PageHeader title="My profile" subtitle="This is what WEZA holds about you. Correct anything before sharing — every value shows where it came from." actions={<Button href="/c/documents" variant="secondary">Documents</Button>} />
       {msg && <Banner tone="info" className="mb-4">{msg}</Banner>}
-      <Card title={c.name || "Your details"} subtitle={`Phone ${c.phone} · ${c.verification_level === "IDENTITY" ? "Phone and ID provided" : "Phone verified"} · Marketplace verification only — institutions do their own checks.`}>
+      <Card title={c.name || "Your details"} subtitle={`Phone ${c.phone} · ${c.verification_level === "IDENTITY" ? "Phone and National ID verified" : "Phone verified"} · Institutions still do their own checks.`}>
         <ul className="divide-y divide-line">
           {p.data.facts.map((f: any) => (
             <li key={f.key} className="flex flex-col gap-1 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -73,6 +76,7 @@ function Inner() {
           ))}
         </ul>
       </Card>
+      <IdentityCard identity={p.data.identity} onSaved={(r: any, text: string) => { p.setData(r); setMsg(text); }} />
       {prefs && (
         <Card title="Preferences" className="mt-4">
           <div className="grid gap-4 sm:grid-cols-2">
@@ -89,6 +93,45 @@ function Inner() {
         </Card>
       )}
     </>
+  );
+}
+
+function IdentityCard({ identity, onSaved }: { identity: any; onSaved: (r: any, msg: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [nin, setNin] = useState("");
+  const [name, setName] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const failed = identity && ["MISMATCH", "NOT_FOUND"].includes(identity.status);
+  async function save() {
+    setErr(null);
+    try {
+      const r = await api("/me/identity", { method: "PUT", body: { nin: nin || null, full_name: name || null } });
+      setOpen(false);
+      setNin("");
+      setName("");
+      onSaved(r, "Thanks — we're checking your National ID now. This usually takes a moment.");
+    } catch (e) {
+      setErr((e as ApiError).message);
+    }
+  }
+  if (!identity) return null;
+  return (
+    <Card title="National ID" className="mt-4" subtitle="WEZA checks your National ID number with the national register so institutions know you are who you say you are.">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={ID_TONE[identity.status] || "muted"}>{identity.label}</Badge>
+        {identity.checked_at && <span className="text-[12px] text-muted">{date(identity.checked_at)}</span>}
+        {!open && <Button size="sm" variant={failed ? "primary" : "ghost"} onClick={() => setOpen(true)}>{failed ? "Correct my details" : "Update"}</Button>}
+      </div>
+      {failed && !open && <p className="mt-2 text-[13px] text-danger">Please check the number and the name exactly as they appear on your National ID card.</p>}
+      {open && (
+        <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+          <label className="text-[13px]">National ID number<Input value={nin} onChange={(e) => setNin(e.target.value.toUpperCase())} placeholder="CM…" maxLength={20} /></label>
+          <label className="text-[13px]">Full name as on the card<Input value={name} onChange={(e) => setName(e.target.value)} maxLength={120} /></label>
+          <div className="flex gap-2"><Button size="sm" disabled={!nin && !name} onClick={save}>Save</Button><Button size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button></div>
+        </div>
+      )}
+      {err && <Banner tone="danger" className="mt-3">{err}</Banner>}
+    </Card>
   );
 }
 

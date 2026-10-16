@@ -145,13 +145,14 @@ def test_audit_is_append_only(database):
 
 
 def test_zero_core_integration_boundary():
-    """AT-49 / FR-039: the only outbound HTTP calls are the customer channels (WhatsApp, SMS) and the AI provider —
-    there is no connector to any institution core banking, CRM, LOS or database."""
+    """AT-49 / FR-039: the only outbound HTTP calls are the customer channels (WhatsApp, SMS), the AI provider and the
+    identity registry used to verify applicants (gnuGRID) — there is no connector to any institution core banking,
+    CRM, LOS or database."""
     root = Path(__file__).resolve().parents[1] / "weza"
     offenders = []
     for f in root.rglob("*.py"):
         src = f.read_text(encoding="utf8")
         if re.search(r"httpx\.(get|post|put|request|Client)|requests\.|urllib\.request", src):
             offenders.append(f.relative_to(root).as_posix())
-    assert offenders == ["domains/notification/service.py"], offenders
+    assert sorted(offenders) == ["domains/notification/service.py", "domains/verification/adapters.py"], offenders
     assert "graph.facebook.com" in (root / "domains/notification/service.py").read_text(encoding="utf8")

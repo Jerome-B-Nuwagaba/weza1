@@ -37,6 +37,11 @@ def evaluate_customer(db: Session, customer: Customer, need: FinancialNeed) -> t
             Customer.device_hash == customer.device_hash, Customer.created_at >= now - timedelta(days=7))).scalar_one()
         if devices > 3:
             signals.append({"kind": "DEVICE_REUSE", "weight": WEIGHTS["medium"], "detail": {"customers": devices}})
+    from weza.domains.verification.service import latest as latest_identity_check
+    check = latest_identity_check(db, customer.id)
+    if check is not None and check.status in ("NOT_FOUND", "MISMATCH"):
+        signals.append({"kind": f"IDENTITY_{check.status}", "weight": WEIGHTS["high"],
+                        "detail": {"provider": check.provider, "check": str(check.id)}})
     first_msg = db.execute(select(ConversationMessage.content).where(
         ConversationMessage.customer_id == customer.id, ConversationMessage.direction == "IN")
         .order_by(ConversationMessage.received_at).limit(1)).scalar_one_or_none()

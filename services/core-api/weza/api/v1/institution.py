@@ -40,6 +40,7 @@ from weza.domains.product.models import Product, ProductVersion
 from weza.domains.trust import policy
 from weza.domains.trust.models import AuditEvent, PolicyDecisionLog
 from weza.domains.trust.service import audit
+from weza.domains.verification import service as verification
 from weza.platform.context import Actor
 from weza.platform.controls import flag, idempotent
 from weza.platform.db import utcnow
@@ -632,7 +633,8 @@ def feed(view: str | None = None, state: str | None = None, freshness: str | Non
     users = {u.id: u.full_name for u in db.execute(select(User).join(Membership, Membership.user_id == User.id).where(
         Membership.institution_id == actor.institution_id)).scalars()}
     pending = opp_svc.open_info_request_counts(db, [o.id for o in rows])
-    items = [opp_svc.summary(db, o, users=users, open_requests=pending) for o in rows]
+    ids = verification.latest_statuses(db, [o.customer_id for o in rows])
+    items = [opp_svc.summary(db, o, users=users, open_requests=pending, identity_statuses=ids) for o in rows]
     prio = {"URGENT": 0, "HIGH": 1, "NORMAL": 2}
     if sort == "priority":
         items.sort(key=lambda s: (prio.get(s["priority"], 3), s["minutes_to_target"] if s["minutes_to_target"] is not None
@@ -656,7 +658,8 @@ def my_day(actor: Actor = A, db: Session = DB):
     rows = db.execute(select(Opportunity).join(Assignment, Assignment.opportunity_id == Opportunity.id).where(
         Assignment.user_id == actor.id, Opportunity.state.in_(list(opp_svc.OPEN_STATES)))).scalars().all()
     pending = opp_svc.open_info_request_counts(db, [o.id for o in rows])
-    items = [opp_svc.summary(db, o, open_requests=pending) for o in rows]
+    ids = verification.latest_statuses(db, [o.customer_id for o in rows])
+    items = [opp_svc.summary(db, o, open_requests=pending, identity_statuses=ids) for o in rows]
     sections = {
         "new": [i for i in items if i["state"] in ("ROUTED", "RECEIVED", "ASSIGNED")],
         "follow_up": [i for i in items if i["state"] in ("CONTACTED", "PROCEEDING")],

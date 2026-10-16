@@ -24,6 +24,7 @@ from weza.domains.need.models import FinancialNeed
 from weza.domains.need.service import journey_token, need_summary
 from weza.domains.opportunity import service as opp_svc
 from weza.domains.opportunity.models import Opportunity, Outcome
+from weza.domains.verification import service as verification
 from weza.platform.context import Actor
 from weza.platform.db import utcnow
 from weza.platform.errors import NotFound, ValidationFailed
@@ -48,6 +49,7 @@ def profile(actor: Actor = Depends(customer_actor), db: Session = DB):
     facts = customer_svc.current_facts(db, actor.id)
     pref = db.get(Preference, actor.id)
     return {
+        "identity": verification.summary(db, actor.id),
         "customer": {"id": str(cust.id), "customer_type": cust.customer_type, "verification_level": cust.verification_level,
                      "phone": mask_phone(vault.get("phone")), "name": vault.get("full_name")},
         "facts": [{"key": k, "label": FIELD_LABELS.get(k, k), "value": f.value.get("v"), "source": f.source,
@@ -57,6 +59,33 @@ def profile(actor: Actor = Depends(customer_actor), db: Session = DB):
                         "contact_window": pref.contact_window if pref else "ANY",
                         "ranking": list(pref.ranking) if pref else []},
     }
+
+
+class IdentityIn(BaseModel):
+    nin: str | None = Field(None, max_length=20)
+    full_name: str | None = Field(None, max_length=120)
+
+
+@router.put("/identity")
+def correct_identity(body: IdentityIn, actor: Actor = Depends(customer_actor), db: Session = DB):
+    """Correct the National ID number and/or name; a changed value is re-checked against the registry."""
+    from weza.domains.intelligence.parsing import parse_name, parse_nin
+    if not (body.nin or body.full_name):
+        raise ValidationFailed("Enter your National ID number or full name.")
+    if body.nin:
+        nin = parse_nin(body.nin)
+        if not nin:
+            raise ValidationFailed("That doesn't look like a Ugandan National ID number (14 characters, e.g. "
+                                   "CM12345678ABCD).", code="INVALID_NIN")
+        customer_svc.upsert_fact(db, actor.id, "identity.nin", nin, source="CUSTOMER", channel="web", confirmed=True,
+                                 source_ref="identity_correction")
+    if body.full_name:
+        name = parse_name(body.full_name)
+        if not name:
+            raise ValidationFailed("Please enter your first and last name.", code="INVALID_NAME")
+        customer_svc.upsert_fact(db, actor.id, "identity.full_name", name, source="CUSTOMER", channel="web",
+                                 confirmed=True, source_ref="identity_correction")
+    return profile(actor, db)
 
 
 class FactPatch(BaseModel):

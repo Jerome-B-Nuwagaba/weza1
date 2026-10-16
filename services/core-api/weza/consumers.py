@@ -356,6 +356,44 @@ def on_document_stored(db: Session, ev: OutboxEvent) -> None:
         engine.clear_market(db, "DocumentStored", trigger_ref=ev.aggregate_id, need_ids=ids)
 
 
+@consumer("identity_verify", ["IdentityCaptured"])
+def on_identity_captured(db: Session, ev: OutboxEvent) -> None:
+    """Check the captured NIN against the registry. A provider error raises, so the outbox retries with backoff;
+    a superseded check (the customer changed their NIN/name again) is skipped."""
+    from weza.domains.verification import service as verification
+    from weza.domains.verification.models import IdentityCheck
+    check = db.get(IdentityCheck, uuid.UUID(ev.data["check_id"])) if ev.data.get("check_id") else None
+    if check is None or check.status not in ("PENDING", "ERROR"):
+        return
+    current = verification.latest(db, check.customer_id)
+    if current is not None and current.id != check.id:
+        return
+    verification.run_check(db, check)
+
+
+@consumer("identity_outcome", ["IdentityVerified", "IdentityVerificationFailed"])
+def on_identity_outcome(db: Session, ev: OutboxEvent) -> None:
+    """Verified identity can unlock options; a failed check is surfaced to the customer and to integrity review."""
+    cid = uuid.UUID(ev.aggregate_id)
+    if ev.event_type == "IdentityVerified":
+        ids = list(db.execute(select(FinancialNeed.id).where(FinancialNeed.customer_id == cid,
+                                                             FinancialNeed.status.in_(engine.ACTIVE_DEMAND))).scalars())
+        if ids:
+            engine.clear_market(db, "IdentityVerified", trigger_ref=ev.aggregate_id, need_ids=ids)
+        return
+    from weza.domains.integrity.service import add_review
+    for opp in db.execute(select(Opportunity).where(Opportunity.customer_id == cid,
+                                                    Opportunity.state.in_(list(opp_svc.OPEN_STATES)))).scalars():
+        add_review(db, "IDENTITY_CHECK_FAILED", f"{opp.reference}: applicant identity check {ev.data.get('status')}",
+                   "opportunity", opp.id, severity="HIGH", detail={"check_id": ev.data.get("check_id")},
+                   dedupe_key=f"identity:{opp.id}:{ev.data.get('check_id')}")
+    reason = ("doesn't match the name you gave" if ev.data.get("status") == "MISMATCH"
+              else "wasn't found in the national register")
+    notify.notify_customer(db, cid, "IdentityVerificationFailed", title="Please check your National ID",
+                           body=f"The National ID number you entered {reason}. Please check it in WEZA — institutions "
+                                "may not be able to proceed until it's confirmed.", link="/c/profile")
+
+
 @consumer("info_answer_rematch", ["InfoRequestFulfilled"])
 def on_info_answer(db: Session, ev: OutboxEvent) -> None:
     """An answer saved to the profile (first-time facts emit no MaterialFactChanged) can change readiness —
