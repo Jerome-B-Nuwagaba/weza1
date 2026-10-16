@@ -82,16 +82,17 @@ Open `/whatsapp-sim` (or click *Continue on WhatsApp* on the home page). Enter a
 1. Sign in as `manager@lakeside.demo`. The **Command Centre** opens with a briefing and a "needs your attention" list.
 2. Open **Opportunity Feed**. Your new OPP-… opportunity is there, auto-assigned by routing rules.
 3. Open it. **Opportunity 360** shows the consented customer details, match breakdown, versions and service target.
-4. Click **Mark contacted**, then **Reported approved…**, then **Reported disbursed…**. In the customer's *My requests*, these appear labelled as reported by the institution.
-5. Sign in as `officer2@lakeside.demo` (or another officer) and open an opportunity assigned to someone else. The customer's identity is **hidden**, because officers only see their own. As `exec@lakeside.demo`, identity is always hidden.
-6. As `credit@lakeside.demo`:
+4. Click **Mark contacted**. Under **Requests to customer**, click **Ask the customer…** and ask a question or request a document. The customer sees it in *My requests* and can answer there; the answer appears back on the opportunity.
+5. Click **Reported approved…**, open **Indicative terms (optional)** and fill in tenor, rate and repayment. Then click **Reported disbursed…**. In the customer's *My requests*, these appear labelled as reported by the institution, with the terms.
+6. Sign in as `officer2@lakeside.demo` (or another officer) and open an opportunity assigned to someone else. The customer's identity is **hidden**, because officers only see their own. As `exec@lakeside.demo`, identity is always hidden.
+7. As `credit@lakeside.demo`:
    - **Insights** shows an outcome-learning insight: many declines for income/turnover. WEZA recommends a review and never changes rules itself.
    - **Opportunity Radius** shows demand inside, near and outside the appetite. Click **Simulate a change**.
    - **Appetite Studio** has versions, simulation and maker-checker approval.
    - **Sandbox** runs synthetic customers against your configuration.
    - **Ask WEZA**, for example "What sits just outside our appetite?".
-7. As `business@lakeside.demo`, create a product in **Product Studio**, or use **Extract from document** with any product PDF or text file. Submit it, then approve as `admin@lakeside.demo`. Approving your own version is blocked (maker-checker).
-8. As `admin@lakeside.demo`, open **Billing** and dispute a charge. Then, as `commercial@weza.demo`, open **Disputes** and decide *Charge reversed*. A reversal event is created; history is never edited.
+8. As `business@lakeside.demo`, create a product in **Product Studio**, or use **Extract from document** with any product PDF or text file. Submit it, then approve as `admin@lakeside.demo`. Approving your own version is blocked (maker-checker).
+9. As `admin@lakeside.demo`, open **Billing** and dispute a charge. Then, as `commercial@weza.demo`, open **Disputes** and decide *Charge reversed*. A reversal event is created; history is never edited.
 
 ### D. WEZA administration
 1. Sign in as `ops@weza.demo`, open **Institutions → Nile Fintech** and **Approve** it. Then sign in as `admin@nile.demo` to see the activation checklist.
@@ -105,7 +106,8 @@ Open `/whatsapp-sim` (or click *Continue on WhatsApp* on the home page). Enter a
 ## 4. What was tested
 
 **Automated, on every push** (GitHub Actions, `.github/workflows/ci.yml`):
-- **Core API:** 35 tests against a real PostgreSQL database, plus `ruff`, `bandit` and `pip-audit`. Covered:
+- **Core API:** 40 tests against a real PostgreSQL database, plus `ruff`, `bandit` and `pip-audit`. Covered:
+  - institution information requests (gating, consent scope, closing on withdrawal) and indicative terms on approvals;
   - the full pharmacy scenario end to end, attribution lineage, the versioned snapshot, and idempotent replay (one opportunity, one billing event);
   - OTP failure, lockout and hashing; fact re-use and correction with re-matching; Waiting Room; working without AI;
   - cross-tenant 404s, disclosure by role, assignment and consent withdrawal, preview allow-list, log redaction;
@@ -114,6 +116,8 @@ Open `/whatsapp-sim` (or click *Continue on WhatsApp* on the home page). Enter a
   - outcomes, billing and dispute reversal, product-pause clearing, kill switch, Waiting Room match, rescue with new consent, service-target breach and freshness, the WhatsApp simulator on the same graph;
   - the graph runtime: waits, invalid interrupts, timeouts, ended graphs, step budget.
 - **Web:** TypeScript check and production build.
+- **End-to-end (Playwright, `apps/web/e2e`):** against the API container with demo data. An officer works an opportunity in the browser from first contact through an information request, approval with terms and disbursement; the customer answers on *My requests*; executives and other institutions can't see the customer; an institution applies, WEZA verifies it, and its admin reaches the activation checklist.
+  - To run locally: start the API (`python services/core-api/scripts/dev_api.py`), then in `apps/web` run `npm run e2e` (first time: `npx playwright install chromium`). Each run starts three customer journeys; the API allows 30 per IP per hour.
 - **Mobile:** `flutter analyze`, widget tests, APK and web builds.
 - **Secret scanning:** gitleaks.
 

@@ -85,6 +85,53 @@ jobs:
         env:
           API_URL: https://example.invalid
 
+  e2e:
+    name: End-to-end — institution journeys (Playwright)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: weza
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      API_URL: http://localhost:8000
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Boot API container with demo seed
+        run: |
+          docker build -t weza-api services/core-api
+          docker run -d --name api --network host -e PORT=8000 -e ENV=dev -e SEED_DEMO=true -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/weza -e SECRET_KEY=ci-secret -e VAULT_MASTER_KEY=ci-vault-key -e BLIND_INDEX_KEY=ci-index weza-api
+          for i in $(seq 1 60); do curl -sf localhost:8000/healthz && break; sleep 3; done
+          curl -sf localhost:8000/api/v1/public/stats | grep -q "Lakeside Bank"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Build web against the local API
+        working-directory: apps/web
+        run: |
+          npm ci
+          npx next build
+          npx playwright install --with-deps chromium
+      - name: Run Playwright
+        working-directory: apps/web
+        run: npx playwright test
+      - if: failure()
+        run: docker logs api | tail -100
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report
+          retention-days: 14
+
   mobile:
     name: Flutter — analyze, test, build APK & web
     runs-on: ubuntu-latest
