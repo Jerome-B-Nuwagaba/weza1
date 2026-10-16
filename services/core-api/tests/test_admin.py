@@ -3,6 +3,7 @@ commercial contracts, vault lookup, configuration and kill switches — every ch
 
 import uuid
 
+import pytest
 from sqlalchemy import select
 
 from weza.domains.misc_models import IntegrityCase, ReviewItem
@@ -11,6 +12,19 @@ from weza.platform.db import session_scope
 
 PW = "Str0ng-Passw0rd!"
 API = "/api/v1/admin"
+_TOKENS: dict[str, dict] = {}
+
+
+@pytest.fixture()
+def as_user(client):
+    """Sign each account in once: the suite shares the per-email sign-in rate limit with other test modules."""
+    from tests.helpers import login
+
+    def _as(email: str) -> dict:
+        if email not in _TOKENS:
+            _TOKENS[email] = login(client, email)
+        return _TOKENS[email]
+    return _as
 
 
 def _apply(client) -> str:
@@ -57,7 +71,8 @@ def test_admin_read_open_to_all_weza_roles_only(client, as_user):
 
 def test_role_separation_on_writes(client, as_user):
     comm, ops = as_user("commercial@weza.demo"), as_user("ops@weza.demo")
-    inst_id = _apply(client)
+    inst_id = next(i["id"] for i in client.get(f"{API}/institutions", headers=ops).json()["institutions"]
+                   if i["display_name"] == "Nile Fintech")  # awaiting verification in the seed
     # Commercial cannot verify institutions, run network controls, look up customers or change config
     assert client.post(f"{API}/institutions/{inst_id}/verify", json={"approve": True, "reason": "Looks fine"},
                        headers=comm).status_code == 403
@@ -66,7 +81,8 @@ def test_role_separation_on_writes(client, as_user):
     assert client.post(f"{API}/customers/lookup", json={"phone": "0772123456", "reason": "Customer called"},
                        headers=comm).status_code == 403
     # Ops cannot change configuration or commercial terms
-    assert client.post(f"{API}/flags", json={"key": "matching.shadow", "enabled": True}, headers=ops).status_code == 403
+    assert client.post(f"{API}/flags", json={"key": "matching.shadow", "enabled": True, "reason": "Try it"},
+                       headers=ops).status_code == 403
     assert client.post(f"{API}/kill-switches", json={"key": "ai_mode", "value": {"mode": "DEGRADED"},
                                                      "reason": "nope"}, headers=ops).status_code == 403
     assert client.put(f"{API}/contracts/{inst_id}", json={"plan": "X", "subscription_fee": 0, "included_opportunities": 0,
@@ -188,3 +204,111 @@ def test_config_changes_are_validated_and_audited(client, as_user):
     r = client.post(f"{API}/config/match-weights", json={"weights": before["data"], "note": "Republish same"},
                     headers=admin)
     assert r.status_code == 200 and r.json()["match_weights"]["version"] == before["version"] + 1
+
+
+# ------------------------------------------------------------------ consent templates & question paths (A-13)
+
+NEW_TEXT = ("By agreeing, you allow WEZA to share the information listed below with {institution} so that they can "
+            "contact you about your financing request. WEZA is not a lender. You can withdraw at any time.")
+
+
+@pytest.fixture()
+def restore_consent_template():
+    """Tests share one database; put the seeded consent version back so other suites see what they expect."""
+    from weza.domains.consent.models import ConsentTemplate
+    with session_scope() as db:
+        original = {t.id: t.status for t in db.execute(select(ConsentTemplate)).scalars()}
+    yield
+    with session_scope() as db:
+        for t in db.execute(select(ConsentTemplate)).scalars():
+            if t.id in original:
+                t.status = original[t.id]
+            else:
+                db.delete(t)
+
+
+def test_consent_template_publish_versions_and_retires(client, as_user, restore_consent_template):
+    admin, ops = as_user("admin@weza.demo"), as_user("ops@weza.demo")
+    before = client.get(f"{API}/config", headers=admin).json()
+    body = {"title": "Share my request with {institution}", "text": NEW_TEXT, "reason": "Legal review Q4"}
+    assert client.post(f"{API}/config/consent-template", json=body, headers=ops).status_code == 403
+    for bad in ({**body, "text": NEW_TEXT.replace("{institution}", "the lender")},   # institution must be named
+                {**body, "text": NEW_TEXT + " {customer}"},                           # unknown placeholder
+                {**body, "title": before["consent_template"]["title"], "text": before["consent_template"]["text"]},
+                {**body, "reason": ""}):
+        assert client.post(f"{API}/config/consent-template", json=bad, headers=admin).status_code == 422
+    r = client.post(f"{API}/config/consent-template", json=body, headers=admin)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["consent_template"]["text"] == NEW_TEXT
+    assert d["consent_template"]["version"] != before["consent_template"]["version"]
+    statuses = {h["version"]: h["status"] for h in d["consent_history"]}
+    assert statuses[before["consent_template"]["version"]] == "RETIRED"
+    assert statuses[d["consent_template"]["version"]] == "PUBLISHED"
+    ev = _audits("consent_template.published", next(
+        str(t.id) for t in _templates() if t.version == d["consent_template"]["version"]))
+    assert ev and ev[0].reason == "Legal review Q4"
+
+
+def _templates():
+    from weza.domains.consent.models import ConsentTemplate
+    with session_scope() as db:
+        rows = db.execute(select(ConsentTemplate)).scalars().all()
+        db.expunge_all()
+        return rows
+
+
+def test_customer_mid_consent_when_new_version_published(client, journey, as_user, restore_consent_template):
+    """A customer shown the old text must not be recorded as agreeing to the new one."""
+    from tests.helpers import SME_ANSWERS
+    j = journey("I need UGX 30 million to expand my pharmacy.")
+    j.send(action="confirm")
+    j.verify("0772100077")
+    j.answer_profile({**SME_ANSWERS, "identity.nin": "CM0772100077AB"})
+    opt = next(o for o in j.cards("options")[0]["options"] if o["readiness"] == "READY")
+    j.send(action="select", value=opt["match_id"])
+    old_tpl = j.cards("consent")[0]["template_id"]
+    client.post(f"{API}/config/consent-template", json={"title": "Share my request with {institution}",
+                                                        "text": NEW_TEXT, "reason": "Legal review"},
+                headers=as_user("admin@weza.demo"))
+    r = client.post(f"/api/v1/journeys/{j.id}/messages", json={"action": "agree", "value": old_tpl}, headers=j.headers)
+    assert r.status_code == 422 and r.json()["error"]["code"] == "CONSENT_TEMPLATE_STALE"
+    from weza.domains.consent.models import Consent
+    with session_scope() as db:
+        assert db.execute(select(Consent).where(Consent.match_id == uuid.UUID(opt["match_id"]))).first() is None
+    # The journey is not stuck: going back and selecting again shows the new text
+    j.send(action="decline")
+    assert j.node == "PRESENT_OPTIONS"
+    j.send(action="select", value=opt["match_id"])
+    new = j.cards("consent")[0]
+    assert new["template_id"] != old_tpl and "WEZA is not a lender" in new["text"]
+
+
+def test_config_shows_question_paths(client, as_user):
+    d = client.get(f"{API}/config", headers=as_user("ops@weza.demo")).json()
+    assert d["question_paths"]["version"] >= 1 and d["question_paths"]["data"]
+
+
+def test_flag_change_requires_reason_and_is_audited(client, as_user):
+    admin = as_user("admin@weza.demo")
+    assert client.post(f"{API}/flags", json={"key": "matching.shadow", "enabled": True},
+                       headers=admin).status_code == 422
+    flags = {f["key"]: f["enabled"] for f in client.get(f"{API}/config", headers=admin).json()["flags"]}
+    for value, reason in ((not flags["matching.shadow"], "Compare algorithms"), (flags["matching.shadow"], "Restore")):
+        assert client.post(f"{API}/flags", json={"key": "matching.shadow", "enabled": value, "reason": reason},
+                           headers=admin).status_code == 200
+    last = _audits("flag.changed", "matching.shadow")
+    assert {a.reason for a in last} >= {"Compare algorithms", "Restore"}
+
+
+def test_pausing_product_or_appetite_requires_step_up_mfa(client, as_user, monkeypatch):
+    """Blueprint 10 §10: every kill switch, including Pause Product and Pause Mandate, requires step-up MFA."""
+    from weza.config import get_settings
+    ops = as_user("ops@weza.demo")  # signed in without MFA
+    inst = client.get(f"{API}/institutions", headers=ops).json()["institutions"]
+    detail = client.get(f"{API}/institutions/{next(i['id'] for i in inst if i['display_name'] == 'Lakeside Bank')}",
+                        headers=ops).json()
+    monkeypatch.setattr(get_settings(), "mfa_enforced", True)
+    for kind, item in (("products", detail["products"][0]), ("appetites", detail["appetites"][0])):
+        r = client.post(f"{API}/{kind}/{item['id']}/status", json={"status": "PAUSED", "reason": "Drill"}, headers=ops)
+        assert r.status_code == 403 and r.json()["error"]["code"] == "MFA_STEP_UP_REQUIRED", kind

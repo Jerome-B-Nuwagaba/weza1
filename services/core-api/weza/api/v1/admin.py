@@ -147,6 +147,7 @@ def institution_status(inst_id: uuid.UUID, body: StatusIn, actor: Actor = W, db:
 @router.post("/products/{product_id}/status")
 def product_status(product_id: uuid.UUID, body: StatusIn, actor: Actor = W, db: Session = DB):
     policy.require(actor, "admin.network_control")
+    require_step_up(actor)
     p = db.get(Product, product_id)
     if p is None:
         raise NotFound("Not found.")
@@ -157,6 +158,7 @@ def product_status(product_id: uuid.UUID, body: StatusIn, actor: Actor = W, db: 
 @router.post("/appetites/{appetite_id}/status")
 def appetite_status(appetite_id: uuid.UUID, body: StatusIn, actor: Actor = W, db: Session = DB):
     policy.require(actor, "admin.network_control")
+    require_step_up(actor)
     a = db.get(Appetite, appetite_id)
     if a is None:
         raise NotFound("Not found.")
@@ -611,8 +613,9 @@ def config(actor: Actor = W, db: Session = DB):
     policy.require(actor, "admin.read")
     country, cv = get_config(db, "country:UG")
     weights, wv = get_config(db, "match_weights")
-    from weza.domains.consent.service import current_template
+    from weza.domains.consent.service import current_template, template_history
     tpl = current_template(db)
+    paths, pv = get_config(db, "question_paths:UG")
     return {"country": {"version": cv, "data": country}, "match_weights": {"version": wv, "data": weights},
             "flags": [{"key": k, "label": v, "enabled": (db.get(FeatureFlag, k).enabled if db.get(FeatureFlag, k)
                                                           else k == "channel.whatsapp_simulator")} for k, v in FLAGS.items()],
@@ -621,6 +624,9 @@ def config(actor: Actor = W, db: Session = DB):
                                "updated_by": (db.get(KillSwitch, k).updated_by if db.get(KillSwitch, k) else None)}
                               for k, v in KILL_SWITCHES.items()],
             "consent_template": {"version": tpl.version, "title": tpl.title, "text": tpl.text, "hash": tpl.text_hash},
+            "consent_history": [{"version": t.version, "status": t.status, "hash": t.text_hash,
+                                 "effective_from": t.effective_from.isoformat()} for t in template_history(db)],
+            "question_paths": {"version": pv, "data": paths},
             "can_edit": policy.has(actor, "admin.config")}
 
 
@@ -652,6 +658,7 @@ def set_switch(body: SwitchIn, actor: Actor = W, db: Session = DB):
 class FlagIn(BaseModel):
     key: str
     enabled: bool
+    reason: str = Field(..., min_length=3, max_length=500)
 
 
 @router.post("/flags")
@@ -659,10 +666,13 @@ def set_flag(body: FlagIn, actor: Actor = W, db: Session = DB):
     policy.require(actor, "admin.config")
     if body.key not in FLAGS:
         raise ValidationFailed("Unknown flag.")
-    row = db.get(FeatureFlag, body.key) or FeatureFlag(key=body.key, description=FLAGS[body.key])
+    row = db.get(FeatureFlag, body.key)
+    before = row.enabled if row else body.key == "channel.whatsapp_simulator"
+    row = row or FeatureFlag(key=body.key, description=FLAGS[body.key])
     row.enabled = body.enabled
     db.merge(row)
-    audit(db, actor, "flag.changed", "feature_flag", body.key, after={"enabled": body.enabled})
+    audit(db, actor, "flag.changed", "feature_flag", body.key, before={"enabled": before},
+          after={"enabled": body.enabled}, reason=body.reason)
     return config(actor, db)
 
 
@@ -683,6 +693,21 @@ def set_weights(body: WeightsIn, actor: Actor = W, db: Session = DB):
           reason=body.note)
     emit(db, "KillSwitchChanged", topic="audit", aggregate_type="config", aggregate_id="match_weights",
          data={"version": row.version})
+    return config(actor, db)
+
+
+class ConsentTemplateIn(BaseModel):
+    title: str = Field(..., min_length=3, max_length=160)
+    text: str = Field(..., min_length=50, max_length=10000)
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+@router.post("/config/consent-template")
+def publish_consent_template(body: ConsentTemplateIn, actor: Actor = W, db: Session = DB):
+    """Versioned legal text (TSD §71–72): written by a person, never by AI; publishing retires the previous version."""
+    policy.require(actor, "admin.config")
+    from weza.domains.consent.service import publish_template
+    publish_template(db, actor, title=body.title, text=body.text, reason=body.reason)
     return config(actor, db)
 
 
