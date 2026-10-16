@@ -80,6 +80,13 @@ test("a new institution goes from application to a reported outcome", async ({ p
 
   // 5. A customer chooses the new institution; routing assigns the officer
   const { reference, oppId, customer } = await customerSharesWith(request, name, "I need UGX 25 million to buy stock for my pharmacy");
+  // Routing assignment runs on the background worker after ROUTED — wait until the officer actually owns it
+  // (only the assignee gets the disclosure PERMIT that shows "Ask the customer…").
+  const officer = await staffToken(request, email("officer"), pw);
+  await expect.poll(async () => {
+    const o = await (await request.get(`${API}/inst/opportunities/${oppId}`, { headers: officer })).json();
+    return Boolean(o.owner_id && o.can_request_info);
+  }, { timeout: 60_000, message: "routing should assign the opportunity to the officer" }).toBe(true);
 
   // 6. Officer receives it and asks a question tied to a profile field (browser)
   await page.evaluate(() => window.sessionStorage.clear());

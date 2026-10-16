@@ -53,6 +53,7 @@ export default function ProductDetail({ params }: { params: Promise<{ id: string
           {can("product.create") && draft && <Button pending={busy} onClick={() => act(() => api(`/inst/products/${id}/submit`, { method: "POST" }), "Submitted for approval")}>Submit for approval</Button>}
           {d.status === "ACTIVE" && can("product.approve") && <Button variant="secondary" onClick={() => setStatusTo("PAUSED")}>Pause</Button>}
           {d.status === "PAUSED" && can("product.approve") && <Button onClick={() => setStatusTo("ACTIVE")}>Resume</Button>}
+          {["ACTIVE", "PAUSED"].includes(d.status) && can("product.approve") && <Button variant="ghost" onClick={() => setStatusTo("ARCHIVED")}>Archive</Button>}
         </>} />
       {err && <Banner tone="danger" className="mb-4">{err.message}</Banner>}
       {pending && (
@@ -102,9 +103,10 @@ export default function ProductDetail({ params }: { params: Promise<{ id: string
         <Field label="Note"><Textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
         {review && <p className="mt-2 text-[13px] text-muted">Once approved, WEZA re-runs market clearing and this version starts matching customers.</p>}
       </Modal>
-      <Modal open={!!statusTo} onClose={() => setStatusTo(null)} title={statusTo === "PAUSED" ? "Pause product" : "Resume product"} footer={<><Button variant="secondary" onClick={() => setStatusTo(null)}>Cancel</Button><Button pending={busy} onClick={async () => { if (await act(() => api(`/inst/products/${id}/status`, { body: { status: statusTo, reason: note } }), "Updated")) setStatusTo(null); }} disabled={note.length < 3}>Confirm</Button></>}>
+      <Modal open={!!statusTo} onClose={() => setStatusTo(null)} title={statusTo === "PAUSED" ? "Pause product" : statusTo === "ARCHIVED" ? "Archive product" : "Resume product"} footer={<><Button variant="secondary" onClick={() => setStatusTo(null)}>Cancel</Button><Button pending={busy} onClick={async () => { if (await act(() => api(`/inst/products/${id}/status`, { body: { status: statusTo, reason: note } }), "Updated")) setStatusTo(null); }} disabled={note.length < 3}>Confirm</Button></>}>
         <Field label="Reason" required><Input value={note} onChange={(e) => setNote(e.target.value)} /></Field>
         {statusTo === "PAUSED" && <p className="mt-2 text-[13px] text-muted">Customers stop seeing this product immediately. Already-routed opportunities are unaffected.</p>}
+        {statusTo === "ARCHIVED" && <p className="mt-2 text-[13px] text-muted">Archiving is permanent: the product is withdrawn from customers and can&apos;t be resumed. Its versions and history are kept. Already-routed opportunities are unaffected.</p>}
       </Modal>
     </>
   );

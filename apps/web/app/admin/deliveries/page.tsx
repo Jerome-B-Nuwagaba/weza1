@@ -29,22 +29,8 @@ export default function Deliveries() {
               ))}
             </Table>
           )}
-          <Card title="Notification failures" subtitle="Retries with backoff (1 min → 1 h), then dead-lettered. Replay gives a dead notification a fresh set of attempts." className="mt-4">
-            {r.data.notification_failures.length === 0 ? <p className="text-[14px] text-muted">None.</p> : (
-              <Table head={["Notification", "Channel", "Status", "Attempts", "Next attempt", "Error", ""]}>
-                {r.data.notification_failures.map((n: any) => (
-                  <tr key={n.id}>
-                    <Td>{n.title}</Td>
-                    <Td>{n.channel}</Td>
-                    <Td><Badge tone={n.status === "DEAD" ? "danger" : "warning"}>{n.status.toLowerCase()}</Badge></Td>
-                    <Td className="num">{n.attempts}</Td>
-                    <Td>{n.next_attempt_at ? dateTime(n.next_attempt_at) : "—"}</Td>
-                    <Td className="max-w-sm truncate text-[12px] text-muted">{n.error || "—"}</Td>
-                    <Td>{n.status === "DEAD" && <Button size="sm" variant="secondary" onClick={async () => { await api(`/admin/notifications/${n.id}/replay`, { method: "POST" }); r.reload(); }}>Replay</Button>}</Td>
-                  </tr>
-                ))}
-              </Table>
-            )}
+          <Card title="Notification failures" className="mt-4">
+            {r.data.notification_failures.length === 0 ? <p className="text-[14px] text-muted">None.</p> : <ul className="space-y-1 text-[13px]">{r.data.notification_failures.map((n: any) => <li key={n.id}>{n.title} · {n.channel} · {n.status} · {n.error}</li>)}</ul>}
           </Card>
         </>
       )}

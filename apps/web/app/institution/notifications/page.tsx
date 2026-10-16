@@ -7,7 +7,7 @@ import { Banner, Button, ErrorState, Loading, PageHeader, Select, Table, Td, use
 
 const LABELS: Record<string, string> = {
   OpportunityRouted: "New opportunity", HighMatchOpportunity: "High-match / high-value opportunity", OpportunityAssigned: "Assigned to me",
-  ServiceTargetApproaching: "Service target approaching", ServiceTargetBreached: "Service target breached", DailyBrief: "WEZA Daily briefing", AppetiteInsight: "Appetite insight",
+  ServiceTargetApproaching: "Service target approaching", ServiceTargetBreached: "Service target breached", InfoRequestFulfilled: "Customer answered my request", InfoRequestExpired: "My request to a customer expired", DailyBrief: "WEZA Daily briefing", AppetiteInsight: "Appetite insight",
 };
 
 export default function Notifications() {
@@ -15,7 +15,9 @@ export default function Notifications() {
   const [prefs, setPrefs] = useState<any[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const { toast, node } = useToast();
-  useEffect(() => p.data && setPrefs(p.data.prefs), [p.data]);
+  useEffect(() => {
+    if (p.data) setPrefs(p.data.prefs);
+  }, [p.data]);
   if (p.loading) return <Loading />;
   if (p.error) return <ErrorState error={p.error} />;
   const set = (i: number, patch: any) => setPrefs(prefs.map((x, j) => (j === i ? { ...x, ...patch } : x)));

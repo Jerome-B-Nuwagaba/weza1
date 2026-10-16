@@ -285,8 +285,11 @@ def assign_by_rules(db: Session, opp: Opportunity) -> Assignment:
     chosen = next((r for r in rules if _rule_matches(r, opp)), None)
     if chosen is not None:
         a.rule_id, a.team_id = chosen.id, chosen.target_team_id
-        a.user_id = chosen.target_user_id or (_least_loaded_officer(db, opp.institution_id, chosen.target_team_id)
-                                             if chosen.target_team_id else None)
+        # A named person only receives work while they are an active officer/manager of this institution;
+        # otherwise fall back to the rule's team (or the Unassigned queue), never to an outsider.
+        named = chosen.target_user_id if _can_receive_work(db, opp.institution_id, chosen.target_user_id) else None
+        a.user_id = named or (_least_loaded_officer(db, opp.institution_id, chosen.target_team_id)
+                              if chosen.target_team_id else None)
     if a.user_id:
         a.assigned_at, a.assigned_by = utcnow(), "RULE"
         a.ack_due_at = utcnow() + timedelta(minutes=st.ack_within_minutes or 120)
@@ -307,6 +310,16 @@ def assign_by_rules(db: Session, opp: Opportunity) -> Assignment:
          data={"user_id": str(a.user_id) if a.user_id else None, "team_id": str(a.team_id) if a.team_id else None,
                "reference": opp.reference, "priority": opp.priority})
     return a
+
+
+def _can_receive_work(db: Session, institution_id, user_id) -> bool:
+    if not user_id:
+        return False
+    from weza.domains.identity.models import Membership, User
+    row = db.execute(select(Membership, User).join(User, User.id == Membership.user_id).where(
+        Membership.user_id == user_id)).first()
+    return bool(row and row[0].institution_id == institution_id and row[1].status == "ACTIVE"
+                and set(row[0].roles) & {"OFFICER", "MANAGER"})
 
 
 def _least_loaded_officer(db: Session, institution_id, team_id) -> uuid.UUID | None:

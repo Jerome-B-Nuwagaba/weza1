@@ -59,6 +59,7 @@ export default function AppetiteDetail({ params }: { params: Promise<{ id: strin
           {d.lifecycle_status === "ACTIVE" && can("appetite.activate") && <Button variant="secondary" onClick={() => setLifecycle("PAUSED")}>Pause</Button>}
           {d.lifecycle_status === "PAUSED" && can("appetite.activate") && <Button onClick={() => setLifecycle("ACTIVE")}>Resume</Button>}
           {d.lifecycle_status === "APPROVED" && can("appetite.activate") && <Button onClick={() => setLifecycle("ACTIVE")}>Activate</Button>}
+          {!["ARCHIVED", "EXPIRED"].includes(d.lifecycle_status) && can("appetite.activate") && <Button variant="ghost" onClick={() => setLifecycle("ARCHIVED")}>Archive</Button>}
           {can("appetite.edit") && d.lifecycle_status === "ACTIVE" && <Button variant="ghost" onClick={() => setCapacity(true)}>Capacity override</Button>}
         </>} />
       {err && <Banner tone="danger" className="mb-4">{err.message}</Banner>}
@@ -97,7 +98,7 @@ export default function AppetiteDetail({ params }: { params: Promise<{ id: strin
         <Field label="Note"><Textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
         {review && <p className="mt-2 text-[13px] text-muted">If your institution is live, this version activates immediately and WEZA re-clears the market.</p>}
       </Modal>
-      <Modal open={!!lifecycle} onClose={() => setLifecycle(null)} title={lifecycle === "PAUSED" ? "Pause appetite" : "Activate appetite"} footer={<><Button variant="secondary" onClick={() => setLifecycle(null)}>Cancel</Button><Button pending={busy} disabled={note.length < 3} onClick={async () => { if (await act(() => api(`/inst/appetites/${id}/status`, { body: { status: lifecycle, reason: note } }), "Updated")) setLifecycle(null); }}>Confirm</Button></>}>
+      <Modal open={!!lifecycle} onClose={() => setLifecycle(null)} title={lifecycle === "PAUSED" ? "Pause appetite" : lifecycle === "ARCHIVED" ? "Archive appetite (permanent)" : "Activate appetite"} footer={<><Button variant="secondary" onClick={() => setLifecycle(null)}>Cancel</Button><Button pending={busy} disabled={note.length < 3} onClick={async () => { if (await act(() => api(`/inst/appetites/${id}/status`, { body: { status: lifecycle, reason: note } }), "Updated")) setLifecycle(null); }}>Confirm</Button></>}>
         <Field label="Reason" required><Input value={note} onChange={(e) => setNote(e.target.value)} /></Field>
       </Modal>
       <Modal open={capacity} onClose={() => setCapacity(false)} title="Capacity override" footer={<><Button variant="secondary" onClick={() => setCapacity(false)}>Cancel</Button><Button pending={busy} disabled={note.length < 3} onClick={async () => { if (await act(() => api(`/inst/appetites/${id}/capacity`, { body: { override: override || null, reason: note } }), "Capacity updated")) setCapacity(false); }}>Save</Button></>}>

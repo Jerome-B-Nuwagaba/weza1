@@ -15,9 +15,11 @@ export default function Settings() {
   const [p, setP] = useState<any>(null);
   const [err, setErr] = useState<string | null>(null);
   const { toast, node } = useToast();
-  useEffect(() => w.data && setP({ display_name: w.data.institution.display_name, description: w.data.institution.profile.description || "", website: w.data.institution.profile.website || "", regions_served: w.data.institution.profile.regions_served || [] }), [w.data]);
-  if (w.loading || !p) return <Loading />;
+  useEffect(() => {
+    if (w.data) setP({ display_name: w.data.institution.display_name, description: w.data.institution.profile.description || "", website: w.data.institution.profile.website || "", regions_served: w.data.institution.profile.regions_served || [] });
+  }, [w.data]);
   if (w.error) return <ErrorState error={w.error} />;
+  if (w.loading || !p) return <Loading />;
   const i = w.data.institution;
   async function save() {
     try {
@@ -45,7 +47,43 @@ export default function Settings() {
         {err && <Banner tone="danger" className="mt-3">{err}</Banner>}
         {can("institution.settings") && <Button className="mt-4" onClick={save}>Save</Button>}
       </Card>
+      <ChangePassword />
       <Banner tone="info" title="Zero core integration">WEZA never connects to your core banking, CRM, LOS or customer databases. Everything WEZA knows about your supply is configured here by your team.</Banner>
     </div>
+  );
+}
+
+function ChangePassword() {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [msg, setMsg] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function change() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await api("/inst/password", { body: { current_password: current, new_password: next } });
+      setMsg({ tone: "success", text: r.note });
+      setCurrent("");
+      setNext("");
+      setConfirm("");
+    } catch (e) {
+      setMsg({ tone: "danger", text: (e as ApiError).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Card title="Change my password" subtitle="Signs you out on your other devices.">
+      <div className="grid gap-3 md:grid-cols-3">
+        <Field label="Current password"><Input type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} /></Field>
+        <Field label="New password" hint="12+ characters"><Input type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} /></Field>
+        <Field label="Confirm new password"><Input type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} /></Field>
+      </div>
+      {next && confirm && next !== confirm && <p className="mt-2 text-[13px] text-danger">The new passwords don&apos;t match.</p>}
+      {msg && <Banner tone={msg.tone} className="mt-3">{msg.text}</Banner>}
+      <Button className="mt-4" pending={busy} disabled={!current || next.length < 12 || next !== confirm} onClick={change}>Change password</Button>
+    </Card>
   );
 }

@@ -113,6 +113,20 @@ class UserIn(BaseModel):
     password: str = Field(..., min_length=12, max_length=200)
 
 
+def _own_team(db: Session, actor: Actor, team_id: str | None) -> uuid.UUID | None:
+    """A team id from the request must belong to the caller's institution (never trust ids across tenants)."""
+    if not team_id:
+        return None
+    try:
+        tid = uuid.UUID(team_id)
+    except ValueError:
+        raise ValidationFailed("Unknown team.", code="UNKNOWN_TEAM") from None
+    t = db.get(Team, tid)
+    if t is None or t.institution_id != actor.institution_id:
+        raise ValidationFailed("Unknown team.", code="UNKNOWN_TEAM")
+    return tid
+
+
 @router.post("/users", status_code=201)
 def add_user(body: UserIn, actor: Actor = A, db: Session = DB):
     policy.require(actor, "users.manage")
@@ -121,7 +135,7 @@ def add_user(body: UserIn, actor: Actor = A, db: Session = DB):
         raise ValidationFailed("Choose at least one role.")
     u = identity.create_user(db, email=body.email, full_name=body.full_name, password=body.password,
                              kind="INSTITUTION", institution_id=actor.institution_id, roles=roles,
-                             team_id=uuid.UUID(body.team_id) if body.team_id else None)
+                             team_id=_own_team(db, actor, body.team_id))
     audit(db, actor, "users.created", "user", u.id, after={"roles": roles})
     return users(actor, db)
 
@@ -141,17 +155,58 @@ def update_user(user_id: uuid.UUID, body: UserPatch, actor: Actor = A, db: Sessi
     before = {"roles": list(m.roles), "team": str(m.team_id) if m.team_id else None}
     if body.roles is not None:
         roles = [r for r in body.roles if r in policy.INST_ROLES]
+        if not roles:
+            raise ValidationFailed("Choose at least one role.", code="ROLES_REQUIRED")
         if user_id == actor.id and "INST_ADMIN" not in roles:
             raise ValidationFailed("You can't remove your own administrator role.")
         m.roles = roles
     if body.team_id is not None:
-        m.team_id = uuid.UUID(body.team_id) if body.team_id else None
+        m.team_id = _own_team(db, actor, body.team_id)
     if body.status:
         if user_id == actor.id:
             raise ValidationFailed("You can't disable yourself.")
         db.get(User, user_id).status = body.status
     audit(db, actor, "users.updated", "user", user_id, before=before, after=body.model_dump(exclude_none=True))
     return users(actor, db)
+
+
+class PasswordResetIn(BaseModel):
+    new_password: str = Field(..., min_length=12, max_length=200)
+
+
+@router.post("/users/{user_id}/password")
+def reset_user_password(user_id: uuid.UUID, body: PasswordResetIn, actor: Actor = A, db: Session = DB):
+    """Institution administrator sets a new password for a colleague (e.g. forgotten password). Their sessions end;
+    share the new password with them securely."""
+    policy.require(actor, "users.manage")
+    m = db.execute(select(Membership).where(Membership.user_id == user_id)).scalar_one_or_none()
+    if m is None or m.institution_id != actor.institution_id:
+        raise NotFound("Not found.")
+    if user_id == actor.id:
+        raise ValidationFailed("Use 'Change my password' for your own account.", code="USE_SELF_SERVICE")
+    identity.set_password(db, db.get(User, user_id), body.new_password)
+    audit(db, actor, "users.password_reset", "user", user_id)
+    return {"ok": True}
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str = Field(..., max_length=200)
+    new_password: str = Field(..., min_length=12, max_length=200)
+
+
+@router.post("/password")
+def change_my_password(body: PasswordChangeIn, actor: Actor = A, db: Session = DB):
+    """Any institution user changes their own password. All their other sessions are signed out."""
+    from weza.platform import crypto
+    from weza.platform.controls import rate_limit
+    rate_limit(db, f"pwchange:{actor.id}", 5, 900, "Too many attempts. Try again in 15 minutes.")
+    user = db.get(User, actor.id)
+    if not crypto.verify_password(body.current_password, user.password_hash):
+        # 422, not 401: a wrong current password must not look like an expired session to the client
+        raise ValidationFailed("Your current password is incorrect.", code="INVALID_CURRENT_PASSWORD")
+    identity.set_password(db, user, body.new_password)
+    audit(db, actor, "users.password_changed", "user", user.id)
+    return {"ok": True, "note": "Password changed. Other signed-in sessions have been ended."}
 
 
 class TeamIn(BaseModel):
@@ -166,6 +221,35 @@ def add_team(body: TeamIn, actor: Actor = A, db: Session = DB):
     db.flush()
     audit(db, actor, "team.created", "team", t.id)
     return {"id": str(t.id), "name": t.name}
+
+
+@router.patch("/teams/{team_id}")
+def rename_team(team_id: uuid.UUID, body: TeamIn, actor: Actor = A, db: Session = DB):
+    policy.require(actor, "team.manage")
+    t = db.get(Team, _own_team(db, actor, str(team_id)))
+    before = t.name
+    t.name = body.name.strip()
+    audit(db, actor, "team.renamed", "team", t.id, before={"name": before}, after={"name": t.name})
+    return {"id": str(t.id), "name": t.name}
+
+
+@router.delete("/teams/{team_id}")
+def remove_team(team_id: uuid.UUID, actor: Actor = A, db: Session = DB):
+    """Removing a team never strands work: members and routing rules must be moved first."""
+    policy.require(actor, "team.manage")
+    tid = _own_team(db, actor, str(team_id))
+    members = db.execute(select(func.count()).select_from(Membership).where(Membership.team_id == tid)).scalar_one()
+    rules = db.execute(select(func.count()).select_from(RoutingRule).where(RoutingRule.target_team_id == tid)
+                       ).scalar_one()
+    open_work = db.execute(select(func.count()).select_from(Assignment).join(
+        Opportunity, Opportunity.id == Assignment.opportunity_id).where(
+        Assignment.team_id == tid, Opportunity.state.in_(list(opp_svc.OPEN_STATES)))).scalar_one()
+    if members or rules or open_work:
+        raise ValidationFailed(f"Move this team's {members} member(s), {rules} routing rule(s) and {open_work} open "
+                               "opportunity(ies) first.", code="TEAM_IN_USE")
+    db.delete(db.get(Team, tid))
+    audit(db, actor, "team.removed", "team", tid)
+    return users(actor, db)
 
 
 # ------------------------------------------------------------------ products

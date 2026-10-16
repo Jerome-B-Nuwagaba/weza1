@@ -37,7 +37,9 @@ INSTITUTION_SM = StateMachine("Institution", {
     "SUSPENDED": {"ACTIVE", "CONFIGURING", "CLOSED"}, "REJECTED": set(), "CLOSED": set(),
 })
 DEFAULT_NOTIFICATION_EVENTS = ["OpportunityRouted", "HighMatchOpportunity", "OpportunityAssigned",
-                               "ServiceTargetApproaching", "ServiceTargetBreached", "DailyBrief", "AppetiteInsight"]
+                               "ServiceTargetApproaching", "ServiceTargetBreached", "InfoRequestFulfilled",
+                               "InfoRequestExpired", "DailyBrief", "AppetiteInsight"]
+PRIORITIES = ("NORMAL", "HIGH", "URGENT")
 
 
 def apply(db: Session, data: dict) -> tuple[Institution, User]:
@@ -161,10 +163,19 @@ def save_routing(db: Session, actor: Actor, institution_id: uuid.UUID, rules: li
     existing = {r.id: r for r in db.execute(select(RoutingRule).where(RoutingRule.institution_id == institution_id)).scalars()}
     keep = set()
     teams = {t.id for t in db.execute(select(Team).where(Team.institution_id == institution_id)).scalars()}
+    # Only this institution's active officers/managers can be named as a routing target.
+    receivers = {m.user_id for m, u in db.execute(select(Membership, User).join(User, User.id == Membership.user_id)
+                                                  .where(Membership.institution_id == institution_id,
+                                                         User.status == "ACTIVE")).all()
+                 if set(m.roles) & {"OFFICER", "MANAGER"}}
     for i, r in enumerate(rules):
         team_id = uuid.UUID(r["target_team_id"]) if r.get("target_team_id") else None
         if team_id and team_id not in teams:
             raise ValidationFailed("Unknown team.")
+        user_id = uuid.UUID(r["target_user_id"]) if r.get("target_user_id") else None
+        if user_id and user_id not in receivers:
+            raise ValidationFailed("A routing rule can only name an active officer or manager of your institution.",
+                                   code="UNKNOWN_ASSIGNEE")
         rid = uuid.UUID(r["id"]) if r.get("id") else None
         row = existing.get(rid) if rid else None
         if row is None:
@@ -172,7 +183,7 @@ def save_routing(db: Session, actor: Actor, institution_id: uuid.UUID, rules: li
             db.add(row)
         row.priority, row.name, row.conditions = (i + 1) * 10, r.get("name") or f"Rule {i + 1}", r.get("conditions") or {}
         row.target_team_id = team_id
-        row.target_user_id = uuid.UUID(r["target_user_id"]) if r.get("target_user_id") else None
+        row.target_user_id = user_id
         row.active = r.get("active", True)
         db.flush()
         keep.add(row.id)
@@ -193,14 +204,26 @@ def save_routing(db: Session, actor: Actor, institution_id: uuid.UUID, rules: li
 
 def save_notification_prefs(db: Session, actor: Actor, institution_id: uuid.UUID, prefs: list[dict],
                             user_id: uuid.UUID | None = None) -> None:
+    clean, seen = [], set()
+    for p in prefs:
+        event = str(p.get("event_type") or "").strip()
+        if not event or len(event) > 60 or not event.isalnum():
+            raise ValidationFailed("Each preference needs a valid event type.", code="INVALID_PREF")
+        if event in seen:
+            raise ValidationFailed(f"{event} is listed twice.", code="INVALID_PREF")
+        if p.get("min_priority", "NORMAL") not in PRIORITIES:
+            raise ValidationFailed("Priority must be NORMAL, HIGH or URGENT.", code="INVALID_PREF")
+        seen.add(event)
+        # in_app is always on: alerts can't be silenced entirely
+        channels = ["in_app", *[c for c in p.get("channels", []) if c in ("email", "sms") and c != "in_app"]]
+        clean.append((event, list(dict.fromkeys(channels)), p.get("min_priority", "NORMAL"), bool(p.get("digest"))))
     who = NotificationPref.user_id.is_(None) if user_id is None else NotificationPref.user_id == user_id
     for row in db.execute(select(NotificationPref).where(NotificationPref.institution_id == institution_id, who)).scalars():
         db.delete(row)
     db.flush()
-    for p in prefs:
-        db.add(NotificationPref(institution_id=institution_id, user_id=user_id, event_type=p["event_type"],
-                                channels=[c for c in p.get("channels", ["in_app"]) if c in ("in_app", "email", "sms")],
-                                min_priority=p.get("min_priority", "NORMAL"), digest=bool(p.get("digest"))))
+    for event, channels, priority, digest in clean:
+        db.add(NotificationPref(institution_id=institution_id, user_id=user_id, event_type=event, channels=channels,
+                                min_priority=priority, digest=digest))
     audit(db, actor, "notifications.saved", "institution", institution_id, after={"count": len(prefs)})
 
 
