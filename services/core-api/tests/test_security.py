@@ -150,3 +150,14 @@ def test_zero_core_integration_boundary():
             offenders.append(f.relative_to(root).as_posix())
     assert offenders == ["domains/notification/service.py"], offenders
     assert "graph.facebook.com" in (root / "domains/notification/service.py").read_text(encoding="utf8")
+
+
+def test_tests_never_use_real_channel_credentials_or_network():
+    """A developer's .env may hold real Meta credentials: the harness blanks them and blocks outbound HTTP."""
+    import httpx
+
+    from weza.config import get_settings
+    s = get_settings()
+    assert not (s.whatsapp_send_ready or s.whatsapp_webhook_ready or s.sms_ready)
+    with pytest.raises(AssertionError, match="real network call"):
+        httpx.post("https://graph.facebook.com/v25.0/x/messages", json={})

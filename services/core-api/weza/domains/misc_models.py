@@ -69,10 +69,13 @@ class WhatsappInbox(IdMixin, Base):
     msg_type: Mapped[str] = mapped_column(String(24))
     phone_index: Mapped[str] = mapped_column(String(64), index=True)  # blind index — never the raw number
     payload_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(String(12), default="PENDING", index=True)  # PENDING|DONE|DROPPED|IGNORED
+    # PENDING|DONE|DROPPED|IGNORED|FAILED (FAILED = gave up after processing errors; escalated for review)
+    status: Mapped[str] = mapped_column(String(12), default="PENDING", index=True)
     reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")  # processing errors so far
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class IntegritySignal(IdMixin, Base):

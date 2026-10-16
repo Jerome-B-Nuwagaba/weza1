@@ -8,9 +8,9 @@ behaviour lands the strict xfail flips to a failure, forcing the marker to be re
 
 import hmac
 import itertools
-import re
 import json
 import logging
+import re
 from datetime import timedelta
 
 import httpx
@@ -18,14 +18,14 @@ import pytest
 from sqlalchemy import func, select
 
 from scripts import replay_whatsapp_webhook as rw
-from weza.config import get_settings, is_configured
+from weza.config import DEFAULT_GRAPH_API_VERSION, get_settings, is_configured
 from weza.domains.customer import documents as docs
 from weza.domains.customer.models import Document
 from weza.domains.intelligence.parsing import parse_phone
-from weza.domains.notification import whatsapp_inbound as wa_in
 from weza.domains.misc_models import ChannelMessage, WhatsappInbox
 from weza.domains.need.models import ConversationMessage
 from weza.domains.notification import service as notify
+from weza.domains.notification import whatsapp_inbound as wa_in
 from weza.platform import crypto
 from weza.platform.controls import rate_limit
 from weza.platform.db import session_scope, utcnow
@@ -82,10 +82,12 @@ class Http:
         self.calls.append({"url": url, "json": json, "headers": headers})
         if self.behaviour == "timeout":
             raise httpx.ConnectTimeout("fake timeout")
+        if self.behaviour == "read_timeout":  # request sent, no answer: Meta may have accepted it
+            raise httpx.ReadTimeout("fake read timeout")
         self.n += 1
         req = httpx.Request("POST", url)
         errors = {"http500": (500, 0), "http429": (429, 130429), "http400": (400, 131030),
-                  "http131047": (400, 131047)}
+                  "http131047": (400, 131047), "http190": (401, 190), "http131056": (400, 131056)}
         if self.behaviour in errors:
             code, err = errors[self.behaviour]
             return httpx.Response(code, json={"error": {"code": err, "message": "fake"}} if err else {}, request=req)
@@ -383,7 +385,7 @@ def test_outbound_text_shape(wa_live, http):
     with session_scope() as db:
         assert notify.send_customer_message(db, "+" + fake_phone(), "Hello there", channel="whatsapp")
     (c,) = http.calls
-    assert c["url"].startswith("https://graph.facebook.com/v21.0/000000000000000/messages")
+    assert c["url"].startswith(f"https://graph.facebook.com/{DEFAULT_GRAPH_API_VERSION}/000000000000000/messages")
     assert c["headers"]["Authorization"] == "Bearer FAKE_token_not_real"
     assert c["json"]["type"] == "text" and c["json"]["text"]["body"] == "Hello there"
     assert not c["json"]["to"].startswith("+")
@@ -1086,3 +1088,350 @@ def test_first_whatsapp_message_records_web_attribution_and_strips_marker(client
         assert a.source == "landing" and a.channel == "whatsapp"
     first = in_messages_text(jid)[0]
     assert "(ref:" not in json.dumps(first)
+
+
+# ------------------------------------------------------------------ go-live hardening
+
+
+def _reviews(kind: str) -> list:
+    from weza.domains.misc_models import ReviewItem
+    with session_scope() as db:
+        rows = db.execute(select(ReviewItem).where(ReviewItem.kind == kind)).scalars().all()
+        db.expunge_all()
+        return rows
+
+
+def _inbox_retry(minutes: float = 0):
+    with session_scope() as db:
+        return wa_in.retry_pending(db, now=utcnow() + timedelta(minutes=minutes))
+
+
+def test_coexistence_echoes_and_history_are_never_routed_to_the_agent(client, wa_inbound):
+    """WhatsApp Business app coexistence sends staff replies (smb_message_echoes) and chat history to the same
+    webhook. They must not start or advance a customer journey."""
+    phone = fake_phone()
+    for field in ("smb_message_echoes", "history", "smb_app_state_sync", "message_template_status_update"):
+        p = rw.build("text", phone=phone, text="I need 5 million for stock for my shop")
+        p["entry"][0]["changes"][0]["field"] = field
+        assert send(client, p).status_code == 200
+    assert inbox_rows(phone) == [] and journeys_for(phone) == [] and out_messages(phone) == []
+
+
+def test_messages_for_another_business_number_are_skipped(client, wa_live):
+    phone = fake_phone()
+    p = rw.build("text", phone=phone, text="I need 5 million for stock for my shop")
+    p["entry"][0]["changes"][0]["value"]["metadata"]["phone_number_id"] = "999999999999999"
+    assert send(client, p).status_code == 200
+    assert inbox_rows(phone) == [] and journeys_for(phone) == []
+    text_msg(client, phone, "I need 5 million for stock for my shop")  # same message to OUR number is answered
+    assert len(journeys_for(phone)) == 1 and out_messages(phone)
+
+
+def test_structurally_odd_signed_payloads_are_acknowledged(client, wa_inbound):
+    for junk in ({"entry": {"changes": []}}, {"entry": [{"changes": "x"}]},
+                 {"entry": [{"changes": [{"field": "messages", "value": {"statuses": [{"id": "w", "status": "read",
+                                                                                      "errors": "bad"}]}}]}]},
+                 {"entry": [{"changes": [{"field": "messages", "value": {"messages": {"not": "a list"}}}]}]}):
+        assert send(client, junk).status_code == 200
+
+
+@pytest.mark.parametrize("status,code,category", [
+    (401, 190, "auth"), (403, 200, "auth"), (400, 10, "auth"), (400, 133010, "config"), (400, 130429, "rate_limit"),
+    (400, 131056, "rate_limit"), (400, 131047, "window"), (400, 131026, "recipient"), (400, 131030, "recipient"),
+    (500, 131000, "server"), (503, None, "server"), (429, None, "rate_limit"), (400, 100, "invalid"),
+    (400, "garbage", "invalid")])
+def test_graph_error_classification(status, code, category):
+    assert notify.classify_graph_error(status, code) == category
+
+
+def test_uncertain_send_is_recorded_and_never_resent(wa_live, http):
+    http.behaviour = "read_timeout"
+    phone = fake_phone()
+    assert _send_one(phone) is False
+    (m,) = out_messages(phone)
+    assert m.status == "UNCERTAIN" and m.error_code == "UNCERTAIN" and "_retry_to" not in m.payload
+    http.behaviour = "ok"
+    n = len(http.calls)
+    _retry_sweep()
+    assert len(http.calls) == n  # not re-sent: Meta may already have delivered it
+
+
+def test_expired_token_fails_fast_and_raises_one_ops_alert(wa_live, http):
+    http.behaviour = "http190"
+    for _ in range(3):
+        _send_one(fake_phone())
+    _retry_sweep()
+    assert len(http.calls) == 3  # auth failures are not retried
+    (alert,) = _reviews("WHATSAPP_UNAVAILABLE")
+    assert alert.severity == "HIGH" and alert.detail["error_code"] == "190" and alert.detail["category"] == "auth"
+    assert "FAKE_token_not_real" not in json.dumps(alert.detail) + alert.title
+
+
+def test_closed_customer_service_window_is_recorded_not_retried(wa_live, http):
+    http.behaviour = "http131047"
+    phone = fake_phone()
+    _send_one(phone)
+    (m,) = out_messages(phone)
+    assert m.status == "FAILED" and m.error_code == "131047" and "_retry_to" not in m.payload
+
+
+def test_pair_rate_limit_is_retried(wa_live, http):
+    http.behaviour = "http131056"
+    phone = fake_phone()
+    _send_one(phone)
+    assert "_retry_to" in out_messages(phone)[0].payload
+
+
+def test_processing_error_is_retried_with_backoff_then_succeeds(client, wa_inbound, monkeypatch):
+    from weza.api.v1 import public
+    real, calls = public.inbound, []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("transient")
+        return real(*a, **k)
+    monkeypatch.setattr(public, "inbound", flaky)
+    phone = fake_phone()
+    text_msg(client, phone, "I need 5 million for stock for my shop")
+    (row,) = inbox_rows(phone)
+    assert row.status == "PENDING" and row.attempts == 1 and row.next_attempt_at is not None
+    assert row.reason == "RETRY:RuntimeError"
+    _inbox_retry(minutes=0)  # backoff not elapsed
+    assert inbox_rows(phone)[0].status == "PENDING" and journeys_for(phone) == []
+    _inbox_retry(minutes=1)
+    assert inbox_rows(phone)[0].status == "DONE" and len(journeys_for(phone)) == 1 and out_messages(phone)
+
+
+def test_poison_message_gives_up_apologises_escalates_and_unblocks_the_number(client, wa_inbound, monkeypatch):
+    from weza.api.v1 import public
+    real = public.inbound
+    phone = fake_phone()
+
+    def boom(*a, **k):
+        raise RuntimeError("always")
+    monkeypatch.setattr(public, "inbound", boom)
+    text_msg(client, phone, "I need 5 million for stock for my shop", mid=f"wamid.FAKE_poison_{phone}")
+    text_msg(client, phone, "second message waits behind the first", mid=f"wamid.FAKE_after_{phone}")
+    assert [r.status for r in inbox_rows(phone)] == ["PENDING", "PENDING"]  # order kept: second waits
+    _inbox_retry(minutes=1)
+
+    def poison_only(*a, **k):
+        return boom() if k.get("message_id", "").startswith("wamid.FAKE_poison") else real(*a, **k)
+    monkeypatch.setattr(public, "inbound", poison_only)
+    _inbox_retry(minutes=5)
+    first, second = inbox_rows(phone)
+    assert (first.status, first.reason, first.attempts) == ("FAILED", "PROCESSING_ERROR", 3)
+    assert first.payload_enc is None  # content wiped even on failure
+    assert second.status == "DONE" and len(journeys_for(phone)) == 1  # the number is not blocked
+    assert any(m.body == wa_in.PROCESSING_FAILED_REPLY for m in out_messages(phone))
+    assert any(r.object_id == str(first.id) for r in _reviews("WHATSAPP_INBOUND_FAILED"))
+
+
+def test_failure_after_a_reply_was_sent_is_not_retried(client, wa_live, http, monkeypatch):
+    """If WEZA already submitted a reply to Meta, retrying would send the customer a duplicate."""
+    from weza.api.v1 import public
+
+    def send_then_crash(db, phone, **k):
+        notify.send_customer_message(db, phone, "partial reply", channel="whatsapp")
+        raise RuntimeError("after send")
+    monkeypatch.setattr(public, "inbound", send_then_crash)
+    phone = fake_phone()
+    text_msg(client, phone, "I need 5 million for stock for my shop")
+    (row,) = inbox_rows(phone)
+    assert (row.status, row.reason) == ("FAILED", "PARTIAL_REPLY")
+    assert len(http.calls) == 1  # the partial reply only: no apology, no retry
+    _inbox_retry(minutes=10)
+    assert len(http.calls) == 1
+
+
+def test_message_whose_queue_event_was_lost_is_picked_up_by_the_sweep(client, wa_inbound):
+    from weza.platform.models import EventDelivery, OutboxEvent
+    phone = fake_phone()
+    text_msg(client, phone, "I need 5 million for stock for my shop", process=False)
+    (row,) = inbox_rows(phone)
+    with session_scope() as db:
+        ev_ids = select(OutboxEvent.id).where(OutboxEvent.aggregate_id == str(row.id))
+        for d in db.execute(select(EventDelivery).where(EventDelivery.event_id.in_(ev_ids))).scalars():
+            d.status = "DEAD"
+    drain()
+    assert inbox_rows(phone)[0].status == "PENDING"
+    _inbox_retry(minutes=0)  # too fresh: the normal path may still be on its way
+    assert inbox_rows(phone)[0].status == "PENDING"
+    _inbox_retry(minutes=3)
+    assert inbox_rows(phone)[0].status == "DONE" and len(journeys_for(phone)) == 1
+
+
+def test_too_long_message_gets_an_explanation(client, wa_inbound):
+    phone = fake_phone()
+    text_msg(client, phone, "I need money for school fees.")
+    text_msg(client, phone, "x" * 2500)
+    assert inbox_rows(phone)[-1].status == "DROPPED"
+    assert out_messages(phone)[-1].body == "Message is too long."
+
+
+def test_app_secret_format_warning_names_only(monkeypatch):
+    s = get_settings()
+    monkeypatch.setattr(s, "whatsapp_app_secret", "short-secret")
+    assert s.channel_config_summary()["warnings"] == ["WHATSAPP_APP_SECRET_FORMAT"]
+    assert "short-secret" not in json.dumps(s.channel_config_summary())
+    monkeypatch.setattr(s, "whatsapp_app_secret", "0123456789abcdef0123456789ABCDEF")
+    assert s.channel_config_summary()["warnings"] == []
+
+
+# ------------------------------------------------------------------ read-only account check script
+
+
+class FakeGraph:
+    def __init__(self, token_ok=True, coexistence=True):
+        self.token_ok, self.coexistence, self.urls = token_ok, coexistence, []
+
+    def __call__(self, url, params=None, timeout=None, **kw):
+        self.urls.append(url)
+        req = httpx.Request("GET", url)
+        if not self.token_ok:
+            return httpx.Response(400, json={"error": {"code": 190, "error_subcode": 463, "type": "OAuthException",
+                                                       "message": "Session has expired"}}, request=req)
+        path = url.split("/", 4)[-1]
+        if path == "debug_token":
+            data = {"data": {"is_valid": True, "type": "SYSTEM_USER", "app_id": "111", "expires_at": 0,
+                             "scopes": ["whatsapp_business_messaging", "whatsapp_business_management"]}}
+        elif path == "me":
+            data = {"id": "1"}
+        elif path == "000000000000000":
+            data = {"display_phone_number": "+256 700 000 123", "verified_name": "Weza", "platform_type": "CLOUD_API",
+                    "is_on_biz_app": self.coexistence, "code_verification_status": "VERIFIED"}
+        elif path == "111/subscriptions":
+            data = {"data": [{"object": "whatsapp_business_account", "callback_url": "https://x/webhook",
+                              "active": True, "fields": [{"name": "messages", "version": "v25.0"}]}]}
+        else:
+            data = {"data": []}
+        return httpx.Response(200, json=data, request=req)
+
+
+def _account_check(monkeypatch, http_fake, **settings):
+    from scripts import whatsapp_account_check as chk
+    s = get_settings()
+    vals = {"whatsapp_token": "FAKE_SECRET_TOKEN_must_not_print", "whatsapp_phone_number_id": "000000000000000",
+            "whatsapp_app_secret": "FAKE_APP_SECRET_must_not_print", "whatsapp_business_number": "256700000123",
+            "whatsapp_business_account_id": "222", **settings}
+    for k, v in vals.items():
+        monkeypatch.setattr(s, k, v)
+    monkeypatch.setattr(httpx, "get", http_fake)
+    lines: list[str] = []
+    return chk.check(s, out=lines.append), "\n".join(lines)
+
+
+def test_account_check_reports_coexistence_without_leaking_secrets(monkeypatch):
+    g = FakeGraph()
+    f, out = _account_check(monkeypatch, g)
+    assert "Coexistence is active" in out
+    assert f["phone_number"]["matches_WHATSAPP_BUSINESS_NUMBER"] is True
+    assert f["webhook"][0]["fields"] == ["messages"]
+    assert "FAKE_SECRET_TOKEN" not in out and "FAKE_APP_SECRET" not in out and "700000123" not in out
+    assert all(u.startswith("https://graph.facebook.com/") for u in g.urls)  # GET only (httpx.post refuses)
+
+
+def test_account_check_explains_an_expired_token(monkeypatch):
+    f, out = _account_check(monkeypatch, FakeGraph(token_ok=False))
+    assert f["token"]["_error"]["code"] == 190 and "System User token" in out
+    assert "FAKE_SECRET_TOKEN" not in out
+
+
+# ------------------------------------------------------------------ coexistence: account_update (disconnection)
+
+
+def _account_update(event: str, *, waba="222", at=1739212624, phone="15550783881", info=None) -> dict:
+    value = {"phone_number": phone, "event": event}
+    if info is not None:
+        value["disconnection_info"] = info
+    return {"object": "whatsapp_business_account",
+            "entry": [{"id": waba, "time": at, "changes": [{"field": "account_update", "value": value}]}]}
+
+
+def _disconnect_alerts() -> list:
+    return _reviews("WHATSAPP_DISCONNECTED")
+
+
+def test_number_disconnected_in_the_app_raises_one_ops_alert(client, wa_inbound, monkeypatch, caplog):
+    monkeypatch.setattr(wa_inbound, "whatsapp_business_account_id", "222")
+    before = len(_disconnect_alerts())
+    p = _account_update("PARTNER_REMOVED", at=1739212625,
+                        info={"reason": "PRIMARY_INACTIVITY", "initiated_by": "SYSTEM"})
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(2):  # Meta retry of the same webhook: still one alert
+            assert send(client, p).status_code == 200
+    alerts = _disconnect_alerts()
+    assert len(alerts) == before + 1
+    new = next(a for a in alerts if a.dedupe_key.endswith(":1739212625"))
+    assert new.severity == "HIGH" and new.detail == {"event": "PARTNER_REMOVED", "reason": "PRIMARY_INACTIVITY",
+                                                      "initiated_by": "SYSTEM"}
+    blob = new.title + json.dumps(new.detail) + " ".join(str(getattr(r, "data", "")) for r in caplog.records)
+    assert "15550783881" not in blob and "0783881" not in blob
+
+
+def test_offboarded_alerts_and_reconnected_only_logs(client, wa_inbound, monkeypatch):
+    monkeypatch.setattr(wa_inbound, "whatsapp_business_account_id", "222")
+    before = len(_disconnect_alerts())
+    assert send(client, _account_update("ACCOUNT_OFFBOARDED", at=1768477204)).status_code == 200
+    assert send(client, _account_update("ACCOUNT_RECONNECTED", at=1768477205)).status_code == 200
+    assert send(client, _account_update("PARTNER_ADDED", at=1768477206)).status_code == 200
+    events = [a.detail["event"] for a in _disconnect_alerts()
+              if a.dedupe_key.rsplit(":", 1)[-1] in ("1768477204", "1768477205", "1768477206")]
+    assert events == ["ACCOUNT_OFFBOARDED"] and len(_disconnect_alerts()) == before + 1
+
+
+def test_account_update_for_another_waba_is_ignored(client, wa_inbound, monkeypatch):
+    monkeypatch.setattr(wa_inbound, "whatsapp_business_account_id", "222")
+    before = len(_disconnect_alerts())
+    assert send(client, _account_update("PARTNER_REMOVED", waba="999", at=1768477300)).status_code == 200
+    assert len(_disconnect_alerts()) == before
+
+
+def test_account_update_with_odd_values_is_acknowledged(client, wa_inbound):
+    p = _account_update("X" * 500, at="not-a-number", info={"reason": ["bad"], "initiated_by": None})
+    assert send(client, p).status_code == 200
+    p = _account_update("PARTNER_REMOVED", at=1768477400, info="bad")
+    assert send(client, p).status_code == 200
+
+
+# ------------------------------------------------------------------ concurrency: webhook must never freeze the API
+
+
+def test_webhook_waiting_for_a_row_lock_does_not_freeze_the_api(app, client, wa_live):
+    """Regression (2026-10-16, live): two receipts for one message arrived together; the second waited for the first's
+    row lock ON the event loop, so the first could never commit and the whole API hung. The wait must happen in a
+    worker thread while the API keeps answering."""
+    import asyncio
+    import threading
+
+    from weza.platform.db import SessionLocal
+    phone = fake_phone()
+    (m, *_) = _live_conversation(client, phone)
+    holder = SessionLocal()  # plays the part of the first receipt's still-open transaction
+    holder.execute(select(ChannelMessage).where(ChannelMessage.provider_message_id == m.provider_message_id)
+                   .with_for_update()).scalars().first()
+    raw = json.dumps(rw.status_payload(m.provider_message_id, "delivered", phone)).encode()
+    # If the loop is blocked (the bug), asyncio timeouts can't fire: release the lock anyway so the test fails, not hangs.
+    safety = threading.Timer(8, holder.commit)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as ac:
+            hook = asyncio.create_task(ac.post(URL, content=raw, headers={
+                "Content-Type": "application/json", "X-Hub-Signature-256": rw.sign(raw)}))
+            await asyncio.sleep(0.5)
+            health = await asyncio.wait_for(ac.get("/api/v1/health"), timeout=5)
+            assert health.status_code == 200 and not hook.done()  # the API answers while the receipt waits
+            safety.cancel()
+            holder.commit()  # first transaction finishes → the receipt proceeds
+            assert (await asyncio.wait_for(hook, timeout=10)).status_code == 200
+
+    safety.start()
+    try:
+        asyncio.run(scenario())
+    finally:
+        safety.cancel()
+        holder.rollback()
+        holder.close()
+    got = next(x for x in out_messages(phone) if x.provider_message_id == m.provider_message_id)
+    assert got.provider_status == "delivered"

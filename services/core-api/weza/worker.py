@@ -19,6 +19,7 @@ from weza.domains.matching import engine
 from weza.domains.matching.models import WaitingEntry
 from weza.domains.misc_models import MarketSnapshot
 from weza.domains.notification import service as notify
+from weza.domains.notification import whatsapp_inbound
 from weza.domains.opportunity import service as opp_svc
 from weza.platform.controls import purge_rate_counters
 from weza.platform.db import session_scope, utcnow
@@ -103,6 +104,7 @@ JOBS: list[tuple[str, float, Callable[[], object]]] = [
     ("freshness", 300, _sweep(opp_svc.freshness_sweep)),
     ("notify_retry", 60, _sweep(notify.retry_sweep)),
     ("whatsapp_retry", 60, _sweep(notify.retry_failed_channel_messages)),
+    ("whatsapp_inbox_retry", 30, _sweep(whatsapp_inbound.retry_pending)),
     ("notify_escalation", 60, _sweep(notify.escalation_sweep)),
     ("waiting_room", 600, waiting_room_sweep),
     ("dead_letters", 120, dead_letter_alerts),

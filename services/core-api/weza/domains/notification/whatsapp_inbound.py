@@ -4,15 +4,20 @@ The webhook only verifies the signature and calls `receive()`, which stores one 
 (unique → Meta retries are harmless) and emits an outbox event. The worker consumer then runs `process_phone()`,
 which handles that number's pending messages in arrival order through the normal `public.inbound()` seam.
 Message content is kept encrypted only until processed, then wiped. Nothing here logs phone numbers or text.
+
+Failures: one number is processed by one worker at a time (advisory lock). An unexpected error rolls back that
+message only; it is retried a few times with backoff (`retry_pending()`), later messages from the same number wait
+behind it so order is kept, and after the last attempt it is marked FAILED, escalated for review and the customer is
+told to try again. If a reply may already have reached the customer, the message is not retried (no duplicate replies).
 """
 
 import json
 import logging
-
 import re
 import uuid
+from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -23,13 +28,18 @@ from weza.domains.notification.service import send_customer_message
 from weza.platform import crypto
 from weza.platform.controls import rate_limit
 from weza.platform.db import utcnow
-from weza.platform.errors import RateLimited, WezaError
+from weza.platform.errors import RateLimited, ValidationFailed, WezaError
 from weza.platform.events import emit
 
 log = logging.getLogger("weza.whatsapp")
 
 UNSUPPORTED_REPLY = ("Sorry, I can only read typed messages and button taps for now. "
                      "Please type your message or tap one of the options.")
+PROCESSING_FAILED_REPLY = ("Sorry, something went wrong on our side while handling your last message. "
+                           "Please send it again in a few minutes.")
+MAX_PROCESS_ATTEMPTS = 3
+PROCESS_BACKOFF_SECONDS = 30  # multiplied by the attempt number
+STALE_PENDING_SECONDS = 120  # a PENDING row this old with no retry scheduled lost its event: the sweep picks it up
 # Message types we read as text/buttons; reactions and system notices need no reply; everything else is unsupported.
 _IGNORED_TYPES = {"reaction", "system", "ephemeral", "request_welcome"}
 
@@ -76,7 +86,7 @@ def split_ref(text: str | None) -> tuple[str, dict]:
     if not m:
         return text or "", {}
     parts = (m.group(1).split("~") + ["", "", "", ""])[:4]
-    attribution = {k: v[:40] for k, v in zip(("src", "cmp", "ptn", "ref"), parts) if v}
+    attribution = {k: v[:40] for k, v in zip(("src", "cmp", "ptn", "ref"), parts, strict=True) if v}
     return (text or "")[:m.start()].strip(), attribution
 
 
@@ -102,14 +112,112 @@ def receive(db: Session, msg: dict) -> WhatsappInbox | None:
     return row
 
 
-def process_phone(db: Session, phone_index: str) -> int:
-    """Process every pending message for one number, oldest first (row locks keep concurrent workers in order)."""
+# account_update events after which WEZA can no longer send/receive on the number. With WhatsApp Business app
+# coexistence this can happen without anyone touching WEZA: staff press Disconnect in the app, the phone re-registers,
+# or Meta disconnects it for inactivity (disconnection_info.reason PRIMARY_INACTIVITY / COMPANION_INACTIVITY).
+ACCOUNT_ALERT_EVENTS = {"PARTNER_REMOVED", "ACCOUNT_OFFBOARDED", "ACCOUNT_VIOLATION", "ACCOUNT_RESTRICTION",
+                        "DISABLED_UPDATE"}
+
+
+def account_update(db: Session, waba_id: str, at, value: dict) -> bool:
+    """Handle an `account_update` webhook for our WABA. Returns True if an operations alert was raised."""
+    from weza.config import get_settings, is_configured
+    from weza.domains.integrity.service import add_review
+    s = get_settings()
+    if is_configured(s.whatsapp_business_account_id) and waba_id != s.whatsapp_business_account_id.strip():
+        return False  # another account on the same Meta app
+    event = str(value.get("event") or "UNKNOWN")[:40]
+    info = value.get("disconnection_info") if isinstance(value.get("disconnection_info"), dict) else {}
+    detail = {"event": event, "reason": str(info.get("reason") or "")[:40] or None,
+              "initiated_by": str(info.get("initiated_by") or "")[:12] or None}  # never the phone number
+    if event not in ACCOUNT_ALERT_EVENTS:
+        log.info("whatsapp_account_update", extra={"data": detail})
+        return False
+    log.error("whatsapp_account_disconnected", extra={"data": detail})
+    title = (f"WhatsApp account event {event}"
+             + (f" ({detail['reason']}, by {detail['initiated_by']})" if detail["reason"] else "")
+             + ": WEZA may no longer receive or answer customer messages. Run scripts/whatsapp_account_check.py and "
+             "reconnect the number (docs/WHATSAPP_GO_LIVE.md).")
+    add_review(db, "WHATSAPP_DISCONNECTED", title[:240], "channel", "whatsapp", severity="HIGH", detail=detail,
+               dedupe_key=f"WHATSAPP_DISCONNECTED:{event}:{str(at or '')[:20]}")
+    return True
+
+
+def process_phone(db: Session, phone_index: str, now: datetime | None = None) -> int:
+    """Process every due pending message for one number, oldest first. Returns how many were handled."""
+    now = now or utcnow()
+    # One worker per number at a time. Row locks alone don't cover a message that arrives while earlier ones are
+    # being processed, so two first messages could otherwise start two journeys.
+    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"wa:{phone_index}"})
     rows = db.execute(select(WhatsappInbox).where(WhatsappInbox.phone_index == phone_index,
                                                   WhatsappInbox.status == "PENDING")
                       .order_by(WhatsappInbox.received_at, WhatsappInbox.id).with_for_update()).scalars().all()
+    n = 0
     for row in rows:
-        _process_one(db, row)
-    return len(rows)
+        if row.next_attempt_at and row.next_attempt_at > now:
+            break  # waiting for a retry: later messages wait too, so the conversation stays in order
+        n += 1
+        if not _attempt(db, row, now):
+            break
+    return n
+
+
+def _attempt(db: Session, row: WhatsappInbox, now: datetime) -> bool:
+    """Process one message in its own savepoint. Returns False if it must be retried later."""
+    db.info["wa_submitted"] = 0
+    try:
+        with db.begin_nested():
+            _process_one(db, row)
+        return True
+    except Exception as exc:  # noqa: BLE001 — never let one message poison the number's queue
+        submitted = db.info.get("wa_submitted", 0) > 0
+        row.attempts = (row.attempts or 0) + 1
+        # Type name only: exception text can carry SQL parameters (phone numbers, message text).
+        log.warning("whatsapp_inbound_failed", extra={"data": {"err": type(exc).__name__, "attempts": row.attempts,
+                                                               "reply_submitted": submitted}})
+        if not submitted and row.attempts < MAX_PROCESS_ATTEMPTS:
+            row.next_attempt_at = now + timedelta(seconds=PROCESS_BACKOFF_SECONDS * row.attempts)
+            row.reason = f"RETRY:{type(exc).__name__}"[:40]
+            return False
+        _give_up(db, row, submitted, type(exc).__name__)
+        return True
+    finally:
+        db.info.pop("wa_submitted", None)
+
+
+def _give_up(db: Session, row: WhatsappInbox, reply_submitted: bool, err: str) -> None:
+    from weza.domains.integrity.service import add_review
+    reason = "PARTIAL_REPLY" if reply_submitted else "PROCESSING_ERROR"
+    log.error("whatsapp_inbound_gave_up", extra={"data": {"reason": reason, "err": err}})
+    if not reply_submitted:  # nothing reached the customer: tell them, rather than leave them in silence
+        phone = json.loads(_dec_payload(row.payload_enc))["phone"]
+        try:
+            with db.begin_nested():
+                send_customer_message(db, phone, PROCESSING_FAILED_REPLY, channel="whatsapp", kind="processing_error")
+        except Exception:  # noqa: BLE001
+            log.warning("whatsapp_apology_failed")
+    add_review(db, "WHATSAPP_INBOUND_FAILED", f"A WhatsApp message could not be processed ({reason}, {err})",
+               "whatsapp_inbox", row.id, severity="HIGH",
+               detail={"reason": reason, "error": err, "attempts": row.attempts})
+    _finish(row, "FAILED", reason)
+
+
+def _dec_payload(token: str) -> str:
+    from weza.domains.need.journey import _dec
+    return _dec(token)
+
+
+def retry_pending(db: Session, now: datetime | None = None, limit: int = 20) -> int:
+    """Worker sweep: numbers whose oldest pending message is due for a retry, or whose queue event was lost
+    (e.g. dead-lettered, or the worker stopped). Returns how many messages were handled."""
+    now = now or utcnow()
+    due = or_(WhatsappInbox.next_attempt_at <= now,
+              WhatsappInbox.next_attempt_at.is_(None)
+              & (WhatsappInbox.received_at <= now - timedelta(seconds=STALE_PENDING_SECONDS)))
+    phones = db.execute(select(WhatsappInbox.phone_index).where(WhatsappInbox.status == "PENDING", due)
+                        .group_by(WhatsappInbox.phone_index).order_by(func.min(WhatsappInbox.received_at))
+                        .limit(limit)).scalars().all()
+    return sum(process_phone(db, p, now) for p in phones)
 
 
 def _finish(row: WhatsappInbox, status: str, reason: str | None = None) -> None:
@@ -118,8 +226,7 @@ def _finish(row: WhatsappInbox, status: str, reason: str | None = None) -> None:
 
 def _process_one(db: Session, row: WhatsappInbox) -> None:
     from weza.api.v1 import public
-    from weza.domains.need.journey import _dec
-    data = json.loads(_dec(row.payload_enc))
+    data = json.loads(_dec_payload(row.payload_enc))
     phone, kind = data["phone"], data["kind"]
     if kind == "ignored":
         return _finish(row, "IGNORED")
@@ -139,6 +246,12 @@ def _process_one(db: Session, row: WhatsappInbox) -> None:
                            message_id=row.provider_message_id, attribution=attribution or None)
     except WezaError as exc:  # rate limited / invalid message: permanent for this message → acknowledge, don't retry
         log.info("whatsapp_inbound_dropped", extra={"data": {"reason": exc.code}})
+        if isinstance(exc, ValidationFailed):  # e.g. message too long: say why instead of going silent
+            try:
+                rate_limit(db, f"wa:invalid:{row.phone_index}", 3, 600)
+                send_customer_message(db, phone, exc.message, channel="whatsapp", kind="invalid_message")
+            except RateLimited:
+                pass
         return _finish(row, "DROPPED", str(exc.code)[:40])
     _finish(row, "DONE")
 

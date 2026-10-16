@@ -18,18 +18,23 @@ Meta → `POST /api/v1/channels/whatsapp/webhook` (signature checked, message st
 200 returned) → outbox event → worker → `public.inbound()` → `need.service.handle_input()` → replies through
 `notification.send_customer_message()` (Cloud API when configured, otherwise the simulator inbox).
 Delivery receipts (`statuses`) update `notification.channel_message` only; they never advance a journey.
+Only `messages` changes for the configured `WHATSAPP_PHONE_NUMBER_ID` are processed; coexistence echoes/history and other
+numbers are acknowledged and ignored. Processing errors are retried per message (order kept), then FAILED + escalated;
+outbound timeouts after sending are recorded as UNCERTAIN and never re-sent. Details: [WHATSAPP_GO_LIVE.md](WHATSAPP_GO_LIVE.md).
 The simulator (`/whatsapp-sim`) calls `public.inbound()` directly and synchronously.
 
 ## Settings (names only)
 `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_API_VERSION`,
-`WHATSAPP_BUSINESS_NUMBER`, `WHATSAPP_BUSINESS_ACCOUNT_ID` (templates only), `SMS_PROVIDER`, `SMS_API_KEY`, `SMS_USERNAME`,
+`WHATSAPP_BUSINESS_NUMBER`, `WHATSAPP_BUSINESS_ACCOUNT_ID`, `WHATSAPP_APP_ID` + `WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID` (Embedded Signup), `SMS_PROVIDER`, `SMS_API_KEY`, `SMS_USERNAME`,
 `SMS_SENDER_ID`. Fill them with `python scripts/configure_env.py` (hidden input, writes only `.env`).
 
 >>> USER INPUT REQUIRED: the real values above (Meta developer dashboard → your app → WhatsApp → API Setup / Configuration;
 App settings → Basic for the app secret) and your SMS provider's name and credentials.
 
 ## Local replay (fake secrets, simulator mode)
-Set the same fake values in the API terminal, restart, then replay payloads:
+Set the same fake values in the API terminal, restart, then replay payloads. **Use a separate terminal window for
+this:** environment variables override `.env`, so an API started later from the same window rejects every real Meta
+webhook with 403 (Invalid signature) until the window is closed.
 
     set WHATSAPP_APP_SECRET=FAKE_local_app_secret_not_real
     set WHATSAPP_VERIFY_TOKEN=FAKE_local_verify_token_not_real
@@ -68,6 +73,10 @@ create an Authentication template in WhatsApp Manager (copy-code button), wait f
 OTP fails with Meta error 131047. Dev mode (`OTP_DELIVERY=display`) still shows the code in the UI. The template payload shape is
 UNVERIFIED AGAINST REAL META.
 
+## Connecting the organisation's existing number
+See [WHATSAPP_GO_LIVE.md](WHATSAPP_GO_LIVE.md): verified status, the coexistence plan (decided 2026-10-16), the Meta
+checklist, the read-only `scripts/whatsapp_account_check.py`, and the live acceptance checklist.
+
 ## Real end-to-end test with Meta
 1. Fill `.env` (configure_env.py), restart the API; the startup log line `channel_config` should list the names as configured.
 2. Expose the local API: `ngrok http 8000` (or `cloudflared tunnel --url http://localhost:8000`).
@@ -75,7 +84,7 @@ UNVERIFIED AGAINST REAL META.
    verify token = your `WHATSAPP_VERIFY_TOKEN`; click Verify, then subscribe to the `messages` field.
 4. API Setup → "To" field: add and verify your own phone as a test recipient (test numbers can only message verified recipients).
 5. Message the test business number from that phone. Expected: a reply within a few seconds; `channel_message` rows
-   gain `provider_status` sent → delivered → read. Send an image or voice note: you get the "typed messages" reply.
+   gain `provider_status` sent → delivered → read. Send a voice note: you get the "typed messages" reply.
 6. Outside the 24-hour customer-service window Meta rejects free-form messages (needs templates — not implemented).
 
 ## Not implemented (decisions needed from your team)

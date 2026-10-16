@@ -12,21 +12,23 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from weza.api.deps import DB, client_ip, optional_customer
-from weza.config import get_settings
+from weza.config import get_settings, is_configured
 from weza.domains.admin_config import UGANDA, country
 from weza.domains.consent import service as consent_svc
 from weza.domains.institution import service as inst_svc
 from weza.domains.institution.models import Institution
 from weza.domains.misc_models import ChannelMessage
 from weza.domains.need import service as journeys
+from weza.domains.need.models import ConversationMessage
 from weza.domains.notification import service as notify
 from weza.domains.notification import whatsapp_inbound as wa_inbound
-from weza.domains.need.models import ConversationMessage
 from weza.domains.product.models import Product
 from weza.platform import crypto
 from weza.platform.controls import ai_mode, flag, rate_limit
+from weza.platform.db import session_scope
 from weza.platform.errors import Forbidden, NotFound, ValidationFailed
 from weza.platform.models import GraphInstance
 
@@ -149,7 +151,7 @@ def whatsapp_verify(hub_mode: str = Query(None, alias="hub.mode"), hub_token: st
 
 
 @router.post("/channels/whatsapp/webhook")
-async def whatsapp_webhook(request: Request, x_hub_signature_256: str | None = Header(None), db: Session = DB):
+async def whatsapp_webhook(request: Request, x_hub_signature_256: str | None = Header(None)):
     s = get_settings()
     raw = await request.body()
     if not s.whatsapp_webhook_ready:
@@ -163,24 +165,63 @@ async def whatsapp_webhook(request: Request, x_hub_signature_256: str | None = H
         raise ValidationFailed("Malformed payload.") from None
     if not isinstance(payload, dict):
         raise ValidationFailed("Malformed payload.")
-    n_status = n_new = n_dup = 0
-    for entry in payload.get("entry", []):
-        for change in entry.get("changes", []):
-            value = change.get("value") or {}
-            for st in value.get("statuses") or []:  # delivery receipts: update the message, never touch a journey
-                errs = st.get("errors") or [{}]
-                code = errs[0].get("code")
+    # Database work runs in a worker thread with its own transaction, committed before we answer. On the event loop
+    # it froze the whole API: two receipts for the same message arrive together, the second waits for the first's
+    # row lock while blocking the loop, and the first can then never commit.
+    return await run_in_threadpool(_ingest_webhook, s, payload)
+
+
+def _ingest_webhook(s, payload: dict) -> dict:
+    with session_scope() as db:
+        return _ingest(db, s, payload)
+
+
+def _ingest(db: Session, s, payload: dict) -> dict:
+    # Signed but structurally unexpected parts are skipped, not rejected: Meta would retry a non-200 for 7 days.
+    n_status = n_new = n_dup = n_other = n_foreign = 0
+    for entry in _dicts(payload.get("entry")):
+        for change in _dicts(entry.get("changes")):
+            value = change.get("value") if isinstance(change.get("value"), dict) else {}
+            if change.get("field") == "account_update":  # e.g. the number was disconnected from Cloud API
+                wa_inbound.account_update(db, str(entry.get("id") or ""), entry.get("time"), value)
+                n_other += 1
+                continue
+            if change.get("field", "messages") != "messages":
+                # e.g. smb_message_echoes / history / smb_app_state_sync (WhatsApp Business app coexistence),
+                # template or account updates: not customer messages, never routed to the agent.
+                n_other += 1
+                continue
+            if not _for_our_number(s, value):  # another number on the same Meta app/WABA: not ours to answer
+                n_foreign += 1
+                continue
+            for st in _dicts(value.get("statuses")):  # delivery receipts: update the message, never touch a journey
+                errs = st.get("errors") if isinstance(st.get("errors"), list) and st["errors"] else [{}]
+                code = errs[0].get("code") if isinstance(errs[0], dict) else None
                 n_status += notify.apply_delivery_status(
-                    db, st.get("id", ""), st.get("status", ""), notify.parse_status_time(st.get("timestamp")),
-                    str(code) if code is not None else None)
-            for msg in value.get("messages") or []:  # acknowledge fast: store + queue, the worker processes
-                # Storage errors propagate on purpose (500 → Meta retries; the unique key makes that safe).
+                    db, str(st.get("id") or ""), str(st.get("status") or ""),
+                    notify.parse_status_time(st.get("timestamp")), str(code) if code is not None else None)
+            for msg in value.get("messages") if isinstance(value.get("messages"), list) else []:
+                # Acknowledge fast: store + queue, the worker processes. Storage errors propagate on purpose
+                # (500 → Meta retries; the unique provider message id makes that safe).
                 if isinstance(msg, dict) and wa_inbound.receive(db, msg):
                     n_new += 1
                 else:
                     n_dup += 1
-    log.info("whatsapp_webhook", extra={"data": {"received": n_new, "skipped": n_dup, "statuses": n_status}})
+    log.info("whatsapp_webhook", extra={"data": {"received": n_new, "skipped": n_dup, "statuses": n_status,
+                                                 "other_fields": n_other, "other_number": n_foreign}})
     return {"ok": True}
+
+
+def _dicts(v) -> list[dict]:
+    return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
+
+
+def _for_our_number(s, value: dict) -> bool:
+    """True if this change is addressed to the configured business number (or no number is configured yet)."""
+    if not is_configured(s.whatsapp_phone_number_id):
+        return True
+    meta = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+    return str(meta.get("phone_number_id") or "") == s.whatsapp_phone_number_id.strip()
 
 
 def inbound(db: Session, phone: str, *, text: str | None, button_id: str | None = None, button_title: str | None = None,

@@ -7,6 +7,9 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PLACEHOLDER = "REPLACE_ME"
+# Meta Graph API version used when WHATSAPP_API_VERSION is unset or malformed. v25.0 is supported until 2028-07-29
+# (developers.facebook.com/docs/graph-api/changelog/versions); v21.0, the previous default, expires 2027-01-21.
+DEFAULT_GRAPH_API_VERSION = "v25.0"
 
 
 def is_configured(value: str | None) -> bool:
@@ -57,7 +60,7 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str | None = None  # "Phone number ID" (not the phone number itself)
     whatsapp_app_secret: str | None = None  # signs inbound webhooks (X-Hub-Signature-256)
     whatsapp_verify_token: str | None = None  # any string you choose; must match the Meta webhook form
-    whatsapp_api_version: str = "v21.0"  # Graph API version, e.g. v21.0
+    whatsapp_api_version: str = DEFAULT_GRAPH_API_VERSION  # Graph API version, e.g. v25.0
     whatsapp_business_account_id: str | None = None  # WABA id — only needed later for templates
     # Verification codes through WhatsApp (SMS_PROVIDER=whatsapp). Outside the 24-hour window Meta only delivers an
     # approved AUTHENTICATION template; leave the name blank to send a plain message (WhatsApp-started journeys only).
@@ -66,6 +69,11 @@ class Settings(BaseSettings):
     whatsapp_otp_template_name: str | None = None
     whatsapp_otp_template_language: str = "en"
     whatsapp_business_number: str | None = None  # public business number (digits) for the "Continue on WhatsApp" link
+    # Embedded Signup (Tech Provider) onboarding of the organisation's WhatsApp Business app number (coexistence).
+    # Not secrets: the app ID and the Facebook Login for Business configuration ID are visible in the browser.
+    # >>> USER INPUT REQUIRED: Meta app → App settings → Basic → App ID; Facebook Login for Business → Configurations.
+    whatsapp_app_id: str | None = None
+    whatsapp_embedded_signup_config_id: str | None = None
     # >>> USER INPUT REQUIRED: SMS provider for real OTP delivery. console/simulator = no real SMS.
     sms_provider: str = "console"
     sms_api_key: str | None = None
@@ -96,7 +104,20 @@ class Settings(BaseSettings):
     @property
     def graph_api_version(self) -> str:
         v = (self.whatsapp_api_version or "").strip()
-        return v if re.fullmatch(r"v\d{1,3}\.\d{1,2}", v) else "v21.0"
+        return v if re.fullmatch(r"v\d{1,3}\.\d{1,2}", v) else DEFAULT_GRAPH_API_VERSION
+
+    @property
+    def whatsapp_embedded_signup_missing(self) -> list[str]:
+        """Setting names Embedded Signup still needs (the code exchange uses the app ID + app secret)."""
+        need = {"WHATSAPP_APP_ID": self.whatsapp_app_id,
+                "WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID": self.whatsapp_embedded_signup_config_id,
+                "WHATSAPP_APP_SECRET": self.whatsapp_app_secret}
+        return [k for k, v in need.items() if not is_configured(v)]
+
+    @property
+    def whatsapp_app_secret_format_ok(self) -> bool:
+        """Meta app secrets are 32 hex characters; anything else will fail every webhook signature check."""
+        return bool(re.fullmatch(r"[0-9a-fA-F]{32}", (self.whatsapp_app_secret or "").strip()))
 
     @property
     def sms_provider_name(self) -> str:
@@ -128,6 +149,8 @@ class Settings(BaseSettings):
             "WHATSAPP_BUSINESS_NUMBER": is_configured(self.whatsapp_business_number),
             "WHATSAPP_OTP_TEMPLATE_NAME": is_configured(self.whatsapp_otp_template_name),
             "WHATSAPP_BUSINESS_ACCOUNT_ID": is_configured(self.whatsapp_business_account_id),
+            "WHATSAPP_APP_ID": is_configured(self.whatsapp_app_id),
+            "WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID": is_configured(self.whatsapp_embedded_signup_config_id),
             "SMS_PROVIDER": self.sms_provider_name != "console", "SMS_API_KEY": is_configured(self.sms_api_key),
             "SMS_USERNAME": is_configured(self.sms_username), "SMS_SENDER_ID": is_configured(self.sms_sender_id),
         }
@@ -136,7 +159,10 @@ class Settings(BaseSettings):
                 "whatsapp_webhook": "enabled" if self.whatsapp_webhook_ready else "disabled",
                 "sms_outbound": ("provider" if self.sms_ready else "provider_incomplete")
                 if self.sms_provider_name != "console" else "console",
-                "verification_sms": self.sms_ready or not self.is_production}
+                "verification_sms": self.sms_ready or not self.is_production,
+                # names only: a configured value that cannot be right (e.g. an app secret that is not 32 hex chars)
+                "warnings": ["WHATSAPP_APP_SECRET_FORMAT"]
+                if self.whatsapp_webhook_ready and not self.whatsapp_app_secret_format_ok else []}
 
     @property
     def sqlalchemy_url(self) -> str:
