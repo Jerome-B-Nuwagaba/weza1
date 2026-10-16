@@ -6,7 +6,8 @@ import { ActionError } from "@/components/ActionError";
 import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { dateTime } from "@/lib/format";
-import { Badge, Button, EmptyState, ErrorState, Field, Loading, Modal, PageHeader, Tabs, Textarea } from "@/components/ui";
+import { useMe } from "@/components/StaffShell";
+import { Badge, Banner, Button, EmptyState, ErrorState, Field, Loading, Modal, PageHeader, Tabs, Textarea } from "@/components/ui";
 
 const ACTIONS: Record<string, [string, string][]> = {
   DUPLICATE_HOLD: [["release", "Release & route"], ["close", "Close as duplicate"]],
@@ -20,20 +21,30 @@ export default function Review() {
   const [act, setAct] = useState<{ item: any; action: string } | null>(null);
   const [note, setNote] = useState("");
   const [err, setErr] = useState<ApiError | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const { can } = useMe();
   async function save() {
     setErr(null);
+    setNotice(null);
     try {
       r.setData(await api(`/admin/review/${act!.item.id}/resolve`, { body: { action: act!.action, note } }));
       setAct(null);
       setNote("");
     } catch (e) {
-      setErr(e as ApiError);
+      const x = e as ApiError;
+      if (x.status !== 409) return setErr(x);
+      // Someone else resolved it first: show the current queue rather than a stale item.
+      setAct(null);
+      setNote("");
+      setNotice(`"${act!.item.title}" was already resolved. The queue has been refreshed.`);
+      r.reload();
     }
   }
   const link = (i: any) => i.object_type === "institution" ? `/admin/institutions/${i.object_id}` : i.object_type === "integrity_case" ? "/admin/integrity" : i.object_type === "opportunity" ? `/admin/graph?q=${i.object_id}` : i.object_type === "customer" ? null : null;
   return (
     <>
       <PageHeader title="Human Control Centre" subtitle="Where WEZA stops and asks a person: low-confidence AI, conflicts, integrity, routing failures, duplicates, failed events and workflows." />
+      {notice && <Banner tone="info" className="mb-4">{notice}</Banner>}
       <Tabs tabs={[["OPEN", "Open"], ["RESOLVED", "Resolved"]]} value={status} onChange={setStatus} />
       {r.loading ? <Loading /> : r.error ? <ErrorState error={r.error} onRetry={r.reload} /> : r.data.items.length === 0 ? <EmptyState title="Nothing waiting for a human" /> : (
         <div className="space-y-2">
@@ -46,7 +57,7 @@ export default function Review() {
               {status === "OPEN" && (
                 <div className="flex flex-wrap gap-2">
                   {link(i) && <Button size="sm" variant="secondary" href={link(i)!}>Open</Button>}
-                  {i.kind !== "INSTITUTION_VERIFICATION" && i.kind !== "INTEGRITY" && (ACTIONS[i.kind] || ACTIONS.default).map(([a, l]) => <Button key={a} size="sm" variant={a === "dismiss" ? "ghost" : "primary"} onClick={() => setAct({ item: i, action: a })}>{l}</Button>)}
+                  {can("admin.review") && i.kind !== "INSTITUTION_VERIFICATION" && i.kind !== "INTEGRITY" && (ACTIONS[i.kind] || ACTIONS.default).map(([a, l]) => <Button key={a} size="sm" variant={a === "dismiss" ? "ghost" : "primary"} onClick={() => { setErr(null); setNote(""); setAct({ item: i, action: a }); }}>{l}</Button>)}
                 </div>
               )}
             </div>

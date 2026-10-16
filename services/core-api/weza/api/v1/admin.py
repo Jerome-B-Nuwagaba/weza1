@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -36,8 +36,8 @@ from weza.domains.trust import policy
 from weza.domains.trust.models import AuditEvent, Decision
 from weza.domains.trust.service import audit
 from weza.platform.context import Actor
-from weza.platform.db import utcnow
-from weza.platform.errors import NotFound, ValidationFailed
+from weza.platform.db import session_scope, utcnow
+from weza.platform.errors import Forbidden, InvalidTransition, NotFound, ValidationFailed
 from weza.platform.events import emit, replay_delivery
 from weza.platform.models import (
     EventDelivery,
@@ -74,7 +74,11 @@ def overview(actor: Actor = W, db: Session = DB):
                      "avg_first_contact_h": round(sum(contacted) / len(contacted), 1) if contacted else None,
                      "unassigned": sum(1 for o, a in rows if (a is None or a.user_id is None)
                                        and o.state in opp_svc.OPEN_STATES)})
+    paused = {"products": db.execute(select(func.count()).select_from(Product).where(Product.status == "PAUSED")).scalar_one(),
+              "mandates": db.execute(select(func.count()).select_from(Appetite)
+                                     .where(Appetite.lifecycle_status == "PAUSED")).scalar_one()}
     return {"market": ms, "queues": queues, "institutions_by_status": dict(insts), "responsiveness": resp,
+            "paused_supply": paused,
             "kill_switches": {k: (db.get(KillSwitch, k).value if db.get(KillSwitch, k) else {}) for k in KILL_SWITCHES}}
 
 
@@ -144,10 +148,17 @@ def institution_status(inst_id: uuid.UUID, body: StatusIn, actor: Actor = W, db:
     return institution(inst_id, actor, db)
 
 
+def _pause_or_resume(status: str) -> None:
+    """WEZA may pause or resume supply (09-api; TSD §75) but never edits eligibility or archives it (BR-004)."""
+    if status not in ("PAUSED", "ACTIVE"):
+        raise ValidationFailed("WEZA can only pause or resume products and mandates.")
+
+
 @router.post("/products/{product_id}/status")
 def product_status(product_id: uuid.UUID, body: StatusIn, actor: Actor = W, db: Session = DB):
     policy.require(actor, "admin.network_control")
     require_step_up(actor)
+    _pause_or_resume(body.status)
     p = db.get(Product, product_id)
     if p is None:
         raise NotFound("Not found.")
@@ -159,6 +170,7 @@ def product_status(product_id: uuid.UUID, body: StatusIn, actor: Actor = W, db: 
 def appetite_status(appetite_id: uuid.UUID, body: StatusIn, actor: Actor = W, db: Session = DB):
     policy.require(actor, "admin.network_control")
     require_step_up(actor)
+    _pause_or_resume(body.status)
     a = db.get(Appetite, appetite_id)
     if a is None:
         raise NotFound("Not found.")
@@ -209,15 +221,29 @@ def opportunities(state: str | None = None, freshness: str | None = None, q: str
 
 
 class LookupIn(BaseModel):
-    phone: str
-    reason: str = Field(..., min_length=5, max_length=500)
+    phone: str = Field(..., max_length=40)
+    reason: str = Field(..., max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) < 5:
+            raise ValueError("Give a reason of at least 5 characters.")
+        return v
 
 
 @router.post("/customers/lookup")
 def customer_lookup(body: LookupIn, actor: Actor = W, db: Session = DB):
     """Support lookup via the Identity Vault — requires a reason, is audited, masks identifiers (blueprint A-05)."""
-    policy.require(actor, "admin.vault_lookup")
-    require_step_up(actor)
+    try:
+        policy.require(actor, "admin.vault_lookup")
+        require_step_up(actor)
+    except Forbidden as exc:
+        # The request transaction rolls back on error, so the denied attempt is recorded in its own session.
+        with session_scope() as own:
+            audit(own, actor, "vault.lookup_denied", "vault", "none", reason=body.reason, after={"code": exc.code})
+        raise
     phone = parse_phone(body.phone)
     rec = vault_find_by_phone(db, phone) if phone else None
     audit(db, actor, "vault.lookup", "vault", rec.id if rec else "none", reason=body.reason)
@@ -264,7 +290,7 @@ def resolve(item_id: uuid.UUID, body: ResolveIn, actor: Actor = W, db: Session =
     if item is None:
         raise NotFound("Not found.")
     if item.status != "OPEN":
-        raise ValidationFailed("This item has already been resolved.")
+        raise InvalidTransition("This item has already been resolved.", details=[{"from": item.status}])
     if item.kind == "DUPLICATE_HOLD" and body.action in ("release", "close"):
         opp = db.get(Opportunity, uuid.UUID(item.object_id))
         if body.action == "release":
@@ -277,7 +303,7 @@ def resolve(item_id: uuid.UUID, body: ResolveIn, actor: Actor = W, db: Session =
         replay_delivery(db, uuid.UUID(item.object_id))
     item.status, item.resolved_by, item.resolution = "RESOLVED", actor.display, f"{body.action}: {body.note}"
     audit(db, actor, f"review.{body.action}", item.object_type, item.object_id, reason=body.note,
-          after={"kind": item.kind})
+          before={"kind": item.kind, "status": "OPEN"}, after={"kind": item.kind, "status": item.status})
     return review("OPEN", actor, db)
 
 
@@ -302,8 +328,10 @@ def decide_case(case_id: uuid.UUID, body: CaseDecision, actor: Actor = W, db: Se
     """HUMAN_REVIEW_INTEGRITY_CASE (AL0)."""
     policy.require(actor, "admin.review")
     c = db.get(IntegrityCase, case_id)
-    if c is None or c.state != "OPEN":
-        raise ValidationFailed("Case is not open.")
+    if c is None:
+        raise NotFound("Not found.")
+    if c.state != "OPEN":
+        raise InvalidTransition("This case has already been decided.", details=[{"from": c.state}])
     c.state, c.result, c.decided_by, c.decision_note = "DECIDED", body.result, actor.id, body.note
     if c.subject_type == "opportunity":
         opp = db.get(Opportunity, uuid.UUID(c.subject_id))
@@ -316,7 +344,8 @@ def decide_case(case_id: uuid.UUID, body: CaseDecision, actor: Actor = W, db: Se
             opp.state, opp.closed_at = "CLOSED", utcnow()
     for item in db.execute(select(ReviewItem).where(ReviewItem.object_id == str(c.id))).scalars():
         item.status, item.resolved_by, item.resolution = "RESOLVED", actor.display, body.result
-    audit(db, actor, "integrity.decided", "integrity_case", c.id, after={"result": body.result}, reason=body.note)
+    audit(db, actor, "integrity.decided", "integrity_case", c.id, before={"state": "OPEN"},
+          after={"state": "DECIDED", "result": body.result}, reason=body.note)
     emit(db, "IntegrityCaseDecided", topic="integrity", aggregate_type="integrity_case", aggregate_id=c.id,
          data={"result": body.result})
     return integrity_cases(actor, db)
@@ -353,7 +382,9 @@ class DisputeMove(BaseModel):
 def move_dispute(dispute_id: uuid.UUID, body: DisputeMove, actor: Actor = W, db: Session = DB):
     """AUTHORISED_COMMERCIAL_REVIEW (AL0). Reversals/credits are new events, never edits (Skill §49)."""
     policy.require(actor, "admin.dispute_decide")
-    commercial.move_dispute(db, actor, dispute_id, body.state, body.note, body.decision)
+    if body.state == "DECIDED" and len(body.note.strip()) < 3:
+        raise ValidationFailed("Record the reason and evidence for this decision.")  # FSD §42; admin journey
+    commercial.move_dispute(db, actor, dispute_id, body.state, body.note.strip(), body.decision)
     return disputes(actor, db)
 
 
@@ -630,6 +661,22 @@ def config(actor: Actor = W, db: Session = DB):
             "can_edit": policy.has(actor, "admin.config")}
 
 
+CHANNELS = ("web", "whatsapp", "sms")
+
+
+def _validate_switch(key: str, value: dict) -> None:
+    if key in ("pause_all_routing", "pause_billing_events"):
+        if set(value) != {"on"} or not isinstance(value["on"], bool):
+            raise ValidationFailed("Send {\"on\": true} or {\"on\": false}.")
+    elif key == "ai_mode":
+        if set(value) != {"mode"} or value["mode"] not in ("AVAILABLE", "DEGRADED", "UNAVAILABLE"):
+            raise ValidationFailed("AI mode must be AVAILABLE, DEGRADED or UNAVAILABLE.")
+    elif key == "disabled_channels":
+        ch = value.get("channels")
+        if set(value) != {"channels"} or not isinstance(ch, list) or any(c not in CHANNELS for c in ch)                 or len(set(ch)) != len(ch):
+            raise ValidationFailed("Disabled channels must be a list drawn from web, whatsapp and sms.")
+
+
 class SwitchIn(BaseModel):
     key: str
     value: dict
@@ -643,8 +690,7 @@ def set_switch(body: SwitchIn, actor: Actor = W, db: Session = DB):
         raise ValidationFailed("Unknown switch.")
     policy.require(actor, "admin.network_control" if body.key == "pause_all_routing" else "admin.config")
     require_step_up(actor)
-    if body.key == "ai_mode" and body.value.get("mode") not in ("AVAILABLE", "DEGRADED", "UNAVAILABLE"):
-        raise ValidationFailed("AI mode must be AVAILABLE, DEGRADED or UNAVAILABLE.")
+    _validate_switch(body.key, body.value)
     row = db.get(KillSwitch, body.key) or KillSwitch(key=body.key)
     before = row.value
     row.value, row.reason, row.updated_by = body.value, body.reason, actor.display

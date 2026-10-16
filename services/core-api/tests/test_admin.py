@@ -120,7 +120,10 @@ def test_review_item_resolves_once(client, as_user):
     assert next(i for i in resolved if i["id"] == item_id)["resolution"] == "dismiss: Facts reconciled"
     # A resolved item cannot be acted on again (no double release / replay)
     again = client.post(f"{API}/review/{item_id}/resolve", json={"action": "dismiss", "note": "Second go"}, headers=ops)
-    assert again.status_code == 422
+    assert again.status_code == 409 and again.json()["error"]["code"] == "INVALID_TRANSITION"
+    ev = _audits("review.dismiss", resolved_obj := next(i for i in resolved if i["id"] == item_id)["object_id"])
+    assert len(ev) == 1 and ev[0].before["status"] == "OPEN" and ev[0].after["status"] == "RESOLVED"
+    assert ev[0].reason == "Facts reconciled" and ev[0].actor_display and resolved_obj
     assert client.post(f"{API}/review/{uuid.uuid4()}/resolve", json={"action": "dismiss", "note": "x" * 5},
                        headers=ops).status_code == 404
     assert client.post(f"{API}/review/{_review_item()}/resolve", json={"action": "dismiss", "note": "x" * 5},
@@ -143,9 +146,15 @@ def test_integrity_case_decided_once(client, as_user):
     assert r.status_code == 200
     c = next(x for x in r.json()["cases"] if x["id"] == case_id)
     assert c["state"] == "DECIDED" and c["result"] == "ALLOW"
-    assert client.post(f"{API}/integrity/{case_id}/decide", json={"result": "BLOCK", "note": "Changed mind"},
-                       headers=ops).status_code == 422
-    assert _audits("integrity.decided", case_id)
+    again = client.post(f"{API}/integrity/{case_id}/decide", json={"result": "BLOCK", "note": "Changed mind"},
+                        headers=ops)
+    assert again.status_code == 409 and again.json()["error"]["code"] == "INVALID_TRANSITION"
+    ev = _audits("integrity.decided", case_id)
+    assert len(ev) == 1 and ev[0].after == {"state": "DECIDED", "result": "ALLOW"} and ev[0].reason == "Genuine customer"
+    assert client.post(f"{API}/integrity/{uuid.uuid4()}/decide", json={"result": "ALLOW", "note": "Unknown"},
+                       headers=ops).status_code == 404
+    assert client.post(f"{API}/integrity/{case_id}/decide", json={"result": "ALLOW", "note": "Not mine"},
+                       headers=as_user("commercial@weza.demo")).status_code == 403
 
 
 # ------------------------------------------------------------------ commercial (A-09)
@@ -312,3 +321,97 @@ def test_pausing_product_or_appetite_requires_step_up_mfa(client, as_user, monke
     for kind, item in (("products", detail["products"][0]), ("appetites", detail["appetites"][0])):
         r = client.post(f"{API}/{kind}/{item['id']}/status", json={"status": "PAUSED", "reason": "Drill"}, headers=ops)
         assert r.status_code == 403 and r.json()["error"]["code"] == "MFA_STEP_UP_REQUIRED", kind
+
+
+def test_vault_lookup_trims_reason_and_audits_denied_attempts(client, as_user):
+    ops, comm = as_user("ops@weza.demo"), as_user("commercial@weza.demo")
+    assert client.post(f"{API}/customers/lookup", json={"phone": "0772123456", "reason": "      "},
+                       headers=ops).status_code == 422
+    r = client.post(f"{API}/customers/lookup", json={"phone": "0700000002", "reason": "  Status call  "}, headers=ops)
+    assert r.status_code == 200
+    r = client.post(f"{API}/customers/lookup", json={"phone": "0700000003", "reason": "Curious about a customer"},
+                    headers=comm)
+    assert r.status_code == 403
+    with session_scope() as db:
+        rows = db.execute(select(AuditEvent).where(AuditEvent.action.in_(["vault.lookup", "vault.lookup_denied"]))
+                          .order_by(AuditEvent.at.desc()).limit(2)).scalars().all()
+        assert [(a.action, a.reason) for a in rows] == [("vault.lookup_denied", "Curious about a customer"),
+                                                       ("vault.lookup", "Status call")]
+        assert "0700000003" not in str(rows[0].after)  # the phone number is never written to the audit row
+
+
+def test_admin_can_only_pause_or_resume_supply(client, as_user):
+    """09-api: products & appetites (pause). Archiving or expiring stays with the institution (BR-004)."""
+    ops = as_user("ops@weza.demo")
+    inst = next(i for i in client.get(f"{API}/institutions", headers=ops).json()["institutions"]
+                if i["display_name"] == "Lakeside Bank")
+    detail = client.get(f"{API}/institutions/{inst['id']}", headers=ops).json()
+    pid = next(p["id"] for p in detail["products"] if p["status"] == "ACTIVE")
+    aid = next(a["id"] for a in detail["appetites"] if a["status"] == "ACTIVE")
+    for kind, item_id in (("products", pid), ("appetites", aid)):
+        for to in ("ARCHIVED", "EXPIRED", "DRAFT"):
+            r = client.post(f"{API}/{kind}/{item_id}/status", json={"status": to, "reason": "Not allowed"}, headers=ops)
+            assert r.status_code == 422, (kind, to)
+        # Resuming something already active is an invalid transition
+        r = client.post(f"{API}/{kind}/{item_id}/status", json={"status": "ACTIVE", "reason": "Already active"},
+                        headers=ops)
+        assert r.status_code == 422 and r.json()["error"]["code"] == "INVALID_TRANSITION", kind
+        assert client.post(f"{API}/{kind}/{item_id}/status", json={"status": "PAUSED", "reason": "Not mine"},
+                           headers=as_user("commercial@weza.demo")).status_code == 403
+
+
+def test_kill_switch_values_are_validated(client, as_user):
+    admin = as_user("admin@weza.demo")
+    for key, value in (("pause_all_routing", {}), ("pause_all_routing", {"on": "yes"}),
+                       ("pause_billing_events", {"on": True, "extra": 1}), ("ai_mode", {"mode": "AVAILABLE", "x": 1}),
+                       ("disabled_channels", {"channels": ["fax"]}), ("disabled_channels", {"channels": "web"}),
+                       ("disabled_channels", {"channels": ["sms", "sms"]})):
+        r = client.post(f"{API}/kill-switches", json={"key": key, "value": value, "reason": "Validation"}, headers=admin)
+        assert r.status_code == 422, (key, value)
+    for value in ({"channels": ["sms"]}, {"channels": []}):
+        assert client.post(f"{API}/kill-switches", json={"key": "disabled_channels", "value": value,
+                                                         "reason": "Drill"}, headers=admin).status_code == 200
+
+
+def test_dispute_decision_needs_reason_and_is_final(client, as_user):
+    """FSD §40, §42; blueprint C3: OPEN → UNDER_REVIEW → DECIDED → CLOSED; a decided dispute is never re-decided."""
+    from decimal import Decimal
+
+    from weza.domains.commercial.models import CommercialEvent, Dispute
+    comm = as_user("commercial@weza.demo")
+    inst_id = next(i["id"] for i in client.get(f"{API}/institutions", headers=comm).json()["institutions"]
+                   if i["display_name"] == "Pearl SACCO")
+    with session_scope() as db:
+        ev = CommercialEvent(idempotency_key=f"test:{uuid.uuid4()}", institution_id=uuid.UUID(inst_id),
+                             kind="QUALIFIED_OPPORTUNITY", amount=Decimal("25000"), currency="UGX", status="DISPUTED",
+                             billing_period="2026-10")
+        db.add(ev)
+        db.flush()
+        d = Dispute(commercial_event_id=ev.id, institution_id=ev.institution_id, reason="OTHER",
+                    description="Customer was already ours", state="OPEN", history=[])
+        db.add(d)
+        db.flush()
+        dispute_id = str(d.id)
+    move = f"{API}/disputes/{dispute_id}/move"
+    assert client.post(move, json={"state": "UNDER_REVIEW"}, headers=as_user("ops@weza.demo")).status_code == 403
+    skip = client.post(move, json={"state": "DECIDED", "decision": "CHARGE_VALID", "note": "Skipping review"},
+                       headers=comm)
+    assert skip.status_code == 409  # OPEN cannot jump straight to DECIDED
+    assert client.post(move, json={"state": "UNDER_REVIEW"}, headers=comm).status_code == 200
+    r = client.post(move, json={"state": "DECIDED", "decision": "CHARGE_VALID", "note": "   "}, headers=comm)
+    assert r.status_code == 422  # a decision needs its reason and evidence
+    r = client.post(move, json={"state": "DECIDED", "decision": "CHARGE_VALID", "note": "Not an existing customer"},
+                    headers=comm)
+    assert r.status_code == 200
+    again = client.post(move, json={"state": "DECIDED", "decision": "CHARGE_REVERSED", "note": "Changed mind"},
+                        headers=comm)
+    assert again.status_code == 409 and again.json()["error"]["code"] == "INVALID_TRANSITION"
+    ev = _audits("billing.dispute_decided", dispute_id)
+    assert len(ev) == 1 and ev[0].reason == "Not an existing customer"
+
+
+def test_control_centre_reports_active_controls(client, as_user):
+    """Blueprint A-01: queues and kill-switch status, including paused supply."""
+    d = client.get(f"{API}/overview", headers=as_user("ops@weza.demo")).json()
+    assert set(d["kill_switches"]) == {"pause_all_routing", "pause_billing_events", "disabled_channels", "ai_mode"}
+    assert set(d["paused_supply"]) == {"products", "mandates"} and "queues" in d and "institutions_by_status" in d
