@@ -261,6 +261,8 @@ def resolve(item_id: uuid.UUID, body: ResolveIn, actor: Actor = W, db: Session =
     item = db.get(ReviewItem, item_id)
     if item is None:
         raise NotFound("Not found.")
+    if item.status != "OPEN":
+        raise ValidationFailed("This item has already been resolved.")
     if item.kind == "DUPLICATE_HOLD" and body.action in ("release", "close"):
         opp = db.get(Opportunity, uuid.UUID(item.object_id))
         if body.action == "release":
@@ -393,6 +395,8 @@ class ContractIn(BaseModel):
 def set_contract(inst_id: uuid.UUID, body: ContractIn, actor: Actor = W, db: Session = DB):
     """Contract-configurable commercial definitions (TSD §44). Old contract is end-dated, never edited."""
     policy.require(actor, "admin.commercial")
+    if db.get(Institution, inst_id) is None:
+        raise NotFound("Not found.")
     for c in db.execute(select(Contract).where(Contract.institution_id == inst_id, Contract.status == "ACTIVE")).scalars():
         c.status, c.effective_to = "ENDED", date.today()
     db.add(Contract(institution_id=inst_id, plan=body.plan, subscription_fee=Decimal(str(body.subscription_fee)),
