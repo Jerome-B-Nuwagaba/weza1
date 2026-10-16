@@ -126,7 +126,19 @@ class _FakeClamd:
                 conn.sendall(b"stream: Test.Marker FOUND\0" if b"MARKER" in data else b"stream: OK\0")
 
     def close(self):
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)  # unblocks accept() on Linux, where close() alone does not
+        except OSError:
+            pass
         self.sock.close()
+
+
+def _unused_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()  # never listened on, so connections are refused
+    return port
 
 
 def test_clamav_scanner():
@@ -140,7 +152,7 @@ def test_clamav_scanner():
     finally:
         clamd.close()
     # Fail closed when clamd is unreachable
-    assert docs.ClamAVScanner("127.0.0.1", clamd.port, 1).scan(b"%PDF-1.4\n") == (False, docs.SCAN_UNAVAILABLE)
+    assert docs.ClamAVScanner("127.0.0.1", _unused_port(), 1).scan(b"%PDF-1.4\n") == (False, docs.SCAN_UNAVAILABLE)
 
 
 @pytest.mark.parametrize(("url", "ssl"), [("smtps://apikey:p%40ss@smtp.example:465", True),
