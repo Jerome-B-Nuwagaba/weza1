@@ -9,6 +9,24 @@ export function PriorityBadge({ p }: { p: string }) {
   return <Badge tone={p === "URGENT" ? "danger" : "gold"}>{p === "URGENT" ? "Urgent" : "High"}</Badge>;
 }
 
+/** Indicative terms an institution reported with an approval — always labelled as theirs, never a WEZA offer. */
+export function TermsLine({ terms }: { terms: any }) {
+  const parts = [
+    terms.tenor_months && `${terms.tenor_months} months`,
+    terms.interest_rate != null && `${terms.interest_rate}% ${terms.rate_period === "ANNUAL" ? "per year" : "per month"}`,
+    terms.monthly_repayment != null && `${money(terms.monthly_repayment)}/month`,
+    terms.fees != null && `fees ${money(terms.fees)}`,
+  ].filter(Boolean);
+  return (
+    <div className="mt-1 rounded-lg bg-canvas px-3 py-2 text-[13px]">
+      <div className="font-medium">Indicative terms{parts.length > 0 && `: ${parts.join(" · ")}`}</div>
+      {terms.conditions && <div className="text-muted">Conditions: {terms.conditions}</div>}
+      {terms.valid_until && <div className={terms.expired ? "text-danger" : "text-muted"}>{terms.expired ? "Expired" : "Valid until"} {terms.valid_until}</div>}
+      <div className="text-[12px] italic text-muted">{terms.label}</div>
+    </div>
+  );
+}
+
 export function FreshnessBadge({ f }: { f: string }) {
   if (f === "FRESH") return null;
   return <Badge tone={f === "ATTENTION_REQUIRED" ? "warning" : "danger"}>{f === "ATTENTION_REQUIRED" ? "Needs attention" : f.toLowerCase()}</Badge>;

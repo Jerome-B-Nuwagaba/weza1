@@ -69,6 +69,26 @@ class _RequestsScreenState extends State<RequestsScreen> {
     );
   }
 
+  /// Indicative terms as reported by the institution — never presented as a WEZA offer.
+  Widget _terms(Map<String, dynamic> t) {
+    final parts = <String>[
+      if (t['tenor_months'] != null) '${t['tenor_months']} months',
+      if (t['interest_rate'] != null) '${t['interest_rate']}% ${t['rate_period'] == 'ANNUAL' ? 'per year' : 'per month'}',
+      if (t['monthly_repayment'] != null) '${money(t['monthly_repayment'])}/month',
+      if (t['fees'] != null) 'fees ${money(t['fees'])}',
+    ];
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Indicative terms${parts.isEmpty ? '' : ': ${parts.join(' · ')}'}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+        if (t['conditions'] != null) Text('Conditions: ${t['conditions']}', style: const TextStyle(color: WezaColors.muted, fontSize: 13)),
+        if (t['valid_until'] != null)
+          Text('${t['expired'] == true ? 'Expired' : 'Valid until'} ${t['valid_until']}', style: TextStyle(color: t['expired'] == true ? WezaColors.danger : WezaColors.muted, fontSize: 13)),
+        Text('${t['label']}', style: const TextStyle(color: WezaColors.muted, fontSize: 12, fontStyle: FontStyle.italic)),
+      ]),
+    );
+  }
+
   Widget _need(Map<String, dynamic> n) {
     final opps = (n['opportunities'] as List?) ?? [];
     return Card(
@@ -93,8 +113,14 @@ class _RequestsScreenState extends State<RequestsScreen> {
                   ),
                 ]),
                 for (final t in (o['timeline'] as List? ?? [])) Text('• ${t['label']}', style: const TextStyle(color: WezaColors.muted, fontSize: 13)),
-                for (final x in (o['outcomes'] as List? ?? []))
+                for (final r in (o['info_requests'] as List? ?? []))
+                  if (r['status'] == 'OPEN') _InfoRequestTile(r: Map<String, dynamic>.from(r), institution: '${o['institution']}', onDone: load)
+                  else if (r['status'] == 'FULFILLED')
+                    Text('You answered ${o['institution']}\'s request', style: const TextStyle(color: WezaColors.muted, fontSize: 13)),
+                for (final x in (o['outcomes'] as List? ?? [])) ...[
                   Text('${x['label']}${x['disbursed_amount'] != null ? ' · ${money(x['disbursed_amount'])}' : ''} — reported by ${x['reported_by']}', style: const TextStyle(fontSize: 13, fontStyle: FontStyle.italic)),
+                  if (x['terms'] != null) _terms(Map<String, dynamic>.from(x['terms'])),
+                ],
                 if (o['can_withdraw'] == true)
                   TextButton(
                     onPressed: () async {
@@ -117,6 +143,85 @@ class _RequestsScreenState extends State<RequestsScreen> {
             ),
         ]),
       ),
+    );
+  }
+}
+
+/// An institution's request for a document or an answer. Answering is the customer's choice.
+class _InfoRequestTile extends StatefulWidget {
+  const _InfoRequestTile({required this.r, required this.institution, required this.onDone});
+  final Map<String, dynamic> r;
+  final String institution;
+  final Future<void> Function() onDone;
+  @override
+  State<_InfoRequestTile> createState() => _InfoRequestTileState();
+}
+
+class _InfoRequestTileState extends State<_InfoRequestTile> {
+  final answer = TextEditingController();
+  List<dynamic> docs = [];
+  bool busy = false;
+  String? error;
+
+  bool get isDoc => widget.r['kind'] == 'DOCUMENT';
+
+  @override
+  void initState() {
+    super.initState();
+    if (isDoc) {
+      WezaApi.instance().then((api) => api.documents()).then((all) {
+        if (mounted) {
+          setState(() => docs = all.where((d) => d['state'] == 'STORED' && d['doc_type'] == widget.r['doc_type']).toList());
+        }
+      }).catchError((_) {});
+    }
+  }
+
+  @override
+  void dispose() {
+    answer.dispose();
+    super.dispose();
+  }
+
+  Future<void> respond({String? text, String? documentId}) async {
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      await (await WezaApi.instance()).respondInfoRequest(widget.r['id'], text: text, documentId: documentId);
+      await widget.onDone();
+    } on ApiException catch (e) {
+      if (mounted) setState(() => error = e.message);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final r = widget.r;
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(color: WezaColors.blueTint, borderRadius: BorderRadius.circular(10)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('${widget.institution} asks: ${isDoc ? r['doc_label'] : 'a question'}', style: const TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 2),
+        Text('${r['message']}'),
+        const SizedBox(height: 6),
+        if (!isDoc) ...[
+          TextField(controller: answer, maxLines: 3, minLines: 1, maxLength: 2000, decoration: const InputDecoration(hintText: 'Your answer')),
+          FilledButton(onPressed: busy ? null : () => answer.text.trim().isEmpty ? null : respond(text: answer.text.trim()), child: const Text('Send')),
+        ] else if (docs.isEmpty)
+          const Text('Upload this document on the WEZA website under My documents, then send it from here.', style: TextStyle(color: WezaColors.muted, fontSize: 13))
+        else
+          Wrap(spacing: 8, children: [
+            for (final d in docs) OutlinedButton(onPressed: busy ? null : () => respond(documentId: d['id']), child: Text('Send ${d['filename']}')),
+          ]),
+        const Text('WEZA and institutions will never ask for your PIN, password or one-time codes.', style: TextStyle(color: WezaColors.muted, fontSize: 12)),
+        if (error != null) Text(error!, style: const TextStyle(color: WezaColors.danger)),
+      ]),
     );
   }
 }

@@ -1,5 +1,34 @@
 """Shared test helpers."""
 
+import uuid
+
+
+def idem(headers: dict) -> dict:
+    return {**headers, "Idempotency-Key": uuid.uuid4().hex}
+
+
+def routed_to_lakeside(journey, phone: str):
+    """Run a fresh SME customer through to a Lakeside opportunity; return (journey, opp_id, assigned officer email)."""
+    from sqlalchemy import select
+
+    from weza.domains.identity.models import User
+    from weza.domains.opportunity.models import Assignment, Opportunity
+    from weza.platform.db import session_scope
+    from weza.platform.events import drain
+    j = journey("I need UGX 20 million to buy stock for my pharmacy")
+    j.send(action="confirm")
+    j.verify(phone)
+    j.answer_profile({**SME_ANSWERS, "identity.nin": f"CM{phone}AB"})
+    opt = next(o for o in j.cards("options")[0]["options"] if o["institution"] == "Lakeside Bank")
+    j.send(action="select", value=opt["match_id"])
+    j.send(action="agree", value=j.cards("consent")[0]["template_id"])
+    ref = j.cards("submitted")[0]["reference"]
+    drain()
+    with session_scope() as db:
+        o = db.execute(select(Opportunity).where(Opportunity.reference == ref)).scalar_one()
+        owner = db.get(User, db.get(Assignment, o.id).user_id).email
+        return j, str(o.id), owner
+
 
 def login(client, email: str, password: str = "WezaDemo!2026") -> dict:
     r = client.post("/api/v1/auth/login", json={"email": email, "password": password})

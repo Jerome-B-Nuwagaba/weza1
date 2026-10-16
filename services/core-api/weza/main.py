@@ -34,8 +34,8 @@ async def _lifespan(app: FastAPI):
 def create_app(start_worker: bool | None = None) -> FastAPI:
     s = get_settings()
     configure_logging()
-    if s.is_production and ("local-dev" in s.secret_key or "bG9jYWwtZGV2" in s.vault_master_key):
-        raise RuntimeError("Refusing to start in production with development secrets.")
+    if s.is_production and (problems := s.production_problems()):
+        raise RuntimeError("Refusing to start in production: " + "; ".join(problems))
     app = FastAPI(title="WEZA Core API", version="1.0.0", lifespan=_lifespan,
                   description="Intelligent financial marketplace — zero core-system integration.",
                   docs_url=None if s.is_production else "/docs", openapi_url="/api/v1/openapi.json")

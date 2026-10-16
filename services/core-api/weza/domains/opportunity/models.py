@@ -82,6 +82,15 @@ class Outcome(IdMixin, Base):
     approved_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     disbursed_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     disbursed_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Indicative terms the institution reports with an approval. Shown to the customer as institution-reported;
+    # WEZA never sets, compares as advice, or guarantees them.
+    tenor_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    interest_rate: Mapped[Decimal | None] = mapped_column(Numeric(6, 3), nullable=True)
+    rate_period: Mapped[str | None] = mapped_column(String(8), nullable=True)  # MONTHLY | ANNUAL
+    fees: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    monthly_repayment: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    conditions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    terms_valid_until: Mapped[date | None] = mapped_column(Date, nullable=True)
     reported_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -96,6 +105,28 @@ class Activity(IdMixin, Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     data: Mapped[dict] = mapped_column(JSONB, default=dict)
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class InfoRequest(IdMixin, TimestampMixin, Base):
+    """Institution → customer request for a document or an answer on a routed opportunity. WEZA relays it;
+    the customer chooses whether to respond, and nothing outside the consented categories is ever requested."""
+
+    __tablename__ = "info_request"
+    __table_args__ = (Index("ix_info_request_opp_status", "opportunity_id", "status"), S)
+
+    opportunity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    institution_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    customer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    kind: Mapped[str] = mapped_column(String(12))  # DOCUMENT | QUESTION
+    doc_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    message: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(12), default="OPEN")  # OPEN | FULFILLED | CANCELLED
+    requested_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Preview(IdMixin, TimestampMixin, Base):

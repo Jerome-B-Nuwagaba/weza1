@@ -11,7 +11,8 @@ from weza.platform.context import Actor
 from weza.platform.db import get_db
 from weza.platform.errors import Forbidden, Unauthorized
 
-DB = Depends(get_db)
+# scope="function": commit before the response is sent, so a client acting on a response never reads ahead of it.
+DB = Depends(get_db, scope="function")
 
 
 def client_ip(request: Request) -> str:

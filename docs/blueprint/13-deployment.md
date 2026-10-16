@@ -27,4 +27,6 @@ LOCAL (docker-compose or native) · DEV (Render preview) · TEST (CI ephemeral P
 Container Apps (api, worker), Azure Database for PostgreSQL Flexible (PITR), Service Bus (topics from §08), Blob Storage (versioning, private endpoints), Key Vault, Entra ID, API Management, Application Insights. RPO 15 min / RTO 4 h proposed for approval. Bicep templates are provided, but they are not deployed in V1-test.
 
 ## 5. Production go-live blockers (not needed for testing)
-Production malware scanner (C7) · Entra ID / enterprise SSO decision (C5) · approved consent text by legal counsel (Uganda Data Protection and Privacy Act 2019 alignment) · WhatsApp Business verified number · SMS provider for OTP · penetration test · DR test.
+Entra ID / enterprise SSO decision (C5) · approved consent text by legal counsel (Uganda Data Protection and Privacy Act 2019 alignment) · WhatsApp Business verified number · penetration test · DR test.
+
+Built, awaiting accounts: the ClamAV scanner adapter (C7), Africa's Talking and Twilio SMS adapters, and SMTP/SMTPS email. With `ENV=production` the API refuses to start until these are configured, along with real secrets, enforced MFA, SMS OTP delivery and explicit CORS origins (`Settings.production_problems`).

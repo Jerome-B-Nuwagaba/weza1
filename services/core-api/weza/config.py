@@ -45,8 +45,21 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str | None = None
     whatsapp_app_secret: str | None = None
     whatsapp_verify_token: str | None = None
-    sms_provider: str = "console"
-    smtp_url: str | None = None
+    sms_provider: str = "console"  # console | simulator | africastalking | twilio
+    africastalking_username: str | None = None  # "sandbox" uses the Africa's Talking sandbox
+    africastalking_api_key: str | None = None
+    africastalking_sender_id: str | None = None  # registered alphanumeric sender, optional
+    twilio_account_sid: str | None = None
+    twilio_auth_token: str | None = None
+    twilio_from: str | None = None  # E.164 number or Messaging Service SID (MG…)
+    smtp_url: str | None = None  # smtp://user:pass@host:587 (STARTTLS) or smtps://user:pass@host:465 (TLS)
+    smtp_from: str | None = None  # e.g. "WEZA <noreply@weza.africa>"; defaults to the SMTP username
+
+    # Document malware scanning (blueprint C7): basic is for test only; production uses ClamAV (clamd)
+    malware_scanner: str = "basic"  # basic | clamav
+    clamav_host: str = "localhost"
+    clamav_port: int = 3310
+    clamav_timeout_seconds: float = 30.0
 
     access_token_minutes: int = 15
     refresh_token_days: int = 7
@@ -55,6 +68,34 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.env == "production"
+
+    def production_problems(self) -> list[str]:
+        """Go-live blockers that can be checked from configuration (blueprint 13). Empty means ready."""
+        problems = []
+        if "local-dev" in self.secret_key or "bG9jYWwtZGV2" in self.vault_master_key \
+                or "local-dev" in self.blind_index_key:
+            problems.append("development secrets (SECRET_KEY / VAULT_MASTER_KEY / BLIND_INDEX_KEY)")
+        if not self.mfa_enforced:
+            problems.append("MFA_ENFORCED is not true")
+        if self.otp_delivery != "sms":
+            problems.append("OTP_DELIVERY must be sms")
+        if self.sms_provider == "africastalking":
+            if not (self.africastalking_username and self.africastalking_api_key):
+                problems.append("AFRICASTALKING_USERNAME / AFRICASTALKING_API_KEY missing")
+            elif self.africastalking_username == "sandbox":
+                problems.append("Africa's Talking sandbox account in production")
+        elif self.sms_provider == "twilio":
+            if not (self.twilio_account_sid and self.twilio_auth_token and self.twilio_from):
+                problems.append("TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM missing")
+        else:
+            problems.append(f"SMS_PROVIDER '{self.sms_provider}' does not deliver messages")
+        if self.malware_scanner != "clamav":
+            problems.append("MALWARE_SCANNER must be clamav (the basic scanner is for testing)")
+        if not self.smtp_url:
+            problems.append("SMTP_URL missing (staff email alerts)")
+        if "*" in self.cors_origins:
+            problems.append("CORS_ORIGINS must list the web origins, not *")
+        return problems
 
     @property
     def sqlalchemy_url(self) -> str:
