@@ -243,10 +243,14 @@ def customer_lookup(body: LookupIn, actor: Actor = W, db: Session = DB):
         # The request transaction rolls back on error, so the denied attempt is recorded in its own session.
         with session_scope() as own:
             audit(own, actor, "vault.lookup_denied", "vault", "none", reason=body.reason, after={"code": exc.code})
+            emit(own, "PrivilegedAccess", topic="audit", aggregate_type="vault", aggregate_id="none",
+                 data={"action": "vault.lookup", "outcome": "DENIED"})
         raise
     phone = parse_phone(body.phone)
     rec = vault_find_by_phone(db, phone) if phone else None
     audit(db, actor, "vault.lookup", "vault", rec.id if rec else "none", reason=body.reason)
+    emit(db, "PrivilegedAccess", topic="audit", aggregate_type="vault", aggregate_id=rec.id if rec else "none",
+         data={"action": "vault.lookup", "outcome": "FOUND" if rec else "NOT_FOUND"})
     if rec is None:
         return {"found": False}
     cust = db.execute(select(Customer).where(Customer.vault_token == rec.id)).scalar_one()
@@ -719,6 +723,8 @@ def set_flag(body: FlagIn, actor: Actor = W, db: Session = DB):
     db.merge(row)
     audit(db, actor, "flag.changed", "feature_flag", body.key, before={"enabled": before},
           after={"enabled": body.enabled}, reason=body.reason)
+    emit(db, "ConfigChanged", topic="audit", aggregate_type="feature_flag", aggregate_id=body.key,
+         data={"enabled": body.enabled})
     return config(actor, db)
 
 
@@ -753,7 +759,9 @@ def publish_consent_template(body: ConsentTemplateIn, actor: Actor = W, db: Sess
     """Versioned legal text (TSD §71–72): written by a person, never by AI; publishing retires the previous version."""
     policy.require(actor, "admin.config")
     from weza.domains.consent.service import publish_template
-    publish_template(db, actor, title=body.title, text=body.text, reason=body.reason)
+    tpl = publish_template(db, actor, title=body.title, text=body.text, reason=body.reason)
+    emit(db, "ConfigChanged", topic="audit", aggregate_type="consent_template", aggregate_id=tpl.id,
+         data={"version": tpl.version, "text_hash": tpl.text_hash})
     return config(actor, db)
 
 

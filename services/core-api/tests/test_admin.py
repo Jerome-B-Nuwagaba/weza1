@@ -415,3 +415,61 @@ def test_control_centre_reports_active_controls(client, as_user):
     d = client.get(f"{API}/overview", headers=as_user("ops@weza.demo")).json()
     assert set(d["kill_switches"]) == {"pause_all_routing", "pause_billing_events", "disabled_channels", "ai_mode"}
     assert set(d["paused_supply"]) == {"products", "mandates"} and "queues" in d and "institutions_by_status" in d
+
+
+def test_pausing_institution_removes_it_from_options_and_is_audited(client, journey, drain, as_user):
+    """AT-47 / AT-50 (FSD FR-040, TSD §75): pause institution → removed from options, market re-cleared, audited."""
+    from tests.helpers import SME_ANSWERS
+    from weza.domains.matching.models import Match
+    ops = as_user("ops@weza.demo")
+    inst_id = next(i["id"] for i in client.get(f"{API}/institutions", headers=ops).json()["institutions"]
+                   if i["display_name"] == "Lakeside Bank")
+    status = f"{API}/institutions/{inst_id}/status"
+    assert client.post(status, json={"status": "PAUSED", "reason": "Not mine"},
+                       headers=as_user("commercial@weza.demo")).status_code == 403
+    r = client.post(status, json={"status": "PAUSED", "reason": "Complaint investigation"}, headers=ops)
+    assert r.status_code == 200 and r.json()["status"] == "PAUSED"
+    try:
+        drain()
+        with session_scope() as db:
+            live = db.execute(select(Match).where(Match.institution_id == uuid.UUID(inst_id),
+                                                  Match.state.in_(["RANKED", "PRESENTED"]))).scalars().all()
+            assert live == []  # re-clearing withdrew every open option for the paused institution
+        j = journey("I need UGX 30 million to expand my pharmacy.")
+        j.send(action="confirm")
+        j.verify("0772100088")
+        j.answer_profile({**SME_ANSWERS, "identity.nin": "CM0772100088AB"})
+        offered = [o["institution"] for c in j.cards("options") for o in c["options"]]
+        assert "Lakeside Bank" not in offered
+        ev = [a for a in _audits_for(inst_id) if a.after and a.after.get("status") == "PAUSED"]
+        assert ev and ev[-1].reason == "Complaint investigation" and ev[-1].before["status"] == "ACTIVE"
+    finally:
+        client.post(status, json={"status": "ACTIVE", "reason": "Investigation closed"}, headers=ops)
+        drain()
+    assert client.get(f"{API}/institutions/{inst_id}", headers=ops).json()["status"] == "ACTIVE"
+
+
+def _audits_for(object_id: str) -> list[AuditEvent]:
+    with session_scope() as db:
+        rows = db.execute(select(AuditEvent).where(AuditEvent.object_id == object_id)
+                          .order_by(AuditEvent.at)).scalars().all()
+        db.expunge_all()
+        return rows
+
+
+def test_admin_changes_emit_catalogued_events(client, as_user):
+    """08-runtime-events §5 (audit topic): ConfigChanged for configuration, PrivilegedAccess for vault access."""
+    from weza.platform.models import OutboxEvent
+    admin, ops, comm = as_user("admin@weza.demo"), as_user("ops@weza.demo"), as_user("commercial@weza.demo")
+    flags = {f["key"]: f["enabled"] for f in client.get(f"{API}/config", headers=admin).json()["flags"]}
+    for v in (not flags["matching.shadow"], flags["matching.shadow"]):
+        client.post(f"{API}/flags", json={"key": "matching.shadow", "enabled": v, "reason": "Event check"}, headers=admin)
+    client.post(f"{API}/customers/lookup", json={"phone": "0700000004", "reason": "Customer called in"}, headers=ops)
+    client.post(f"{API}/customers/lookup", json={"phone": "0700000005", "reason": "Customer called in"}, headers=comm)
+    with session_scope() as db:
+        recent = db.execute(select(OutboxEvent).where(OutboxEvent.topic == "audit")
+                            .order_by(OutboxEvent.occurred_at.desc()).limit(4)).scalars().all()
+        got = [(e.event_type, e.data.get("outcome") or e.data.get("enabled")) for e in reversed(recent)]
+        assert got == [("ConfigChanged", not flags["matching.shadow"]), ("ConfigChanged", flags["matching.shadow"]),
+                       ("PrivilegedAccess", "NOT_FOUND"), ("PrivilegedAccess", "DENIED")]
+        assert all("0700000" not in str(e.data) for e in recent)  # no phone numbers in event payloads
