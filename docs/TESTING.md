@@ -139,5 +139,7 @@ Bugs found during QA and fixed:
 |---|---|---|
 | Full conversational AI | `ANTHROPIC_API_KEY` | WEZA works without it, using structured questions; with a key, understanding of free text improves and **Ask WEZA** gives AI-written answers. |
 | WhatsApp Business | `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN` | Set the Meta webhook URL to `<API URL>/api/v1/channels/whatsapp/webhook`. |
-| Real SMS for OTP | `SMS_PROVIDER`, plus provider keys; set `OTP_DELIVERY=sms` | Africa's Talking or Twilio adapter slot. |
-| Production mode | `ENV=production`, `SEED_DEMO=false`, `DEMO_MODE=false`, `MFA_ENFORCED=true` | See *Production go-live blockers* in [blueprint/13-deployment.md](blueprint/13-deployment.md). |
+| Real SMS (OTP and updates) | `SMS_PROVIDER=africastalking` with `AFRICASTALKING_USERNAME`, `AFRICASTALKING_API_KEY` (optional `AFRICASTALKING_SENDER_ID`), or `SMS_PROVIDER=twilio` with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`; then `OTP_DELIVERY=sms` | Username `sandbox` uses the Africa's Talking sandbox. Rejected numbers are recorded as failed. With a real provider, one-time codes are not stored. |
+| Staff email alerts | `SMTP_URL` (`smtp://…:587` STARTTLS or `smtps://…:465` TLS), `SMTP_FROM` | URL-encode special characters in the password. |
+| Malware scanning | `MALWARE_SCANNER=clamav`, `CLAMAV_HOST`, `CLAMAV_PORT` | Needs a reachable clamd (for example the `clamav/clamav` container). If clamd can't be reached, uploads are refused, not stored unscanned. |
+| Production mode | `ENV=production`, `SEED_DEMO=false`, `DEMO_MODE=false`, `MFA_ENFORCED=true` | The API refuses to start in production and lists what's missing: real secrets, MFA, SMS OTP with a live provider, ClamAV, SMTP, explicit CORS origins. Remaining blockers that config can't check (SSO decision, legal consent text, pen test, DR test) are in [blueprint/13-deployment.md](blueprint/13-deployment.md). |

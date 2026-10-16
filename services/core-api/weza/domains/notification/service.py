@@ -38,11 +38,65 @@ def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: s
     if channel == "whatsapp" and s.whatsapp_token and s.whatsapp_phone_number_id:
         provider = "whatsapp_cloud"
         status = "SENT" if _whatsapp_send(phone_e164, body, payload) else "FAILED"
+    elif channel == "sms" and s.sms_provider in SMS_ADAPTERS:
+        provider = s.sms_provider
+        status = "SENT" if SMS_ADAPTERS[provider](phone_e164, body) else "FAILED"
     elif channel == "sms" and s.sms_provider not in ("console", "simulator"):
-        provider = s.sms_provider  # adapter slot: Africa's Talking / Twilio — configured at deployment
-    db.add(ChannelMessage(channel=channel, to_index=crypto.blind_index("phone", phone_e164), body=body,
+        log.error("sms_provider_unknown", extra={"data": {"provider": s.sms_provider}})
+        provider, status = s.sms_provider[:20], "FAILED"
+    # Only the simulator inbox needs the text of a one-time code; once a real provider delivers it, never keep it.
+    stored = body if provider == "simulator" or kind != "otp" else "[one-time code redacted]"
+    db.add(ChannelMessage(channel=channel, to_index=crypto.blind_index("phone", phone_e164), body=stored,
                           payload={"kind": kind, **(payload or {})}, provider=provider, status=status))
     return status == "SENT"
+
+
+def _africastalking_send(phone_e164: str, body: str) -> bool:
+    s = get_settings()
+    if not (s.africastalking_username and s.africastalking_api_key):
+        log.error("sms_not_configured", extra={"data": {"provider": "africastalking"}})
+        return False
+    host = "api.sandbox.africastalking.com" if s.africastalking_username == "sandbox" else "api.africastalking.com"
+    data = {"username": s.africastalking_username, "to": phone_e164, "message": body}
+    if s.africastalking_sender_id:
+        data["from"] = s.africastalking_sender_id
+    try:
+        r = httpx.post(f"https://{host}/version1/messaging", data=data, timeout=10,
+                       headers={"apiKey": s.africastalking_api_key, "Accept": "application/json"})
+        if r.status_code >= 300:
+            log.warning("sms_failed", extra={"data": {"provider": "africastalking", "status": r.status_code}})
+            return False
+        recipients = (r.json().get("SMSMessageData") or {}).get("Recipients") or []
+        # Per-recipient statusCode 100–102 means accepted (Processed / Sent / Queued).
+        ok = bool(recipients) and all(x.get("statusCode") in (100, 101, 102) for x in recipients)
+        if not ok:
+            log.warning("sms_rejected", extra={"data": {"provider": "africastalking",
+                                                        "status": [x.get("status") for x in recipients]}})
+        return ok
+    except (httpx.HTTPError, ValueError):
+        log.warning("sms_failed", extra={"data": {"provider": "africastalking"}})
+        return False
+
+
+def _twilio_send(phone_e164: str, body: str) -> bool:
+    s = get_settings()
+    if not (s.twilio_account_sid and s.twilio_auth_token and s.twilio_from):
+        log.error("sms_not_configured", extra={"data": {"provider": "twilio"}})
+        return False
+    sender = {"MessagingServiceSid": s.twilio_from} if s.twilio_from.startswith("MG") else {"From": s.twilio_from}
+    try:
+        r = httpx.post(f"https://api.twilio.com/2010-04-01/Accounts/{s.twilio_account_sid}/Messages.json",
+                       data={"To": phone_e164, "Body": body, **sender},
+                       auth=(s.twilio_account_sid, s.twilio_auth_token), timeout=10)
+        if r.status_code >= 300:
+            log.warning("sms_failed", extra={"data": {"provider": "twilio", "status": r.status_code}})
+        return r.status_code < 300
+    except httpx.HTTPError:
+        log.warning("sms_failed", extra={"data": {"provider": "twilio"}})
+        return False
+
+
+SMS_ADAPTERS = {"africastalking": _africastalking_send, "twilio": _twilio_send}
 
 
 def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> bool:
@@ -172,15 +226,22 @@ def _send_email(to: str, subject: str, body: str) -> None:
         return
     import smtplib
     from email.message import EmailMessage
-    from urllib.parse import urlparse
+    from urllib.parse import unquote, urlparse
     u = urlparse(s.smtp_url)
+    if not to:
+        raise ValueError("recipient has no email address")
     msg = EmailMessage()
-    msg["From"], msg["To"], msg["Subject"] = u.username or "noreply@weza.africa", to, subject
+    msg["From"] = s.smtp_from or (unquote(u.username) if u.username and "@" in unquote(u.username)
+                                  else "WEZA <noreply@weza.africa>")
+    msg["To"], msg["Subject"] = to, subject
     msg.set_content(body)
-    with smtplib.SMTP(u.hostname, u.port or 587, timeout=10) as smtp:
-        smtp.starttls()
+    implicit_tls = u.scheme == "smtps"
+    cls = smtplib.SMTP_SSL if implicit_tls else smtplib.SMTP
+    with cls(u.hostname, u.port or (465 if implicit_tls else 587), timeout=10) as smtp:
+        if not implicit_tls:
+            smtp.starttls()
         if u.username:
-            smtp.login(u.username, u.password or "")
+            smtp.login(unquote(u.username), unquote(u.password or ""))
         smtp.send_message(msg)
 
 

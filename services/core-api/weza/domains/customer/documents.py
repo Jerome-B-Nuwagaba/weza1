@@ -28,8 +28,8 @@ CLASSIFICATION = {"national_id": "HIGHLY_SENSITIVE", "bank_statement": "HIGHLY_S
 
 
 class BasicScanner:
-    """V1-test scanner adapter (blueprint conflict C7): signature + type checks. A production scanner
-    (ClamAV / Defender for Storage) replaces this adapter before go-live."""
+    """V1-test scanner adapter (blueprint conflict C7): signature + type checks. Production uses ClamAVScanner
+    (MALWARE_SCANNER=clamav); the API refuses to start in production with this one."""
 
     name = "BASIC"
 
@@ -41,7 +41,54 @@ class BasicScanner:
         return True, "clean"
 
 
-scanner = BasicScanner()
+class ClamAVScanner:
+    """Production adapter: streams the bytes to clamd (INSTREAM) over TCP. Fails closed — if clamd can't be reached
+    or answers unexpectedly, the file is not stored."""
+
+    name = "CLAMAV"
+    CHUNK = 64 * 1024
+
+    def __init__(self, host: str, port: int, timeout: float):
+        self.host, self.port, self.timeout = host, port, timeout
+
+    def scan(self, data: bytes) -> tuple[bool, str]:
+        ok, result = BasicScanner().scan(data)  # cheap structural checks first
+        if not ok:
+            return ok, result
+        import socket
+        import struct
+        try:
+            with socket.create_connection((self.host, self.port), timeout=self.timeout) as s:
+                s.sendall(b"zINSTREAM\0")
+                for i in range(0, len(data), self.CHUNK):
+                    chunk = data[i:i + self.CHUNK]
+                    s.sendall(struct.pack(">I", len(chunk)) + chunk)
+                s.sendall(struct.pack(">I", 0))
+                reply = b""
+                while not reply.endswith(b"\0"):
+                    part = s.recv(4096)
+                    if not part:
+                        break
+                    reply += part
+        except OSError:
+            return False, SCAN_UNAVAILABLE
+        text = reply.rstrip(b"\0").decode("utf8", "replace").strip()
+        if text.endswith(" OK"):
+            return True, "clean"
+        if text.endswith(" FOUND"):
+            return False, "malware_signature:" + text.removeprefix("stream:").removesuffix(" FOUND").strip()[:80]
+        return False, SCAN_UNAVAILABLE
+
+
+SCAN_UNAVAILABLE = "scan_unavailable"
+
+
+def get_scanner() -> BasicScanner | ClamAVScanner:
+    from weza.config import get_settings
+    s = get_settings()
+    if s.malware_scanner == "clamav":
+        return ClamAVScanner(s.clamav_host, s.clamav_port, s.clamav_timeout_seconds)
+    return BasicScanner()
 
 
 def sniff(data: bytes) -> str | None:
@@ -65,9 +112,13 @@ def ingest(db: Session, customer_id: uuid.UUID, *, doc_type: str, filename: str,
     ct, wk = crypto.encrypt_bytes(data)
     db.add(DocumentBlob(document_id=d.id, ciphertext=ct, wrapped_key=wk, quarantined=True))
     d.pipeline_state = "QUARANTINED"
+    scanner = get_scanner()
     ok, result = scanner.scan(data)
     d.scan_result = f"{scanner.name}:{result}"
     if not ok:
+        if result == SCAN_UNAVAILABLE:
+            return _reject(db, d, "We couldn't check this file right now, so it was not stored. Please try again "
+                                  "in a few minutes.")
         return _reject(db, d, "This file failed our security check and was not stored.")
     d.pipeline_state = "SCANNED"
     real = sniff(data)

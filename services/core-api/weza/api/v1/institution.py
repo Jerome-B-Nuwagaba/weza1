@@ -272,9 +272,10 @@ async def extract_product(file: UploadFile = File(...), actor: Actor = A, db: Se
     data = await file.read(docs.MAX_BYTES + 1)
     if len(data) > docs.MAX_BYTES:
         raise ValidationFailed("File is larger than 10 MB.")
-    ok, result = docs.scanner.scan(data)
+    ok, result = docs.get_scanner().scan(data)
     if not ok:
-        raise ValidationFailed("This file failed our security check.")
+        raise ValidationFailed("We couldn't check this file right now. Please try again shortly."
+                               if result == docs.SCAN_UNAVAILABLE else "This file failed our security check.")
     text = ""
     if data.startswith(b"%PDF"):
         import io

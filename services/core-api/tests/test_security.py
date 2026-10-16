@@ -140,7 +140,7 @@ def test_audit_is_append_only(database):
 
 
 def test_zero_core_integration_boundary():
-    """AT-49 / FR-039: the only outbound HTTP calls are the customer channel (WhatsApp) and the AI provider —
+    """AT-49 / FR-039: the only outbound HTTP calls are the customer channels (WhatsApp, SMS) and the AI provider —
     there is no connector to any institution core banking, CRM, LOS or database."""
     root = Path(__file__).resolve().parents[1] / "weza"
     offenders = []
