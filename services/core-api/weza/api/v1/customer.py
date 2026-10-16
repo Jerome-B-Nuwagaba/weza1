@@ -141,6 +141,7 @@ def _opp_for_customer(db: Session, o: Opportunity) -> dict:
                           "approved_amount": float(x.approved_amount) if x.approved_amount else None,
                           "disbursed_amount": float(x.disbursed_amount) if x.disbursed_amount else None,
                           "reported_at": x.reported_at.isoformat(), "reported_by": inst.display_name} for x in outs],
+            "info_requests": opp_svc.info_requests(db, o.id, include_responses=True),
             "timeline": timeline, "can_withdraw": o.state not in opp_svc.TERMINAL | {"REPORTED_DISBURSED", "REPORTED_DECLINED",
                                                                                      "REMATCH_ELIGIBLE"}}
 
@@ -171,6 +172,37 @@ def withdraw(opp_id: uuid.UUID, actor: Actor = Depends(customer_actor), db: Sess
     if c and c.status == "GRANTED":
         consent_svc.withdraw(db, actor, c.id, actor.id, "Request withdrawn by customer")
     return _opp_for_customer(db, o)
+
+
+@router.get("/info-requests")
+def my_info_requests(actor: Actor = Depends(customer_actor), db: Session = DB):
+    """Everything institutions have asked this customer for, open first."""
+    out = []
+    for o in db.execute(select(Opportunity).where(Opportunity.customer_id == actor.id)).scalars():
+        inst = db.get(Institution, o.institution_id)
+        for r in opp_svc.info_requests(db, o.id, include_responses=True):
+            out.append({**r, "opportunity_id": str(o.id), "reference": o.reference, "institution": inst.display_name})
+    out.sort(key=lambda r: (r["status"] != "OPEN", r["created_at"]))
+    return {"requests": out, "open": sum(1 for r in out if r["status"] == "OPEN"), "doc_types": docs.DOC_TYPES,
+            "note": "Answering is your choice. WEZA and institutions will never ask for your PIN, password or "
+                    "one-time codes."}
+
+
+class InfoResponseIn(BaseModel):
+    response_text: str | None = Field(None, max_length=2000)
+    document_id: str | None = None
+
+
+@router.post("/info-requests/{request_id}/respond")
+def respond_info_request(request_id: uuid.UUID, body: InfoResponseIn, actor: Actor = Depends(customer_actor),
+                         db: Session = DB):
+    from weza.domains.opportunity.models import InfoRequest
+    r = db.get(InfoRequest, request_id)
+    if r is None or r.customer_id != actor.id:
+        raise NotFound("Not found.")
+    opp_svc.fulfil_info_request(db, actor, r, response_text=body.response_text,
+                                document_id=uuid.UUID(body.document_id) if body.document_id else None)
+    return my_info_requests(actor, db)
 
 
 @router.get("/consents")

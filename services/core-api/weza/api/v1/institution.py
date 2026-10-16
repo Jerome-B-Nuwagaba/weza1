@@ -26,7 +26,7 @@ from weza.domains.intelligence import ai, assistant, insights
 from weza.domains.matching import engine
 from weza.domains.misc_models import Notification
 from weza.domains.opportunity import service as opp_svc
-from weza.domains.opportunity.models import Assignment, Insight, Opportunity, Outcome, Preview
+from weza.domains.opportunity.models import Assignment, InfoRequest, Insight, Opportunity, Outcome, Preview
 from weza.domains.product import service as product_svc
 from weza.domains.product.models import Product, ProductVersion
 from weza.domains.trust import policy
@@ -579,6 +579,7 @@ def opportunity(opp_id: uuid.UUID, actor: Actor = A, db: Session = DB):
     out = opp_svc.view(db, actor, opp_id)
     out["can_update"] = policy.has(actor, "opportunity.update_status")
     out["can_assign"] = policy.has(actor, "opportunity.assign")
+    out["doc_types"] = docs.DOC_TYPES
     out["members"] = [m for m in opp_svc.team_members(db, actor.institution_id) if "OFFICER" in m["roles"]
                       or "MANAGER" in m["roles"]]
     return out
@@ -642,6 +643,43 @@ def outcome(opp_id: uuid.UUID, body: OutcomeIn, idempotency_key: str | None = He
     return opportunity(opp_id, actor, db)
 
 
+class InfoRequestIn(BaseModel):
+    kind: str = Field(..., pattern="^(DOCUMENT|QUESTION)$")
+    message: str = Field(..., min_length=1, max_length=1000)
+    doc_type: str | None = None
+    due_in_days: int | None = Field(None, ge=1, le=30)
+
+
+@router.post("/opportunities/{opp_id}/info-requests", status_code=201)
+def create_info_request(opp_id: uuid.UUID, body: InfoRequestIn, idempotency_key: str | None = Header(None),
+                        actor: Actor = A, db: Session = DB):
+    o = db.get(Opportunity, opp_id)
+    if o is None:
+        raise NotFound("Not found.")
+    policy.require_tenant(actor, o.institution_id)
+
+    def run():
+        r = opp_svc.request_info(db, actor, o, **body.model_dump())
+        return {"request_id": str(r.id)}
+    idempotent(db, idempotency_key, f"info_request:{opp_id}", body.model_dump(), run)
+    return opportunity(opp_id, actor, db)
+
+
+class CancelInfoIn(BaseModel):
+    reason: str | None = Field(None, max_length=500)
+
+
+@router.post("/opportunities/{opp_id}/info-requests/{request_id}/cancel")
+def cancel_info_request(opp_id: uuid.UUID, request_id: uuid.UUID, body: CancelInfoIn, actor: Actor = A,
+                        db: Session = DB):
+    o = db.get(Opportunity, opp_id)
+    r = db.get(InfoRequest, request_id)
+    if o is None or r is None:
+        raise NotFound("Not found.")
+    opp_svc.cancel_info_request(db, actor, o, r, body.reason)
+    return opportunity(opp_id, actor, db)
+
+
 @router.get("/opportunities/{opp_id}/documents/{doc_id}")
 def opportunity_document(opp_id: uuid.UUID, doc_id: uuid.UUID, actor: Actor = A, db: Session = DB):
     """Documents stream only through the Disclosure Gateway; never public URLs (TSD §51)."""
@@ -691,14 +729,20 @@ def interest(preview_id: uuid.UUID, body: InterestIn, actor: Actor = A, db: Sess
         raise NotFound("Not found.")
     p.interest_state, p.interest_by = body.state, actor.id
     audit(db, actor, "preview.interest", "preview", p.id, after={"state": body.state})
-    if body.state == "INTERESTED":
+    if body.state in ("INTERESTED", "NEED_MORE_INFORMATION"):
         from weza.domains.need.models import FinancialNeed
         from weza.domains.notification.service import notify_customer
         need = db.get(FinancialNeed, p.need_id)
-        if need and need.customer_id:
+        if need and need.customer_id and body.state == "INTERESTED":
             notify_customer(db, need.customer_id, "InstitutionInterest", title="An institution is interested",
                             body="A participating institution is interested in your request. Open WEZA to review your "
                                  "options — nothing is shared unless you choose to.", link="/start")
+        elif need and need.customer_id:
+            # Pre-consent: the institution is not named and receives nothing; the customer may strengthen the request.
+            notify_customer(db, need.customer_id, "InstitutionNeedsMore", title="Your request could go further",
+                            body="A participating institution would like more detail before it can consider your "
+                                 "request. Adding documents or completing your profile in WEZA may open more options.",
+                            link="/c/documents")
     return {"ok": True, "note": "Interest is not approval and does not disclose the customer's identity."}
 
 

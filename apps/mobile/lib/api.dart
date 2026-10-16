@@ -98,6 +98,9 @@ class WezaApi {
   Future<Map<String, dynamic>> profile() async => Map<String, dynamic>.from(await _send('GET', '/me/profile', auth: true));
   Future<List<dynamic>> notifications() async => (await _send('GET', '/me/notifications', auth: true))['notifications'] as List;
   Future<void> withdraw(String oppId) async => _send('POST', '/me/opportunities/$oppId/withdraw', auth: true);
+  Future<List<dynamic>> documents() async => (await _send('GET', '/me/documents', auth: true))['documents'] as List;
+  Future<void> respondInfoRequest(String requestId, {String? text, String? documentId}) async =>
+      _send('POST', '/me/info-requests/$requestId/respond', body: {'response_text': text, 'document_id': documentId}, auth: true);
 }
 
 String _trim(String s) => s.contains('.') ? s.replaceAll(RegExp(r'0+$'), '').replaceAll(RegExp(r'\.$'), '') : s;

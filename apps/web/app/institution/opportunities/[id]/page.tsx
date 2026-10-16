@@ -140,6 +140,8 @@ export default function Opportunity360({ params }: { params: Promise<{ id: strin
         </Card>
       </div>
 
+      <InfoRequestsCard d={d} id={id} onChange={(r: any, msg: string) => { o.setData(r); toast(msg); }} />
+
       <Card title="Activity">
         <ol className="space-y-2 border-l-2 border-line pl-4">
           {d.activity.map((a: any, i: number) => (
@@ -154,6 +156,96 @@ export default function Opportunity360({ params }: { params: Promise<{ id: strin
       <OutcomeModal open={!!outcome} state={outcome} onClose={() => setOutcome(null)} id={id} reasons={d.decline_reasons} amount={d.amount} onDone={(r: any) => { o.setData(r); setOutcome(null); toast("Outcome recorded"); }} />
       <AssignModal open={assign} onClose={() => setAssign(false)} id={id} members={d.members} onDone={(r: any) => { o.setData(r); setAssign(false); toast("Assigned"); }} />
     </div>
+  );
+}
+
+const REQUEST_TONE: Record<string, "warning" | "success" | "muted"> = { OPEN: "warning", FULFILLED: "success", CANCELLED: "muted" };
+const REQUEST_LABEL: Record<string, string> = { OPEN: "Waiting for customer", FULFILLED: "Answered", CANCELLED: "Cancelled" };
+
+function InfoRequestsCard({ d, id, onChange }: any) {
+  const [open, setOpen] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const reqs: any[] = d.info_requests || [];
+  if (!d.can_request_info && reqs.length === 0) return null;
+
+  async function cancel(rid: string) {
+    setErr(null);
+    try {
+      onChange(await api(`/inst/opportunities/${id}/info-requests/${rid}/cancel`, { body: {} }), "Request cancelled");
+    } catch (e) {
+      setErr((e as ApiError).message);
+    }
+  }
+
+  return (
+    <Card title="Requests to customer" subtitle="Ask for a document or an answer through WEZA. The customer chooses whether to respond."
+      action={d.can_request_info ? <Button variant="secondary" onClick={() => setOpen(true)}>Ask the customer…</Button> : undefined}>
+      {err && <Banner tone="danger" className="mb-3">{err}</Banner>}
+      {reqs.length === 0 ? (
+        <p className="text-[14px] text-muted">No requests yet.</p>
+      ) : (
+        <ul className="divide-y divide-line">
+          {reqs.map((r) => (
+            <li key={r.id} className="py-3 text-[14px]">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">{r.kind === "DOCUMENT" ? r.doc_label : "Question"}</span>
+                <Badge tone={REQUEST_TONE[r.status]}>{REQUEST_LABEL[r.status]}</Badge>
+                <span className="text-[13px] text-muted">· {r.requested_by} · {dateTime(r.created_at)}{r.status === "OPEN" && r.due_at ? ` · due ${dateTime(r.due_at)}` : ""}</span>
+                {r.status === "OPEN" && d.can_request_info && <Button variant="ghost" className="ml-auto" onClick={() => cancel(r.id)}>Cancel</Button>}
+              </div>
+              <div className="mt-1 text-muted">{r.message}</div>
+              {r.response_text && <div className="mt-2 rounded-lg bg-canvas px-3 py-2"><span className="text-[12px] text-muted">Customer answered: </span>{r.response_text}</div>}
+              {r.document_id && (
+                <button onClick={async () => { const res: Response = await api(`/inst/opportunities/${id}/documents/${r.document_id}`, { raw: true }); window.open(URL.createObjectURL(await res.blob()), "_blank"); }} className="mt-2 flex items-center gap-2 text-blue-800 hover:underline"><FileText className="h-4 w-4" />Open {r.doc_label?.toLowerCase()}</button>
+              )}
+              {r.status === "CANCELLED" && r.cancel_reason && <div className="mt-1 text-[12px] text-muted">{r.cancel_reason}</div>}
+            </li>
+          ))}
+        </ul>
+      )}
+      <RequestModal open={open} onClose={() => setOpen(false)} id={id} docTypes={d.doc_types} canDocs={d.can_request_documents} onDone={(r: any) => { setOpen(false); onChange(r, "Request sent to customer"); }} />
+    </Card>
+  );
+}
+
+function RequestModal({ open, onClose, id, docTypes, canDocs, onDone }: any) {
+  const [kind, setKind] = useState(canDocs ? "DOCUMENT" : "QUESTION");
+  const [docType, setDocType] = useState("");
+  const [message, setMessage] = useState("");
+  const [days, setDays] = useState("3");
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function send() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const body: any = { kind, message, due_in_days: Number(days) };
+      if (kind === "DOCUMENT") body.doc_type = docType;
+      onDone(await api(`/inst/opportunities/${id}/info-requests`, { body, idempotencyKey: true }));
+      setMessage("");
+      setDocType("");
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Modal open={open} onClose={onClose} title="Ask the customer" footer={<><Button variant="secondary" onClick={onClose}>Cancel</Button><Button pending={busy} onClick={send} disabled={!message.trim() || (kind === "DOCUMENT" && !docType)}>Send request</Button></>}>
+      <div className="space-y-3">
+        <Field label="What do you need?">
+          <Select value={kind} onChange={(e) => setKind(e.target.value)} options={[...(canDocs ? [["DOCUMENT", "A document"]] : []), ["QUESTION", "An answer to a question"]] as [string, string][]} />
+        </Field>
+        {kind === "DOCUMENT" && <Field label="Document" required><Select value={docType} onChange={(e) => setDocType(e.target.value)} options={[["", "Choose…"], ...Object.entries(docTypes || {}) as [string, string][]]} /></Field>}
+        <Field label={kind === "DOCUMENT" ? "Message to the customer" : "Your question"} required>
+          <Textarea rows={3} maxLength={1000} value={message} onChange={(e) => setMessage(e.target.value)} placeholder={kind === "DOCUMENT" ? "e.g. Please share the last 6 months so we can assess turnover." : "e.g. How many staff does the business employ?"} />
+        </Field>
+        <Field label="Respond within"><Select value={days} onChange={(e) => setDays(e.target.value)} options={[["1", "1 day"], ["3", "3 days"], ["7", "7 days"], ["14", "14 days"]]} /></Field>
+        {!canDocs && <p className="text-[12px] text-muted">This customer's consent doesn't include documents, so you can only ask questions.</p>}
+        <p className="text-[12px] text-muted">Never ask for PINs, passwords or one-time codes — WEZA will block the request.</p>
+        {err && <Banner tone="danger">{err}</Banner>}
+      </div>
+    </Modal>
   );
 }
 

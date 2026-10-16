@@ -42,6 +42,7 @@ PERMISSIONS: dict[str, set[str]] = {
     "opportunity.read_identifiable": {"INST_ADMIN", "MANAGER", "OFFICER", "COMPLIANCE"},
     "opportunity.assign": {"INST_ADMIN", "MANAGER"},
     "opportunity.update_status": {"MANAGER", "OFFICER"},
+    "opportunity.request_info": {"MANAGER", "OFFICER"},
     "preview.read": {"EXECUTIVE", "BUSINESS", "CREDIT_RISK", "MANAGER"},
     "preview.interest": {"BUSINESS", "CREDIT_RISK", "MANAGER"},
     "team.manage": {"INST_ADMIN", "MANAGER"},

@@ -1,12 +1,13 @@
 "use client";
 
+import { FileUp } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { api, ApiError, tokens } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { date, dateTime, money } from "@/lib/format";
 import { PublicShell } from "@/components/PublicShell";
-import { Badge, Banner, Button, Card, EmptyState, ErrorState, Loading, PageHeader, StateBadge, Tabs } from "@/components/ui";
+import { Badge, Banner, Button, Card, EmptyState, ErrorState, Loading, PageHeader, StateBadge, Tabs, Textarea } from "@/components/ui";
 
 export default function StatusPage() {
   const [authed, setAuthed] = useState<boolean | null>(null);
@@ -90,6 +91,9 @@ function Inner() {
                           <li key={i} className="text-[13px]"><span className="text-ink">{t.label}</span> <span className="text-muted">· {dateTime(t.at)}</span></li>
                         ))}
                       </ol>
+                      {(o.info_requests || []).filter((r: any) => r.status !== "CANCELLED").map((r: any) => (
+                        <InfoRequestItem key={r.id} r={r} institution={o.institution} onDone={(text: string) => { setMsg(text); needs.reload(); }} />
+                      ))}
                       {o.outcomes.map((x: any, i: number) => (
                         <p key={i} className="mt-2 text-[13px] text-muted">{x.label}{x.disbursed_amount ? ` · ${money(x.disbursed_amount)}` : x.approved_amount ? ` · ${money(x.approved_amount)}` : ""} — <i>reported by {x.reported_by}</i></p>
                       ))}
@@ -128,6 +132,69 @@ function Inner() {
         </div>
       ))}
     </>
+  );
+}
+
+function InfoRequestItem({ r, institution, onDone }: { r: any; institution: string; onDone: (msg: string) => void }) {
+  const [answer, setAnswer] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const docs = useApi<any>(r.status === "OPEN" && r.kind === "DOCUMENT" ? "/me/documents" : null);
+  const ready = (docs.data?.documents || []).filter((d: any) => d.state === "STORED" && d.doc_type === r.doc_type);
+
+  async function respond(body: any) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api(`/me/info-requests/${r.id}/respond`, { body, auth: "customer" });
+      onDone(`Sent to ${institution}.`);
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function uploadAndSend(f: File) {
+    setBusy(true);
+    setErr(null);
+    const fd = new FormData();
+    fd.append("file", f);
+    fd.append("doc_type", r.doc_type);
+    try {
+      const d = await api("/me/documents", { form: fd, auth: "customer" });
+      if (d.state !== "STORED") throw new Error(d.reason || "That file could not be stored.");
+      await respond({ document_id: d.id });
+    } catch (e) {
+      setErr((e as Error).message);
+      setBusy(false);
+    }
+  }
+
+  if (r.status === "FULFILLED")
+    return <p className="mt-3 text-[13px] text-muted">You answered {institution}'s request for {r.kind === "DOCUMENT" ? r.doc_label?.toLowerCase() : "information"} · {dateTime(r.resolved_at)}</p>;
+
+  return (
+    <div className="mt-3 rounded-lg border border-gold-500/30 bg-gold-100/40 p-3">
+      <div className="text-[14px] font-medium">{institution} asks: {r.kind === "DOCUMENT" ? r.doc_label : "a question"}</div>
+      <p className="mt-0.5 text-[14px]">{r.message}</p>
+      {r.due_at && <p className="text-[12px] text-muted">Please reply by {dateTime(r.due_at)}</p>}
+      {r.kind === "QUESTION" ? (
+        <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+          <Textarea rows={2} maxLength={2000} value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="Your answer" className="flex-1" />
+          <Button size="sm" pending={busy} disabled={!answer.trim()} onClick={() => respond({ response_text: answer })}>Send</Button>
+        </div>
+      ) : (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {ready.map((d: any) => <Button key={d.id} size="sm" variant="secondary" pending={busy} onClick={() => respond({ document_id: d.id })}>Send {d.filename}</Button>)}
+          <label className={`inline-flex h-8 cursor-pointer items-center gap-2 rounded-lg bg-blue-600 px-3 text-[13px] font-medium text-white ${busy ? "opacity-50" : ""}`}>
+            <FileUp className="h-4 w-4" /> Upload new
+            <input type="file" className="hidden" accept="application/pdf,image/jpeg,image/png" disabled={busy} onChange={(e) => e.target.files?.[0] && uploadAndSend(e.target.files[0])} />
+          </label>
+        </div>
+      )}
+      <p className="mt-2 text-[12px] text-muted">Answering is your choice. WEZA and institutions will never ask for your PIN, password or one-time codes.</p>
+      {err && <Banner tone="danger" className="mt-2">{err}</Banner>}
+    </div>
   );
 }
 

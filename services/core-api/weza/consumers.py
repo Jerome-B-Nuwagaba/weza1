@@ -160,6 +160,7 @@ def on_consent_withdrawn(db: Session, ev: OutboxEvent) -> None:
     opp = db.get(Opportunity, uuid.UUID(oid))
     if opp is None:
         return
+    opp_svc.close_open_info_requests(db, opp, "Customer withdrew consent")
     a = db.get(Assignment, opp.id)
     notify.notify_institution(db, opp.institution_id, "ConsentWithdrawn",
                               title=f"Customer withdrew consent for {opp.reference}",
@@ -168,6 +169,33 @@ def on_consent_withdrawn(db: Session, ev: OutboxEvent) -> None:
                               link=f"/institution/opportunities/{opp.id}", priority="HIGH",
                               user_ids=[a.user_id] if a and a.user_id else None, roles=["MANAGER", "COMPLIANCE"],
                               object_type="opportunity", object_id=str(opp.id), dedupe=f"withdrawn:{ev.id}")
+
+
+@consumer("info_requests_notify", ["InfoRequested", "InfoRequestFulfilled", "InfoRequestCancelled"])
+def on_info_request(db: Session, ev: OutboxEvent) -> None:
+    opp = _opp(db, ev)
+    if opp is None:
+        return
+    inst = db.get(Institution, opp.institution_id)
+    if ev.event_type == "InfoRequested":
+        what = "a document" if ev.data.get("kind") == "DOCUMENT" else "some information"
+        notify.notify_customer(db, opp.customer_id, "InfoRequested", title=f"{inst.display_name} asked for {what}",
+                               body=f"About your request {opp.reference}. Open WEZA to see what they need — you choose "
+                                    "whether to answer. WEZA will never ask for your PIN or password.",
+                               link="/c/status", object_type="info_request", object_id=ev.data.get("request_id"))
+    elif ev.event_type == "InfoRequestCancelled":
+        notify.notify_customer(db, opp.customer_id, "InfoRequestCancelled", title="A request was withdrawn",
+                               body=f"{inst.display_name} no longer needs the item they asked for on {opp.reference}.",
+                               link="/c/status", object_type="info_request", object_id=ev.data.get("request_id"))
+    else:
+        a = db.get(Assignment, opp.id)
+        notify.notify_institution(db, opp.institution_id, "InfoRequestFulfilled",
+                                  title=f"Customer responded on {opp.reference}",
+                                  body="The information you asked for is on the opportunity.",
+                                  link=f"/institution/opportunities/{opp.id}",
+                                  user_ids=[a.user_id] if a and a.user_id else None,
+                                  roles=None if a and a.user_id else ["MANAGER"], object_type="opportunity",
+                                  object_id=str(opp.id), event_id=ev.id, dedupe=f"info_fulfilled:{ev.id}")
 
 
 @consumer("ops_alerts", ["OpportunityQualified", "InstitutionApplicationSubmitted", "IntegrityCaseOpened",

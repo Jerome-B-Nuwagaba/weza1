@@ -98,6 +98,28 @@ class Activity(IdMixin, Base):
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class InfoRequest(IdMixin, TimestampMixin, Base):
+    """Institution → customer request for a document or an answer on a routed opportunity. WEZA relays it;
+    the customer chooses whether to respond, and nothing outside the consented categories is ever requested."""
+
+    __tablename__ = "info_request"
+    __table_args__ = (Index("ix_info_request_opp_status", "opportunity_id", "status"), S)
+
+    opportunity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    institution_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    customer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    kind: Mapped[str] = mapped_column(String(12))  # DOCUMENT | QUESTION
+    doc_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    message: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(12), default="OPEN")  # OPEN | FULFILLED | CANCELLED
+    requested_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class Preview(IdMixin, TimestampMixin, Base):
     """Level-2 non-identifiable preview (TSD Â§25). payload is produced by an allow-list serializer."""
 
