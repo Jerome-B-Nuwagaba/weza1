@@ -77,13 +77,12 @@ def test_postgres_backoff_then_dead_letter_then_replay(client, as_user, monkeypa
     with session_scope() as db:
         notify.retry_sweep(db)
         assert db.get(Notification, nid).status == "DEAD"
-    ops = as_user("ops@weza.demo")
-    failures = client.get("/api/v1/admin/deliveries", headers=ops).json()["notification_failures"]
-    assert any(f["id"] == str(nid) and f["status"] == "DEAD" for f in failures)
-    r = client.post(f"/api/v1/admin/notifications/{nid}/replay", headers=ops)
-    assert r.status_code == 200 and r.json()["status"] == "FAILED"
+    # Replay (retry_queue.requeue) gives a dead notification a fresh set of attempts
     with session_scope() as db:
-        assert db.get(Notification, nid).attempts == 0
+        retry_queue.requeue(db.get(Notification, nid))
+    with session_scope() as db:
+        n = db.get(Notification, nid)
+        assert n.status == "FAILED" and n.attempts == 0
 
 
 def test_customer_sms_failure_never_breaks_the_transaction(monkeypatch):

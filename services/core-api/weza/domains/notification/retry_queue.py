@@ -1,8 +1,8 @@
 """Retry and dead-letter handling for staff notification delivery (resiliency spec §8).
 
 FAILED rows carry next_attempt_at with exponential backoff; the worker's retry sweep picks them up when due. After
-MAX_ATTEMPTS a row is DEAD (the dead-letter state) and can be replayed from the admin console. Failures never raise
-into the business transaction that created the notification."""
+MAX_ATTEMPTS a row is DEAD (the dead-letter state); requeue() gives it a fresh set of attempts. Failures never
+raise into the business transaction that created the notification."""
 
 import logging
 from datetime import timedelta
@@ -29,5 +29,5 @@ def record_failure(note, exc: Exception) -> None:
 
 
 def requeue(note) -> None:
-    """Admin replay of a dead-lettered notification: a fresh set of attempts, starting now."""
+    """Replay a dead-lettered notification: a fresh set of attempts, starting now."""
     note.status, note.attempts, note.next_attempt_at = "FAILED", 0, utcnow()

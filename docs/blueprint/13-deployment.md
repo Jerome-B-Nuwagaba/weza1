@@ -29,4 +29,4 @@ A possible future target: Container Apps (api, worker), Azure Database for Postg
 ## 5. Production go-live blockers (not needed for testing)
 Entra ID / enterprise SSO decision (C5) · approved consent text by legal counsel (Uganda Data Protection and Privacy Act 2019 alignment) · WhatsApp Business verified number · penetration test · DR test.
 
-Built, awaiting accounts: the ClamAV scanner adapter (C7), Africa's Talking, Twilio and Infobip SMS adapters, and SMTP/SMTPS email. Failed staff notifications retry with backoff in PostgreSQL, then dead-letter for admin replay. With `ENV=production` the API refuses to start until these are configured, along with real secrets, enforced MFA, SMS OTP delivery and explicit CORS origins (`Settings.production_problems`).
+Built, awaiting accounts: the ClamAV scanner adapter (C7), Africa's Talking, Twilio and Infobip SMS adapters, and SMTP/SMTPS email. Failed staff notifications retry with backoff in PostgreSQL, then dead-letter. With `ENV=production` the API refuses to start until these are configured, along with real secrets, enforced MFA, SMS OTP delivery and explicit CORS origins (`Settings.production_problems`).
