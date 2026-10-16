@@ -39,6 +39,14 @@ export function TargetBadge({ o }: { o: any }) {
   return <Badge tone={late ? "danger" : soon ? "warning" : "muted"}>First contact {minutesLabel(o.minutes_to_target)}</Badge>;
 }
 
+/** National ID check against the registry — a fact about identity, never a KYC result or credit decision. */
+export function IdentityBadge({ status, label }: { status?: string; label?: string }) {
+  if (!status) return null;
+  const tone = status === "VERIFIED" ? "success" : status === "MISMATCH" || status === "NOT_FOUND" ? "danger" : status === "PENDING" ? "warning" : "muted";
+  const text = label || { VERIFIED: "ID verified", MISMATCH: "ID mismatch", NOT_FOUND: "ID not found", PENDING: "ID check pending", NOT_CHECKED: "ID not checked" }[status] || status;
+  return <Badge tone={tone}>{text}</Badge>;
+}
+
 /** PENDING_INFO is derived from open requests to the customer; the opportunity keeps its state and queue rank. */
 export function AwaitingBadge({ o }: { o: any }) {
   if (!o.awaiting_customer) return null;
@@ -57,6 +65,7 @@ export function OpportunityRow({ o, compact }: { o: any; compact?: boolean }) {
           <FreshnessBadge f={o.freshness} />
           {o.integrity_hold && <Badge tone="warning">On hold</Badge>}
           <AwaitingBadge o={o} />
+          {o.identity_status && o.identity_status !== "NOT_CHECKED" && <IdentityBadge status={o.identity_status} />}
           {o.is_demo && <Badge tone="muted">Demo</Badge>}
         </div>
         <div className="mt-0.5 text-[13px] text-muted">

@@ -86,6 +86,10 @@ def _same(a, b) -> bool:
         return str(a).strip().lower() == str(b).strip().lower()
 
 
+def _norm(v) -> str:
+    return str(v or "").strip().upper()
+
+
 def upsert_fact(db: Session, customer_id: uuid.UUID, key: str, value, *, source: str = "CUSTOMER",
                 channel: str = "web", confidence: float | None = None, confirmed: bool = False,
                 source_ref: str | None = None) -> tuple[Fact | None, Fact | None]:
@@ -93,9 +97,19 @@ def upsert_fact(db: Session, customer_id: uuid.UUID, key: str, value, *, source:
     existing confirmed value from a *different* source disagrees — WEZA never silently picks one (Skill §19)."""
     if key in VAULT_KEYS:
         cust = db.get(Customer, customer_id)
+        before = identity.vault_read(db, cust.vault_token)
         identity.vault_update(db, cust.vault_token, **{VAULT_KEYS[key]: value})
-        if key == "identity.nin" and value:
-            cust.verification_level = "IDENTITY"
+        # A typed NIN is only a claim: identity is verified against the registry asynchronously
+        # (IdentityCaptured → identity_verify consumer). A changed NIN or name needs a fresh check.
+        changed = value and _norm(before.get(VAULT_KEYS[key])) != _norm(value)
+        nin_known = key == "identity.nin" or before.get("nin")
+        if key in ("identity.nin", "identity.full_name") and changed and nin_known:
+            if cust.verification_level == "IDENTITY":
+                cust.verification_level = "PHONE"
+            from weza.domains.verification.service import request_check
+            check = request_check(db, cust)  # PENDING until the registry answers
+            emit(db, "IdentityCaptured", topic="customer", aggregate_type="customer", aggregate_id=customer_id,
+                 data={"changed": key, "check_id": str(check.id)})
         key, value = key + "_captured", bool(value)
     existing = current_facts(db, customer_id).get(key)
     now = utcnow()

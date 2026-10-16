@@ -94,6 +94,8 @@ test("a new institution goes from application to a reported outcome", async ({ p
   await signIn(page, email("officer"), pw);
   await page.goto(`/institution/opportunities/${oppId}`);
   await expect(page.getByRole("heading", { name: reference })).toBeVisible();
+  // The applicant's National ID was checked against the registry (simulator in test environments)
+  await expect(page.getByText(/National ID verified via/)).toBeVisible();
   await page.getByRole("button", { name: "Mark contacted" }).click();
   await page.getByRole("button", { name: "Ask the customer…" }).click();
   const ask = page.getByRole("dialog");

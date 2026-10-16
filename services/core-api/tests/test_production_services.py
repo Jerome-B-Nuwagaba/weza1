@@ -18,7 +18,8 @@ from weza.platform.db import session_scope
 
 READY = dict(env="production", secret_key="s" * 40, vault_master_key="k" * 44, blind_index_key="b" * 32,
              mfa_enforced=True, otp_delivery="sms", sms_provider="africastalking", africastalking_username="weza",
-             africastalking_api_key="key", malware_scanner="clamav", smtp_url="smtps://apikey:pw@smtp.example:465",
+             africastalking_api_key="key", malware_scanner="clamav", identity_provider="gnugrid",
+             gnugrid_base_url="https://gnugrid.example", gnugrid_api_key="k", smtp_url="smtps://apikey:pw@smtp.example:465",
              cors_origins="https://weza.example")
 
 
@@ -26,7 +27,7 @@ def test_production_readiness_lists_every_blocker():
     assert Settings(**READY).production_problems() == []
     problems = " | ".join(Settings(env="production").production_problems())
     for expected in ("development secrets", "MFA_ENFORCED", "OTP_DELIVERY", "SMS_PROVIDER", "MALWARE_SCANNER",
-                     "SMTP_URL"):
+                     "SMTP_URL", "IDENTITY_PROVIDER"):
         assert expected in problems
     sandbox = Settings(**{**READY, "africastalking_username": "sandbox"}).production_problems()
     assert any("sandbox" in p for p in sandbox)

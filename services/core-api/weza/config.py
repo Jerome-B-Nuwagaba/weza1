@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     smtp_url: str | None = None  # smtp://user:pass@host:587 (STARTTLS) or smtps://user:pass@host:465 (TLS)
     smtp_from: str | None = None  # e.g. "WEZA <noreply@weza.africa>"; defaults to the SMTP username
 
+    # Identity verification of loan applicants against a registry: simulator (demo/test) | gnugrid
+    identity_provider: str = "simulator"
+    identity_verification_required: bool = False  # true: requests are only shared once the NIN is verified
+    gnugrid_base_url: str | None = None
+    gnugrid_api_key: str | None = None
+    gnugrid_verify_path: str = "/v1/identity/verify"  # confirm against gnuGRID's API documentation
+
     # Document malware scanning (blueprint C7): basic is for test only; production uses ClamAV (clamd)
     malware_scanner: str = "basic"  # basic | clamav
     clamav_host: str = "localhost"
@@ -95,6 +102,12 @@ class Settings(BaseSettings):
                 problems.append("INFOBIP_BASE_URL / INFOBIP_API_KEY missing")
         else:
             problems.append(f"SMS_PROVIDER '{self.sms_provider}' does not deliver messages")
+        if self.identity_provider == "gnugrid":
+            if not (self.gnugrid_base_url and self.gnugrid_api_key):
+                problems.append("GNUGRID_BASE_URL / GNUGRID_API_KEY missing")
+        else:
+            problems.append(f"IDENTITY_PROVIDER '{self.identity_provider}' would mark applicants verified without a "
+                            "real registry check")
         if self.malware_scanner != "clamav":
             problems.append("MALWARE_SCANNER must be clamav (the basic scanner is for testing)")
         if not self.smtp_url:
