@@ -189,6 +189,10 @@ def set_lifecycle(db: Session, actor: Actor, ap: Appetite, to: str, reason: str)
                "APPROVED": {"ARCHIVED"}, "DRAFT": {"ARCHIVED"}, "SIMULATED": {"ARCHIVED"}}
     if to not in allowed.get(ap.lifecycle_status, set()):
         raise ValidationFailed(f"Appetite cannot move from {ap.lifecycle_status} to {to}.", code="INVALID_TRANSITION")
+    # Institution users only (the WEZA admin portal's behaviour is unchanged)
+    if to == "ACTIVE" and not actor.is_weza and db.get(Institution, ap.institution_id).status != "ACTIVE":
+        raise ValidationFailed("Your institution isn't active on WEZA, so this appetite can't be resumed.",
+                               code="INSTITUTION_NOT_ACTIVE")
     before, ap.lifecycle_status = ap.lifecycle_status, to
     audit(db, actor, f"appetite.{to.lower()}", "appetite", ap.id, before={"status": before}, after={"status": to},
           reason=reason)

@@ -57,7 +57,7 @@ def _reset_ip_rate_limits(database):
     from weza.platform.db import session_scope
     with session_scope() as db:
         db.execute(sa.text("DELETE FROM platform.rate_counter WHERE bucket LIKE 'otp:ip:%' "
-                           "OR bucket LIKE 'journey:ip:%' OR bucket LIKE 'login:%'"))
+                           "OR bucket LIKE 'journey:ip:%' OR bucket LIKE 'login:%' OR bucket LIKE 'apply:%'"))
     yield
 
 

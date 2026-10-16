@@ -301,6 +301,19 @@ def refresh(db: Session, token: str) -> dict:
     return _issue_tokens(db, user, mfa=row.mfa, family=row.family)
 
 
+def set_password(db: Session, user: User, new_password: str) -> None:
+    """Replace a staff password and end every existing session for that user (refresh tokens revoked)."""
+    if len(new_password) < 12:
+        raise ValidationFailed("Password must be at least 12 characters.", code="WEAK_PASSWORD")
+    if crypto.verify_password(new_password, user.password_hash):
+        raise ValidationFailed("Choose a password you haven't used here.", code="PASSWORD_REUSED")
+    user.password_hash = crypto.hash_password(new_password)
+    user.failed_logins, user.locked_until = 0, None
+    for r in db.execute(select(RefreshToken).where(RefreshToken.user_id == user.id,
+                                                   RefreshToken.revoked.is_(False))).scalars():
+        r.revoked = True
+
+
 def logout(db: Session, token: str) -> None:
     row = db.execute(select(RefreshToken).where(RefreshToken.token_hash == crypto.hash_token(token))).scalar_one_or_none()
     if row:
