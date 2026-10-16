@@ -52,6 +52,45 @@ def current_template(db: Session, country: str = "UG", language: str = "en") -> 
     return t
 
 
+def publish_template(db: Session, actor: Actor, *, title: str, text: str, reason: str, country: str = "UG",
+                     language: str = "en") -> ConsentTemplate:
+    """Publish a new consent version (TSD §71–72). Published text is never edited: the previous version is retired
+    and a new row is written. Consents already granted keep the version and text hash they were shown."""
+    title, text = title.strip(), text.strip()
+    try:
+        title.format(institution="X"), text.format(institution="X")
+    except (KeyError, IndexError, ValueError) as exc:
+        raise ValidationFailed("Only the {institution} placeholder may be used in curly braces.") from exc
+    if "{institution}" not in text:
+        raise ValidationFailed("The consent text must name the institution using {institution}.")
+    current = current_template(db, country, language)
+    if sha256_hex(text) == current.text_hash and title == current.title:
+        raise ValidationFailed("This is the same as the current version.")
+    year = utcnow().year
+    used = set(db.execute(select(ConsentTemplate.version).where(ConsentTemplate.country_code == country,
+                                                                ConsentTemplate.purpose == PURPOSE,
+                                                                ConsentTemplate.language == language)).scalars())
+    n = 1
+    while f"{year}.{n}" in used:
+        n += 1
+    current.status = "RETIRED"
+    tpl = ConsentTemplate(country_code=country, purpose=PURPOSE, version=f"{year}.{n}", language=language, title=title,
+                          text=text, text_hash=sha256_hex(text), effective_from=utcnow())
+    db.add(tpl)
+    db.flush()
+    audit(db, actor, "consent_template.published", "consent_template", tpl.id, reason=reason,
+          before={"version": current.version, "text_hash": current.text_hash},
+          after={"version": tpl.version, "text_hash": tpl.text_hash})
+    return tpl
+
+
+def template_history(db: Session, country: str = "UG", language: str = "en") -> list[ConsentTemplate]:
+    return list(db.execute(select(ConsentTemplate).where(ConsentTemplate.country_code == country,
+                                                         ConsentTemplate.purpose == PURPOSE,
+                                                         ConsentTemplate.language == language)
+                           .order_by(ConsentTemplate.effective_from.desc())).scalars())
+
+
 def render(template: ConsentTemplate, institution_name: str) -> dict:
     return {"template_id": str(template.id), "version": template.version,
             "title": template.title.format(institution=institution_name),

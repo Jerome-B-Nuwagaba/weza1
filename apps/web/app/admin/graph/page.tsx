@@ -2,9 +2,10 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
+import { ActionError } from "@/components/ActionError";
 import { api, ApiError } from "@/lib/api";
 import { dateTime } from "@/lib/format";
-import { Badge, Banner, Button, Card, cx, EmptyState, Input, KV, Loading, PageHeader, StateBadge, Tabs } from "@/components/ui";
+import { Badge, Button, Card, cx, EmptyState, Input, KV, Loading, PageHeader, StateBadge, Tabs } from "@/components/ui";
 
 const ORDER = ["Customer", "FinancialNeed", "Match", "Consent", "Opportunity", "Institution", "Officer", "Outcome", "CommercialEvent"];
 const LABEL: Record<string, string> = { FinancialNeed: "Financial Need", CommercialEvent: "Commercial event" };
@@ -14,7 +15,7 @@ function Inspector() {
   const router = useRouter();
   const [q, setQ] = useState(params.get("q") || "");
   const [g, setG] = useState<any>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(false);
   const [sel, setSel] = useState<any>(null);
   const [tab, setTab] = useState("workflow");
@@ -28,7 +29,7 @@ function Inspector() {
       setG(r);
       setSel(null);
     } catch (e) {
-      setErr((e as ApiError).message);
+      setErr(e as ApiError);
       setG(null);
     } finally {
       setBusy(false);
@@ -50,7 +51,7 @@ function Inspector() {
         <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Opportunity reference (OPP-…) or any ID" />
         <Button type="submit" pending={busy}>Inspect</Button>
       </form>
-      {err && <Banner tone="danger" className="mb-4">{err}</Banner>}
+      <ActionError error={err} className="mb-4" />
       {!g ? (!busy && <EmptyState title="Search for an opportunity or need">Try an OPP- reference from Opportunity monitoring.</EmptyState>) : (
         <>
           <div className="scroll-thin mb-4 overflow-x-auto rounded-xl border border-line bg-surface p-4">

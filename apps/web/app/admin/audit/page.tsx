@@ -12,8 +12,8 @@ export default function AuditLog() {
     <>
       <PageHeader title="Audit trail" subtitle="Append-only (database-enforced). Actor, action, object, before/after, reason and correlation ID." />
       <Input className="mb-4 !w-80" placeholder="Filter action, e.g. consent, kill_switch, product" value={action} onChange={(e) => setAction(e.target.value)} />
-      {r.loading && !r.data ? <Loading /> : r.error ? <ErrorState error={r.error} /> : (
-        <Table head={["When", "Actor", "Institution", "Action", "Object", "Reason", "Change"]}>
+      {r.loading && !r.data ? <Loading /> : r.error ? <ErrorState error={r.error} onRetry={r.reload} /> : (
+        <Table head={["When", "Actor", "Institution", "Action", "Object", "Reason", "Change"]} empty={r.data.events.length === 0}>
           {r.data.events.map((a: any, i: number) => (
             <tr key={i}>
               <Td className="whitespace-nowrap">{dateTime(a.at)}</Td>
