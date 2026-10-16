@@ -395,13 +395,28 @@ def _advance_to(db: Session, actor: Actor, opp: Opportunity, to_state: str, note
          institution_id=opp.institution_id, data={"from": before, "to": to_state, "reference": opp.reference})
 
 
+TERM_FIELDS = ("tenor_months", "interest_rate", "rate_period", "fees", "monthly_repayment", "conditions",
+               "terms_valid_until")
+
+
 def report_outcome(db: Session, actor: Actor, opp: Opportunity, *, state: str, reason_category: str | None = None,
-                   reason_note: str | None = None, approved_amount=None, disbursed_amount=None, disbursed_on=None) -> Outcome:
-    """Lightweight institution-reported outcome (FSD §27, BR-005)."""
+                   reason_note: str | None = None, approved_amount=None, disbursed_amount=None, disbursed_on=None,
+                   **terms) -> Outcome:
+    """Lightweight institution-reported outcome (FSD §27, BR-005). An approval may carry indicative terms."""
     policy.require(actor, "opportunity.update_status")
     policy.require_tenant(actor, opp.institution_id)
     if state not in ("REPORTED_APPROVED", "REPORTED_DECLINED", "REPORTED_DISBURSED", "WITHDRAWN"):
         raise ValidationFailed("Unknown outcome.")
+    if set(terms) - set(TERM_FIELDS):
+        raise ValidationFailed("Unknown term.")
+    terms = {k: v for k, v in terms.items() if v not in (None, "")}
+    if terms and state != "REPORTED_APPROVED":
+        raise ValidationFailed("Terms can only be reported with an approval.", code="TERMS_NOT_ALLOWED")
+    if ("interest_rate" in terms) != ("rate_period" in terms):
+        raise ValidationFailed("Give the interest rate together with whether it is monthly or annual.",
+                               code="RATE_PERIOD_REQUIRED")
+    if terms.get("terms_valid_until") and terms["terms_valid_until"] < utcnow().date():
+        raise ValidationFailed("The terms' validity date is in the past.", code="TERMS_EXPIRED")
     if state == "REPORTED_DECLINED" and reason_category not in DECLINE_REASONS:
         raise ValidationFailed("Please choose a decline reason.", code="REASON_REQUIRED")
     if state == "REPORTED_DISBURSED" and not disbursed_amount:
@@ -416,15 +431,29 @@ def report_outcome(db: Session, actor: Actor, opp: Opportunity, *, state: str, r
     _advance_to(db, actor, opp, state, reason_note)
     out = Outcome(opportunity_id=opp.id, institution_id=opp.institution_id, state=state, reason_category=reason_category,
                   reason_note=reason_note, approved_amount=approved_amount, disbursed_amount=disbursed_amount,
-                  disbursed_on=disbursed_on, reported_by=actor.id)
+                  disbursed_on=disbursed_on, reported_by=actor.id, **terms)
     db.add(out)
     db.flush()
     emit(db, "OutcomeReported", topic="opportunity", aggregate_type="opportunity", aggregate_id=opp.id,
          institution_id=opp.institution_id, data={"state": state, "reason": reason_category,
-                                                  "reference": opp.reference,
+                                                  "reference": opp.reference, "has_terms": bool(terms),
                                                   "approved_amount": str(approved_amount) if approved_amount else None,
                                                   "disbursed_amount": str(disbursed_amount) if disbursed_amount else None})
     return out
+
+
+def outcome_terms(o: Outcome) -> dict | None:
+    """Indicative terms as reported by the institution, or None. Never presented as a WEZA offer."""
+    if not any(getattr(o, f) is not None for f in TERM_FIELDS):
+        return None
+    return {"tenor_months": o.tenor_months,
+            "interest_rate": float(o.interest_rate) if o.interest_rate is not None else None,
+            "rate_period": o.rate_period, "fees": float(o.fees) if o.fees is not None else None,
+            "monthly_repayment": float(o.monthly_repayment) if o.monthly_repayment is not None else None,
+            "conditions": o.conditions,
+            "valid_until": o.terms_valid_until.isoformat() if o.terms_valid_until else None,
+            "expired": bool(o.terms_valid_until and o.terms_valid_until < utcnow().date()),
+            "label": "Indicative terms reported by the institution — confirm the final offer with them directly."}
 
 
 def customer_withdraw(db: Session, actor: Actor, opp: Opportunity, reason: str | None = None) -> None:
@@ -625,7 +654,8 @@ def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
                           "note": o.reason_note, "approved_amount": float(o.approved_amount) if o.approved_amount else None,
                           "disbursed_amount": float(o.disbursed_amount) if o.disbursed_amount else None,
                           "disbursed_on": o.disbursed_on.isoformat() if o.disbursed_on else None,
-                          "reported_at": o.reported_at.isoformat(), "label": "Reported by institution"}
+                          "reported_at": o.reported_at.isoformat(), "label": "Reported by institution",
+                          "terms": outcome_terms(o)}
                          for o in db.execute(select(Outcome).where(Outcome.opportunity_id == opp.id)
                                              .order_by(Outcome.reported_at)).scalars()],
             "info_requests": info_requests(db, opp.id, include_responses=decision.result == "PERMIT"),

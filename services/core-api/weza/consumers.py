@@ -132,8 +132,9 @@ def on_status(db: Session, ev: OutboxEvent) -> None:
     messages = {
         "CONTACTED": f"{inst.display_name} has marked your request {opp.reference} as contacted.",
         "SUBMITTED_TO_INSTITUTION": f"{inst.display_name} reports your application is in their process.",
-        "REPORTED_APPROVED": f"{inst.display_name} reports your request {opp.reference} was approved. They will "
-                             "share terms directly with you.",
+        "REPORTED_APPROVED": f"{inst.display_name} reports your request {opp.reference} was approved. "
+                             + ("Their indicative terms are in WEZA — confirm the final offer with them directly."
+                                if ev.data.get("has_terms") else "They will share terms directly with you."),
         "REPORTED_DISBURSED": f"{inst.display_name} reports funds for {opp.reference} have been disbursed.",
     }
     if state in messages:

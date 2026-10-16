@@ -1,37 +1,11 @@
-﻿"""Institution â†’ customer information requests: gated by the Disclosure Gateway and consent scope, relayed to the
+"""Institution → customer information requests: gated by the Disclosure Gateway and consent scope, relayed to the
 customer, answered by choice, and closed when consent or the opportunity ends."""
 
-import uuid
-
-from sqlalchemy import select
-
-from tests.helpers import SME_ANSWERS
-from weza.domains.identity.models import User
-from weza.domains.opportunity.models import Assignment, Opportunity
-from weza.platform.db import session_scope
+from tests.helpers import idem as _k
+from tests.helpers import routed_to_lakeside as _routed
 from weza.platform.events import drain
 
 PDF = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF"
-
-
-def _k(headers: dict) -> dict:
-    return {**headers, "Idempotency-Key": uuid.uuid4().hex}
-
-
-def _routed(journey, phone: str):
-    j = journey("I need UGX 20 million to buy stock for my pharmacy")
-    j.send(action="confirm")
-    j.verify(phone)
-    j.answer_profile({**SME_ANSWERS, "identity.nin": f"CM{phone}AB"})
-    opt = next(o for o in j.cards("options")[0]["options"] if o["institution"] == "Lakeside Bank")
-    j.send(action="select", value=opt["match_id"])
-    j.send(action="agree", value=j.cards("consent")[0]["template_id"])
-    ref = j.cards("submitted")[0]["reference"]
-    drain()
-    with session_scope() as db:
-        o = db.execute(select(Opportunity).where(Opportunity.reference == ref)).scalar_one()
-        owner = db.get(User, db.get(Assignment, o.id).user_id).email
-        return j, str(o.id), owner
 
 
 def test_officer_requests_document_customer_answers(client, as_user, journey):

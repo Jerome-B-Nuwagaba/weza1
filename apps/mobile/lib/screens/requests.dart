@@ -69,6 +69,26 @@ class _RequestsScreenState extends State<RequestsScreen> {
     );
   }
 
+  /// Indicative terms as reported by the institution — never presented as a WEZA offer.
+  Widget _terms(Map<String, dynamic> t) {
+    final parts = <String>[
+      if (t['tenor_months'] != null) '${t['tenor_months']} months',
+      if (t['interest_rate'] != null) '${t['interest_rate']}% ${t['rate_period'] == 'ANNUAL' ? 'per year' : 'per month'}',
+      if (t['monthly_repayment'] != null) '${money(t['monthly_repayment'])}/month',
+      if (t['fees'] != null) 'fees ${money(t['fees'])}',
+    ];
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Indicative terms${parts.isEmpty ? '' : ': ${parts.join(' · ')}'}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+        if (t['conditions'] != null) Text('Conditions: ${t['conditions']}', style: const TextStyle(color: WezaColors.muted, fontSize: 13)),
+        if (t['valid_until'] != null)
+          Text('${t['expired'] == true ? 'Expired' : 'Valid until'} ${t['valid_until']}', style: TextStyle(color: t['expired'] == true ? WezaColors.danger : WezaColors.muted, fontSize: 13)),
+        Text('${t['label']}', style: const TextStyle(color: WezaColors.muted, fontSize: 12, fontStyle: FontStyle.italic)),
+      ]),
+    );
+  }
+
   Widget _need(Map<String, dynamic> n) {
     final opps = (n['opportunities'] as List?) ?? [];
     return Card(
@@ -97,8 +117,10 @@ class _RequestsScreenState extends State<RequestsScreen> {
                   if (r['status'] == 'OPEN') _InfoRequestTile(r: Map<String, dynamic>.from(r), institution: '${o['institution']}', onDone: load)
                   else if (r['status'] == 'FULFILLED')
                     Text('You answered ${o['institution']}\'s request', style: const TextStyle(color: WezaColors.muted, fontSize: 13)),
-                for (final x in (o['outcomes'] as List? ?? []))
+                for (final x in (o['outcomes'] as List? ?? [])) ...[
                   Text('${x['label']}${x['disbursed_amount'] != null ? ' · ${money(x['disbursed_amount'])}' : ''} — reported by ${x['reported_by']}', style: const TextStyle(fontSize: 13, fontStyle: FontStyle.italic)),
+                  if (x['terms'] != null) _terms(Map<String, dynamic>.from(x['terms'])),
+                ],
                 if (o['can_withdraw'] == true)
                   TextButton(
                     onPressed: () async {

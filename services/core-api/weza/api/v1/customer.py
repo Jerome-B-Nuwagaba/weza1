@@ -140,7 +140,8 @@ def _opp_for_customer(db: Session, o: Opportunity) -> dict:
             "outcomes": [{"state": x.state, "label": journey.status_label(x.state),
                           "approved_amount": float(x.approved_amount) if x.approved_amount else None,
                           "disbursed_amount": float(x.disbursed_amount) if x.disbursed_amount else None,
-                          "reported_at": x.reported_at.isoformat(), "reported_by": inst.display_name} for x in outs],
+                          "reported_at": x.reported_at.isoformat(), "reported_by": inst.display_name,
+                          "terms": opp_svc.outcome_terms(x)} for x in outs],
             "info_requests": opp_svc.info_requests(db, o.id, include_responses=True),
             "timeline": timeline, "can_withdraw": o.state not in opp_svc.TERMINAL | {"REPORTED_DISBURSED", "REPORTED_DECLINED",
                                                                                      "REMATCH_ELIGIBLE"}}

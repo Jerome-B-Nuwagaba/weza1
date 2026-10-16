@@ -6,7 +6,7 @@ import { use, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { dateTime, money, moneyFull, STATE_LABEL } from "@/lib/format";
-import { FreshnessBadge, PriorityBadge, TargetBadge } from "@/components/opportunity";
+import { FreshnessBadge, PriorityBadge, TargetBadge, TermsLine } from "@/components/opportunity";
 import { Badge, Banner, Bar, Button, Card, ErrorState, Field, Input, KV, Loading, Modal, ReasonChips, ScoreRing, Select, StateBadge, Textarea, useToast } from "@/components/ui";
 
 const COMPONENTS: [string, string][] = [["product_fit", "Product fit"], ["appetite_fit", "Appetite fit"], ["preference_fit", "Preference fit"], ["readiness", "Readiness"], ["capacity_fit", "Capacity"]];
@@ -148,7 +148,7 @@ export default function Opportunity360({ params }: { params: Promise<{ id: strin
             <li key={i} className="text-[14px]"><span className="font-medium">{STATE_LABEL[a.kind] || a.kind.replace(/_/g, " ").toLowerCase()}</span> <span className="text-muted">· {a.actor} · {dateTime(a.at)}</span>{a.note && <div className="text-[13px] text-muted">{a.note}</div>}</li>
           ))}
           {d.outcomes.map((x: any, i: number) => (
-            <li key={"o" + i} className="text-[14px]"><span className="font-medium">{STATE_LABEL[x.state]}</span> <span className="text-muted">· {x.label} · {dateTime(x.reported_at)}</span>{x.reason && <div className="text-[13px] text-muted">Reason: {x.reason}</div>}{x.disbursed_amount && <div className="text-[13px] text-muted">Disbursed {money(x.disbursed_amount)}</div>}</li>
+            <li key={"o" + i} className="text-[14px]"><span className="font-medium">{STATE_LABEL[x.state]}</span> <span className="text-muted">· {x.label} · {dateTime(x.reported_at)}</span>{x.reason && <div className="text-[13px] text-muted">Reason: {x.reason}</div>}{x.terms && <TermsLine terms={x.terms} />}{x.disbursed_amount && <div className="text-[13px] text-muted">Disbursed {money(x.disbursed_amount)}</div>}</li>
           ))}
         </ol>
       </Card>
@@ -254,15 +254,20 @@ function OutcomeModal({ open, state, onClose, id, reasons, amount, onDone }: any
   const [note, setNote] = useState("");
   const [amt, setAmt] = useState(String(amount || ""));
   const [day, setDay] = useState(new Date().toISOString().slice(0, 10));
+  const [t, setT] = useState({ tenor_months: "", interest_rate: "", rate_period: "MONTHLY", fees: "", monthly_repayment: "", conditions: "", terms_valid_until: "" });
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const num = (v: string) => (v === "" ? null : Number(v));
   async function save() {
     setBusy(true);
     setErr(null);
     try {
       const body: any = { state, reason_note: note || null };
       if (state === "REPORTED_DECLINED") body.reason_category = reason;
-      if (state === "REPORTED_APPROVED") body.approved_amount = Number(amt);
+      if (state === "REPORTED_APPROVED") {
+        body.approved_amount = Number(amt);
+        Object.assign(body, { tenor_months: num(t.tenor_months), interest_rate: num(t.interest_rate), rate_period: t.interest_rate ? t.rate_period : null, fees: num(t.fees), monthly_repayment: num(t.monthly_repayment), conditions: t.conditions || null, terms_valid_until: t.terms_valid_until || null });
+      }
       if (state === "REPORTED_DISBURSED") { body.disbursed_amount = Number(amt); body.disbursed_on = day; }
       onDone(await api(`/inst/opportunities/${id}/outcome`, { body, idempotencyKey: true }));
     } catch (e) {
@@ -276,6 +281,25 @@ function OutcomeModal({ open, state, onClose, id, reasons, amount, onDone }: any
       <div className="space-y-3">
         {state === "REPORTED_DECLINED" && <Field label="Reason" required><Select value={reason} onChange={(e) => setReason(e.target.value)} options={[["", "Choose…"], ...Object.entries(reasons || {}) as [string, string][]]} /></Field>}
         {(state === "REPORTED_APPROVED" || state === "REPORTED_DISBURSED") && <Field label={state === "REPORTED_APPROVED" ? "Approved amount (UGX)" : "Disbursed amount (UGX)"}><Input inputMode="numeric" value={amt} onChange={(e) => setAmt(e.target.value.replace(/[^\d]/g, ""))} /></Field>}
+        {state === "REPORTED_APPROVED" && (
+          <details className="rounded-lg border border-line p-3">
+            <summary className="cursor-pointer text-[14px] font-medium">Indicative terms (optional)</summary>
+            <p className="mt-1 text-[12px] text-muted">Shown to the customer as reported by you — not a WEZA offer. Leave blank to share terms directly.</p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <Field label="Tenor (months)"><Input inputMode="numeric" value={t.tenor_months} onChange={(e) => setT({ ...t, tenor_months: e.target.value.replace(/[^\d]/g, "") })} /></Field>
+              <Field label="Interest rate (%)">
+                <div className="flex gap-2">
+                  <Input inputMode="decimal" value={t.interest_rate} onChange={(e) => setT({ ...t, interest_rate: e.target.value.replace(/[^\d.]/g, "") })} />
+                  <Select value={t.rate_period} onChange={(e) => setT({ ...t, rate_period: e.target.value })} options={[["MONTHLY", "per month"], ["ANNUAL", "per year"]]} />
+                </div>
+              </Field>
+              <Field label="Fees (UGX)"><Input inputMode="numeric" value={t.fees} onChange={(e) => setT({ ...t, fees: e.target.value.replace(/[^\d]/g, "") })} /></Field>
+              <Field label="Monthly repayment (UGX)"><Input inputMode="numeric" value={t.monthly_repayment} onChange={(e) => setT({ ...t, monthly_repayment: e.target.value.replace(/[^\d]/g, "") })} /></Field>
+              <Field label="Valid until"><Input type="date" value={t.terms_valid_until} onChange={(e) => setT({ ...t, terms_valid_until: e.target.value })} /></Field>
+            </div>
+            <div className="mt-3"><Field label="Conditions"><Textarea rows={2} maxLength={1000} value={t.conditions} onChange={(e) => setT({ ...t, conditions: e.target.value })} placeholder="e.g. Subject to site visit and guarantor" /></Field></div>
+          </details>
+        )}
         {state === "REPORTED_DISBURSED" && <Field label="Disbursed on"><Input type="date" value={day} onChange={(e) => setDay(e.target.value)} /></Field>}
         <Field label="Note (optional)"><Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
         <p className="text-[12px] text-muted">Recorded as institution-reported. Declines help WEZA show appetite insights; WEZA never changes your rules automatically.</p>

@@ -626,6 +626,14 @@ class OutcomeIn(BaseModel):
     approved_amount: float | None = Field(None, ge=0)
     disbursed_amount: float | None = Field(None, ge=0)
     disbursed_on: date | None = None
+    # Indicative terms (approvals only)
+    tenor_months: int | None = Field(None, ge=1, le=360)
+    interest_rate: float | None = Field(None, ge=0, le=100)
+    rate_period: str | None = Field(None, pattern="^(MONTHLY|ANNUAL)$")
+    fees: float | None = Field(None, ge=0)
+    monthly_repayment: float | None = Field(None, ge=0)
+    conditions: str | None = Field(None, max_length=1000)
+    terms_valid_until: date | None = None
 
 
 @router.post("/opportunities/{opp_id}/outcome")

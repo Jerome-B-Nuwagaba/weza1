@@ -82,6 +82,15 @@ class Outcome(IdMixin, Base):
     approved_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     disbursed_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     disbursed_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Indicative terms the institution reports with an approval. Shown to the customer as institution-reported;
+    # WEZA never sets, compares as advice, or guarantees them.
+    tenor_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    interest_rate: Mapped[Decimal | None] = mapped_column(Numeric(6, 3), nullable=True)
+    rate_period: Mapped[str | None] = mapped_column(String(8), nullable=True)  # MONTHLY | ANNUAL
+    fees: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    monthly_repayment: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    conditions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    terms_valid_until: Mapped[date | None] = mapped_column(Date, nullable=True)
     reported_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

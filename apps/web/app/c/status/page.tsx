@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError, tokens } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { date, dateTime, money } from "@/lib/format";
+import { TermsLine } from "@/components/opportunity";
 import { PublicShell } from "@/components/PublicShell";
 import { Badge, Banner, Button, Card, EmptyState, ErrorState, Loading, PageHeader, StateBadge, Tabs, Textarea } from "@/components/ui";
 
@@ -95,7 +96,10 @@ function Inner() {
                         <InfoRequestItem key={r.id} r={r} institution={o.institution} onDone={(text: string) => { setMsg(text); needs.reload(); }} />
                       ))}
                       {o.outcomes.map((x: any, i: number) => (
-                        <p key={i} className="mt-2 text-[13px] text-muted">{x.label}{x.disbursed_amount ? ` · ${money(x.disbursed_amount)}` : x.approved_amount ? ` · ${money(x.approved_amount)}` : ""} — <i>reported by {x.reported_by}</i></p>
+                        <div key={i} className="mt-2">
+                          <p className="text-[13px] text-muted">{x.label}{x.disbursed_amount ? ` · ${money(x.disbursed_amount)}` : x.approved_amount ? ` · ${money(x.approved_amount)}` : ""} — <i>reported by {x.reported_by}</i></p>
+                          {x.terms && <TermsLine terms={x.terms} />}
+                        </div>
                       ))}
                       {o.can_withdraw && <Button size="sm" variant="ghost" className="mt-2" onClick={() => withdraw(o.id)}>Withdraw request</Button>}
                     </div>
