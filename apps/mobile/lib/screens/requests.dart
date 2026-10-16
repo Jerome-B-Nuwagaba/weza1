@@ -209,6 +209,8 @@ class _InfoRequestTileState extends State<_InfoRequestTile> {
         Text('${widget.institution} asks: ${isDoc ? r['doc_label'] : 'a question'}', style: const TextStyle(fontWeight: FontWeight.w600)),
         const SizedBox(height: 2),
         Text('${r['message']}'),
+        if (r['fact_label'] != null)
+          Text('Your answer will also update your profile (${r['fact_label']}).', style: const TextStyle(color: WezaColors.muted, fontSize: 12)),
         const SizedBox(height: 6),
         if (!isDoc) ...[
           TextField(controller: answer, maxLines: 3, minLines: 1, maxLength: 2000, decoration: const InputDecoration(hintText: 'Your answer')),

@@ -26,6 +26,32 @@ FACT_FRESH_DAYS = 180
 
 VAULT_KEYS = {"identity.full_name": "full_name", "identity.nin": "nin", "identity.email": "email"}
 
+FIELD_LABELS = {
+    "identity.full_name_captured": "Full name", "identity.nin_captured": "National ID (NIN)",
+    "business.name": "Business name", "business.sector": "Sector", "business.district": "Business district",
+    "business.age_months": "Business age", "business.monthly_turnover": "Monthly turnover",
+    "business.registered": "Business registered", "finance.monthly_repayments": "Existing monthly repayments",
+    "need.tenor_months": "Preferred repayment period", "employment.employer": "Employer",
+    "employment.type": "Employment type", "employment.months": "Time with employer",
+    "employment.monthly_net_income": "Monthly take-home pay", "residence.district": "District",
+    "farm.activity": "Farming activity", "farm.district": "Farm district", "farm.operating_months": "Farming for",
+    "farm.annual_income": "Annual farm income",
+}
+# Profile fields a customer can set themselves (directly or by answering an institution's question)
+EDITABLE = {k for k in FIELD_LABELS if not k.endswith("_captured")}
+
+
+def parse_fact_value(key: str, raw: str):
+    """Parse a customer's typed answer for a profile field exactly as the conversation does.
+    Returns (value, None) or (None, help text)."""
+    from weza.domains.admin_config import QUESTION_PATHS
+    from weza.domains.need import journey
+    q = next((q for path in QUESTION_PATHS.values() for q in path if q["key"] == key), None)
+    if q is None:
+        return raw, None
+    value = journey._parse_answer(q, str(raw))
+    return (value, None) if value is not None else (None, journey._help_for(q))
+
 
 def get_or_create_by_phone(db: Session, phone_e164: str, *, attribution_id=None, device_hash: str | None = None,
                            is_demo: bool = False) -> tuple[Customer, bool]:

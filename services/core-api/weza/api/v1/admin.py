@@ -553,7 +553,24 @@ def deliveries(status: str = "DEAD", actor: Actor = W, db: Session = DB):
                             "attempts": d.attempts, "error": d.last_error, "status": d.status,
                             "at": e.occurred_at.isoformat()} for d, e in rows],
             "notification_failures": [{"id": str(n.id), "title": n.title, "channel": n.channel, "status": n.status,
-                                       "error": n.last_error, "attempts": n.attempts} for n in failed_notes]}
+                                       "error": n.last_error, "attempts": n.attempts,
+                                       "next_attempt_at": n.next_attempt_at.isoformat() if n.next_attempt_at else None}
+                                      for n in failed_notes]}
+
+
+@router.post("/notifications/{notification_id}/replay")
+def replay_notification(notification_id: uuid.UUID, actor: Actor = W, db: Session = DB):
+    """Replay a dead-lettered staff notification with a fresh set of attempts."""
+    from weza.domains.notification import retry_queue
+    policy.require(actor, "admin.review")
+    n = db.get(Notification, notification_id)
+    if n is None:
+        raise NotFound("Not found.")
+    if n.status != "DEAD":
+        raise ValidationFailed("Only dead-lettered notifications can be replayed.", code="NOT_DEAD")
+    retry_queue.requeue(n)
+    audit(db, actor, "notification.replayed", "notification", n.id, institution_id=n.institution_id)
+    return {"ok": True, "status": n.status}
 
 
 @router.post("/deliveries/{delivery_id}/replay")

@@ -30,18 +30,8 @@ from weza.platform.errors import NotFound, ValidationFailed
 from weza.platform.models import GraphInstance
 
 router = APIRouter(prefix="/me", tags=["customer"])
-FIELD_LABELS = {
-    "identity.full_name_captured": "Full name", "identity.nin_captured": "National ID (NIN)",
-    "business.name": "Business name", "business.sector": "Sector", "business.district": "Business district",
-    "business.age_months": "Business age", "business.monthly_turnover": "Monthly turnover",
-    "business.registered": "Business registered", "finance.monthly_repayments": "Existing monthly repayments",
-    "need.tenor_months": "Preferred repayment period", "employment.employer": "Employer",
-    "employment.type": "Employment type", "employment.months": "Time with employer",
-    "employment.monthly_net_income": "Monthly take-home pay", "residence.district": "District",
-    "farm.activity": "Farming activity", "farm.district": "Farm district", "farm.operating_months": "Farming for",
-    "farm.annual_income": "Annual farm income",
-}
-EDITABLE = {k for k in FIELD_LABELS if not k.endswith("_captured")}
+FIELD_LABELS = customer_svc.FIELD_LABELS
+EDITABLE = customer_svc.EDITABLE
 
 
 def _need_owned(db: Session, actor: Actor, need_id: uuid.UUID) -> FinancialNeed:
@@ -79,11 +69,9 @@ def correct_fact(body: FactPatch, actor: Actor = Depends(customer_actor), db: Se
     """FSD-PRO-002: customer corrections; material changes re-run matching via MaterialFactChanged."""
     if body.key not in EDITABLE:
         raise ValidationFailed("This field can't be edited here.")
-    from weza.domains.admin_config import QUESTION_PATHS
-    q = next((q for path in QUESTION_PATHS.values() for q in path if q["key"] == body.key), None)
-    value = journey._parse_answer(q, str(body.value)) if q else body.value
+    value, hint = customer_svc.parse_fact_value(body.key, str(body.value))
     if value is None:
-        raise ValidationFailed(journey._help_for(q) if q else "Invalid value.")
+        raise ValidationFailed(hint or "Invalid value.")
     customer_svc.upsert_fact(db, actor.id, body.key, value, source="CUSTOMER", channel="web", confirmed=True,
                              source_ref="profile_correction")
     return profile(actor, db)
@@ -194,6 +182,7 @@ class InfoResponseIn(BaseModel):
     document_id: str | None = None
 
 
+@router.post("/info-requests/{request_id}/fulfil")
 @router.post("/info-requests/{request_id}/respond")
 def respond_info_request(request_id: uuid.UUID, body: InfoResponseIn, actor: Actor = Depends(customer_actor),
                          db: Session = DB):

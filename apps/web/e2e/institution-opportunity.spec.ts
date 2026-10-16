@@ -26,7 +26,7 @@ test("officer works an opportunity from first contact to disbursement", async ({
   await ask.getByLabel("What do you need?").selectOption("QUESTION");
   await ask.getByLabel("Your question").fill("How many staff does the pharmacy employ?");
   await ask.getByRole("button", { name: "Send request" }).click();
-  await expect(page.getByText("Waiting for customer")).toBeVisible();
+  await expect(page.getByText("Waiting for customer", { exact: true }).first()).toBeVisible();
 
   // The customer answers (API — the customer UI is covered below)
   await expect.poll(async () => (await (await request.get("/api/v1/me/info-requests", { headers: customer })).json()).open).toBe(1);
@@ -77,7 +77,7 @@ test("customer answers an information request on My requests", async ({ page, re
   await ask.getByLabel("What do you need?").selectOption("QUESTION");
   await ask.getByLabel("Your question").fill("Do you own or rent the premises?");
   await ask.getByRole("button", { name: "Send request" }).click();
-  await expect(page.getByText("Waiting for customer")).toBeVisible();
+  await expect(page.getByText("Waiting for customer", { exact: true }).first()).toBeVisible();
 
   // Switch to the customer in a fresh context so staff and customer sessions don't mix
   const customerPage = await page.context().browser()!.newPage();

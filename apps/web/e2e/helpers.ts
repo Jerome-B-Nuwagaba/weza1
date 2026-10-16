@@ -16,6 +16,10 @@ export function idem() {
 /** Drives the customer conversation through the journey API exactly as the web chat does, then shares the request
  * with Lakeside Bank. Returns the opportunity and a customer session for later answers. */
 export async function customerSharesWithLakeside(request: APIRequestContext, text = "I need UGX 20 million to buy stock for my pharmacy") {
+  return customerSharesWith(request, "Lakeside Bank", text);
+}
+
+export async function customerSharesWith(request: APIRequestContext, institution: string, text: string) {
   const phone = "0772" + String(Math.floor(Math.random() * 1e6)).padStart(6, "0");
   let r = await request.post(`${API}/journeys`, { data: { channel: "web", text } });
   expect(r.ok(), await r.text()).toBeTruthy();
@@ -41,8 +45,9 @@ export async function customerSharesWithLakeside(request: APIRequestContext, tex
     await send({ text: answers[q.key] });
   }
   expect(cards("options").length, `no options at node ${data.node}: ${JSON.stringify(data.outputs).slice(0, 1500)}`).toBeGreaterThan(0);
-  const option = cards("options")[0].options.find((o: any) => o.institution === "Lakeside Bank");
-  expect(option, "Lakeside Bank should be offered").toBeTruthy();
+  const offered = cards("options")[0].options;
+  const option = offered.find((o: any) => o.institution === institution);
+  expect(option, `${institution} should be offered (got ${offered.map((o: any) => o.institution).join(", ")})`).toBeTruthy();
   await send({ action: "select", value: option.match_id });
   await send({ action: "agree", value: cards("consent")[0].template_id });
   const reference: string = cards("submitted")[0].reference;
@@ -59,8 +64,8 @@ export async function customerSharesWithLakeside(request: APIRequestContext, tex
   return { reference, oppId, session, customer };
 }
 
-export async function staffToken(request: APIRequestContext, email: string) {
-  const r = await request.post(`${API}/auth/login`, { data: { email, password: DEMO_PASSWORD } });
+export async function staffToken(request: APIRequestContext, email: string, password = DEMO_PASSWORD) {
+  const r = await request.post(`${API}/auth/login`, { data: { email, password } });
   expect(r.ok(), await r.text()).toBeTruthy();
   return { Authorization: `Bearer ${(await r.json()).access_token}` };
 }

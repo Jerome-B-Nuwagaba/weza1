@@ -119,8 +119,9 @@ class InfoRequest(IdMixin, TimestampMixin, Base):
     customer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     kind: Mapped[str] = mapped_column(String(12))  # DOCUMENT | QUESTION
     doc_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    fact_key: Mapped[str | None] = mapped_column(String(60), nullable=True)  # QUESTION answers saved to profile
     message: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(12), default="OPEN")  # OPEN | FULFILLED | CANCELLED
+    status: Mapped[str] = mapped_column(String(12), default="OPEN")  # OPEN | FULFILLED | CANCELLED | EXPIRED
     requested_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -142,6 +143,22 @@ class Preview(IdMixin, TimestampMixin, Base):
     interest_state: Mapped[str] = mapped_column(String(24), default="PENDING")
     interest_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ReasonSignal(IdMixin, Base):
+    """Why an institution passed on a preview (NOT_INTERESTED). Pre-consent, so it carries no customer identity;
+    only k-anonymised aggregates are ever shown."""
+
+    __tablename__ = "reason_signal"
+    __table_args__ = (S,)
+
+    institution_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    preview_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), unique=True)
+    need_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    reason: Mapped[str] = mapped_column(String(30))
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
 class Insight(IdMixin, TimestampMixin, Base):

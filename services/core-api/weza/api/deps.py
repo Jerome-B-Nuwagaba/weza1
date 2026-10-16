@@ -1,6 +1,7 @@
 """FastAPI dependencies: database session, authenticated actors, client metadata."""
 
 import uuid
+from dataclasses import replace
 
 from fastapi import Depends, Header, Request
 from sqlalchemy.orm import Session
@@ -26,11 +27,11 @@ def _bearer(authorization: str | None) -> str | None:
     return None
 
 
-def staff_actor(authorization: str | None = Header(None), db: Session = DB) -> Actor:
+def staff_actor(request: Request, authorization: str | None = Header(None), db: Session = DB) -> Actor:
     token = _bearer(authorization)
     if not token:
         raise Unauthorized("Please sign in.")
-    return identity.actor_from_access_token(db, token)
+    return replace(identity.actor_from_access_token(db, token), ip=client_ip(request)[:64])
 
 
 def institution_actor(actor: Actor = Depends(staff_actor)) -> Actor:
@@ -45,7 +46,7 @@ def weza_actor(actor: Actor = Depends(staff_actor)) -> Actor:
     return actor
 
 
-def customer_actor(authorization: str | None = Header(None), db: Session = DB) -> Actor:
+def customer_actor(request: Request, authorization: str | None = Header(None), db: Session = DB) -> Actor:
     token = _bearer(authorization)
     if not token or not token.startswith("cs_"):
         raise Unauthorized("Please verify your phone number to continue.", code="CUSTOMER_AUTH_REQUIRED")
@@ -55,7 +56,7 @@ def customer_actor(authorization: str | None = Header(None), db: Session = DB) -
     cust = db.get(Customer, cid)
     if cust is None or cust.status != "ACTIVE":
         raise Unauthorized("Account not active.")
-    return Actor(kind="CUSTOMER", id=cid, display="customer")
+    return Actor(kind="CUSTOMER", id=cid, display="customer", ip=client_ip(request)[:64])
 
 
 def optional_customer(authorization: str | None = Header(None), db: Session = DB) -> uuid.UUID | None:

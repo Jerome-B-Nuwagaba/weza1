@@ -172,7 +172,8 @@ def on_consent_withdrawn(db: Session, ev: OutboxEvent) -> None:
                               object_type="opportunity", object_id=str(opp.id), dedupe=f"withdrawn:{ev.id}")
 
 
-@consumer("info_requests_notify", ["InfoRequested", "InfoRequestFulfilled", "InfoRequestCancelled"])
+@consumer("info_requests_notify", ["InfoRequested", "InfoRequestFulfilled", "InfoRequestCancelled",
+                                   "InfoRequestExpired"])
 def on_info_request(db: Session, ev: OutboxEvent) -> None:
     opp = _opp(db, ev)
     if opp is None:
@@ -187,6 +188,19 @@ def on_info_request(db: Session, ev: OutboxEvent) -> None:
     elif ev.event_type == "InfoRequestCancelled":
         notify.notify_customer(db, opp.customer_id, "InfoRequestCancelled", title="A request was withdrawn",
                                body=f"{inst.display_name} no longer needs the item they asked for on {opp.reference}.",
+                               link="/c/status", object_type="info_request", object_id=ev.data.get("request_id"))
+    elif ev.event_type == "InfoRequestExpired":
+        a = db.get(Assignment, opp.id)
+        notify.notify_institution(db, opp.institution_id, "InfoRequestExpired",
+                                  title=f"No answer in time on {opp.reference}",
+                                  body="Your request to the customer expired. Contact them directly or ask again.",
+                                  link=f"/institution/opportunities/{opp.id}",
+                                  user_ids=[a.user_id] if a and a.user_id else None,
+                                  roles=None if a and a.user_id else ["MANAGER"], object_type="opportunity",
+                                  object_id=str(opp.id), event_id=ev.id, dedupe=f"info_expired:{ev.id}")
+        notify.notify_customer(db, opp.customer_id, "InfoRequestExpired", title="A request has expired",
+                               body=f"{inst.display_name}'s request on {opp.reference} has expired. They may contact "
+                                    "you directly or ask again in WEZA.",
                                link="/c/status", object_type="info_request", object_id=ev.data.get("request_id"))
     else:
         a = db.get(Assignment, opp.id)
@@ -340,3 +354,39 @@ def on_document_stored(db: Session, ev: OutboxEvent) -> None:
                                                          FinancialNeed.status.in_(engine.ACTIVE_DEMAND))).scalars())
     if ids:
         engine.clear_market(db, "DocumentStored", trigger_ref=ev.aggregate_id, need_ids=ids)
+
+
+@consumer("info_answer_rematch", ["InfoRequestFulfilled"])
+def on_info_answer(db: Session, ev: OutboxEvent) -> None:
+    """An answer saved to the profile (first-time facts emit no MaterialFactChanged) can change readiness —
+    re-clear that customer's demand. Document answers are already covered by DocumentStored."""
+    if not ev.data.get("fact_saved") or not ev.data.get("customer_id"):
+        return
+    cid = uuid.UUID(ev.data["customer_id"])
+    ids = list(db.execute(select(FinancialNeed.id).where(FinancialNeed.customer_id == cid,
+                                                         FinancialNeed.status.in_(engine.ACTIVE_DEMAND))).scalars())
+    if ids:
+        engine.clear_market(db, "InfoRequestFulfilled", trigger_ref=ev.data.get("request_id"), need_ids=ids)
+
+
+@consumer("readiness_notify", ["CustomerReadinessUpdated"])
+def on_readiness(db: Session, ev: OutboxEvent) -> None:
+    """ALMOST_READY → READY_NOW: tell the customer once a day per request. The Waiting Room has its own message."""
+    if ev.data.get("previous") != "ALMOST_READY" or ev.data.get("readiness") != "READY_NOW":
+        return
+    if ev.data.get("trigger") in ("journey", "customer", "preferences"):
+        return  # the customer is in the conversation and sees the options there
+    need = db.get(FinancialNeed, uuid.UUID(ev.aggregate_id))
+    if need is None or not need.customer_id or need.status == "WAITING":
+        return
+    from sqlalchemy import func
+    midnight = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    already = db.execute(select(func.count()).select_from(Notification).where(
+        Notification.recipient_id == need.customer_id, Notification.event_type == "CustomerReadyNow",
+        Notification.object_id == str(need.id), Notification.created_at >= midnight)).scalar_one()
+    if already:
+        return
+    notify.notify_customer(db, need.customer_id, "CustomerReadyNow", title="Your request now has options",
+                           body="Thanks for the extra information. Your request now fits at least one institution — "
+                                "open WEZA to see your options.", link="/start", object_type="need",
+                           object_id=str(need.id))

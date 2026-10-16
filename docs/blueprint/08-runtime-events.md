@@ -48,7 +48,7 @@ Topics (TSD §54): `customer-events, matching-events, opportunity-events, instit
 - **Dispatcher** (worker): `SELECT … FOR UPDATE SKIP LOCKED LIMIT 100` → for each subscribed consumer → handler. Consumer dedupe via `platform.inbox(consumer, event_id)` inserted in the handler's transaction (exactly-once *effect*).
 - **Retry:** per consumer: attempts 5, backoff 1 s, 10 s, 60 s, 5 min, 15 min → dead letter (`platform.dead_letter`) → alert if topic is critical (routing, consent, notification, billing).
 - **Replay:** admin can replay a dead letter or re-emit an event range for a consumer. Idempotent handlers guarantee no duplicate opportunities, charges or messages.
-- **Bus adapter:** `EventBus` interface with `PostgresOutboxBus` (V1) and `AzureServiceBusBus` (stub + contract tests) for later.
+- **Bus:** PostgreSQL transactional outbox with a worker dispatcher (V1). A Service Bus adapter is a possible later step and is not built.
 
 ## 5. Key event catalogue
 

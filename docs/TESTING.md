@@ -106,8 +106,9 @@ Open `/whatsapp-sim` (or click *Continue on WhatsApp* on the home page). Enter a
 ## 4. What was tested
 
 **Automated, on every push** (GitHub Actions, `.github/workflows/ci.yml`):
-- **Core API:** 40 tests against a real PostgreSQL database, plus `ruff`, `bandit` and `pip-audit`. Covered:
-  - institution information requests (gating, consent scope, closing on withdrawal) and indicative terms on approvals;
+- **Core API:** 59 tests against a real PostgreSQL database, plus `ruff`, `bandit` and `pip-audit`. Covered:
+  - institution information requests (gating, 403 privacy violations, consent scope, expiry, closing on withdrawal, answers saved to the profile with provenance and re-clearing) and indicative terms on approvals;
+  - resiliency: audit rows with actor, tenant, action and client IP; MFA for all staff when enforced; notification backoff, dead-lettering and replay; Infobip; k-anonymised preview pass reasons;
   - the full pharmacy scenario end to end, attribution lineage, the versioned snapshot, and idempotent replay (one opportunity, one billing event);
   - OTP failure, lockout and hashing; fact re-use and correction with re-matching; Waiting Room; working without AI;
   - cross-tenant 404s, disclosure by role, assignment and consent withdrawal, preview allow-list, log redaction;
@@ -115,9 +116,9 @@ Open `/whatsapp-sim` (or click *Continue on WhatsApp* on the home page). Enter a
   - onboarding through activation, maker-checker, mandatory simulation, k-anonymity, sandbox, role-specific Command Centre, the read-only assistant, outcome insights;
   - outcomes, billing and dispute reversal, product-pause clearing, kill switch, Waiting Room match, rescue with new consent, service-target breach and freshness, the WhatsApp simulator on the same graph;
   - the graph runtime: waits, invalid interrupts, timeouts, ended graphs, step budget.
-- **Web:** TypeScript check and production build.
-- **End-to-end (Playwright, `apps/web/e2e`):** against the API container with demo data. An officer works an opportunity in the browser from first contact through an information request, approval with terms and disbursement; the customer answers on *My requests*; executives and other institutions can't see the customer; an institution applies, WEZA verifies it, and its admin reaches the activation checklist.
-  - To run locally: start the API (`python services/core-api/scripts/dev_api.py`), then in `apps/web` run `npm run e2e` (first time: `npx playwright install chromium`). Each run starts three customer journeys; the API allows 30 per IP per hour.
+- **Web:** ESLint (`next/core-web-vitals`), TypeScript check and production build.
+- **End-to-end (Playwright, `apps/web/e2e`):** against the API container with demo data. The full E2E-01 happy path: a brand-new institution applies, WEZA verifies it, it's configured and activated, receives a customer's request, asks a question, gets the answer and reports the outcome. An officer works an opportunity in the browser from first contact through an information request, approval with terms and disbursement; the customer answers on *My requests*; executives and other institutions can't see the customer; an institution applies, WEZA verifies it, and its admin reaches the activation checklist.
+  - To run locally: start the API (`python services/core-api/scripts/dev_api.py`), then in `apps/web` run `npm run e2e` (first time: `npx playwright install chromium`). Each run starts four customer journeys; the API allows 30 journeys per IP per hour and 20 OTPs per IP per 15 minutes, so clear `platform.rate_counter` in the local database between back-to-back runs.
 - **Mobile:** `flutter analyze`, widget tests, APK and web builds.
 - **Secret scanning:** gitleaks.
 
@@ -139,7 +140,8 @@ Bugs found during QA and fixed:
 |---|---|---|
 | Full conversational AI | `ANTHROPIC_API_KEY` | WEZA works without it, using structured questions; with a key, understanding of free text improves and **Ask WEZA** gives AI-written answers. |
 | WhatsApp Business | `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN` | Set the Meta webhook URL to `<API URL>/api/v1/channels/whatsapp/webhook`. |
-| Real SMS (OTP and updates) | `SMS_PROVIDER=africastalking` with `AFRICASTALKING_USERNAME`, `AFRICASTALKING_API_KEY` (optional `AFRICASTALKING_SENDER_ID`), or `SMS_PROVIDER=twilio` with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`; then `OTP_DELIVERY=sms` | Username `sandbox` uses the Africa's Talking sandbox. Rejected numbers are recorded as failed. With a real provider, one-time codes are not stored. |
+| Real SMS (OTP and updates) | `SMS_PROVIDER=africastalking` with `AFRICASTALKING_USERNAME`, `AFRICASTALKING_API_KEY` (optional `AFRICASTALKING_SENDER_ID`), `SMS_PROVIDER=twilio` with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`, or `SMS_PROVIDER=infobip` with `INFOBIP_BASE_URL`, `INFOBIP_API_KEY` (optional `INFOBIP_SENDER`); then `OTP_DELIVERY=sms` | Username `sandbox` uses the Africa's Talking sandbox. Rejected numbers are recorded as failed. With a real provider, one-time codes are not stored. |
+| Notification retries | Nothing to set | Failed staff notifications retry with backoff (1 min, 5 min, 15 min, 1 h), then are marked dead and can be replayed from **Events & delivery** in the admin console. |
 | Staff email alerts | `SMTP_URL` (`smtp://…:587` STARTTLS or `smtps://…:465` TLS), `SMTP_FROM` | URL-encode special characters in the password. |
 | Malware scanning | `MALWARE_SCANNER=clamav`, `CLAMAV_HOST`, `CLAMAV_PORT` | Needs a reachable clamd (for example the `clamav/clamav` container). If clamd can't be reached, uploads are refused, not stored unscanned. |
 | Production mode | `ENV=production`, `SEED_DEMO=false`, `DEMO_MODE=false`, `MFA_ENFORCED=true` | The API refuses to start in production and lists what's missing: real secrets, MFA, SMS OTP with a live provider, ClamAV, SMTP, explicit CORS origins. Remaining blockers that config can't check (SSO decision, legal consent text, pen test, DR test) are in [blueprint/13-deployment.md](blueprint/13-deployment.md). |

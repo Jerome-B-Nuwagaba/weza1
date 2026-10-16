@@ -191,8 +191,9 @@ def actor_for_user(db: Session, user: User, mfa: bool) -> Actor:
 
 
 def mfa_required(user: User) -> bool:
-    s = get_settings()
-    return user.mfa_enrolled or (s.mfa_enforced and (user.kind == "WEZA"))
+    """With MFA_ENFORCED every staff login (WEZA and institution) needs a second factor; otherwise only users
+    who chose to enrol are asked for one."""
+    return user.mfa_enrolled or get_settings().mfa_enforced
 
 
 def login(db: Session, email: str, password: str, ip: str = "") -> dict:
@@ -212,7 +213,7 @@ def login(db: Session, email: str, password: str, ip: str = "") -> dict:
         if user.failed_logins >= 5:
             user.locked_until = utcnow() + timedelta(minutes=15)
             user.failed_logins = 0
-        audit(db, Actor(kind="ANONYMOUS", display=email), "auth.login_failed", "user", user.id,
+        audit(db, Actor(kind="ANONYMOUS", display=email, ip=ip[:64]), "auth.login_failed", "user", user.id,
               institution_id=None)
         db.commit()  # failure counters & audit must survive the error response's rollback
         raise Unauthorized("Email or password is incorrect.", code="INVALID_CREDENTIALS")

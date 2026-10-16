@@ -92,7 +92,7 @@ function Inner() {
                           <li key={i} className="text-[13px]"><span className="text-ink">{t.label}</span> <span className="text-muted">· {dateTime(t.at)}</span></li>
                         ))}
                       </ol>
-                      {(o.info_requests || []).filter((r: any) => r.status !== "CANCELLED").map((r: any) => (
+                      {(o.info_requests || []).filter((r: any) => r.status === "OPEN" || r.status === "FULFILLED").map((r: any) => (
                         <InfoRequestItem key={r.id} r={r} institution={o.institution} onDone={(text: string) => { setMsg(text); needs.reload(); }} />
                       ))}
                       {o.outcomes.map((x: any, i: number) => (
@@ -182,6 +182,7 @@ function InfoRequestItem({ r, institution, onDone }: { r: any; institution: stri
       <div className="text-[14px] font-medium">{institution} asks: {r.kind === "DOCUMENT" ? r.doc_label : "a question"}</div>
       <p className="mt-0.5 text-[14px]">{r.message}</p>
       {r.due_at && <p className="text-[12px] text-muted">Please reply by {dateTime(r.due_at)}</p>}
+      {r.fact_label && <p className="text-[12px] text-muted">Your answer will also update your profile ({r.fact_label}).</p>}
       {r.kind === "QUESTION" ? (
         <div className="mt-2 flex flex-col gap-2 sm:flex-row">
           <Textarea rows={2} maxLength={2000} value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="Your answer" className="flex-1" />

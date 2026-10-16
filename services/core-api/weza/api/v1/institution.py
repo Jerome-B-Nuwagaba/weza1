@@ -26,7 +26,15 @@ from weza.domains.intelligence import ai, assistant, insights
 from weza.domains.matching import engine
 from weza.domains.misc_models import Notification
 from weza.domains.opportunity import service as opp_svc
-from weza.domains.opportunity.models import Assignment, InfoRequest, Insight, Opportunity, Outcome, Preview
+from weza.domains.opportunity.models import (
+    Assignment,
+    InfoRequest,
+    Insight,
+    Opportunity,
+    Outcome,
+    Preview,
+    ReasonSignal,
+)
 from weza.domains.product import service as product_svc
 from weza.domains.product.models import Product, ProductVersion
 from weza.domains.trust import policy
@@ -539,7 +547,8 @@ def feed(view: str | None = None, state: str | None = None, freshness: str | Non
     rows = db.execute(_feed_query(db, actor, view, state, freshness, min_match, sector, q).limit(500)).scalars().all()
     users = {u.id: u.full_name for u in db.execute(select(User).join(Membership, Membership.user_id == User.id).where(
         Membership.institution_id == actor.institution_id)).scalars()}
-    items = [opp_svc.summary(db, o, users=users) for o in rows]
+    pending = opp_svc.open_info_request_counts(db, [o.id for o in rows])
+    items = [opp_svc.summary(db, o, users=users, open_requests=pending) for o in rows]
     prio = {"URGENT": 0, "HIGH": 1, "NORMAL": 2}
     if sort == "priority":
         items.sort(key=lambda s: (prio.get(s["priority"], 3), s["minutes_to_target"] if s["minutes_to_target"] is not None
@@ -562,7 +571,8 @@ def my_day(actor: Actor = A, db: Session = DB):
     policy.require(actor, "opportunity.read_meta")
     rows = db.execute(select(Opportunity).join(Assignment, Assignment.opportunity_id == Opportunity.id).where(
         Assignment.user_id == actor.id, Opportunity.state.in_(list(opp_svc.OPEN_STATES)))).scalars().all()
-    items = [opp_svc.summary(db, o) for o in rows]
+    pending = opp_svc.open_info_request_counts(db, [o.id for o in rows])
+    items = [opp_svc.summary(db, o, open_requests=pending) for o in rows]
     sections = {
         "new": [i for i in items if i["state"] in ("ROUTED", "RECEIVED", "ASSIGNED")],
         "follow_up": [i for i in items if i["state"] in ("CONTACTED", "PROCEEDING")],
@@ -581,6 +591,8 @@ def opportunity(opp_id: uuid.UUID, actor: Actor = A, db: Session = DB):
     out["can_update"] = policy.has(actor, "opportunity.update_status")
     out["can_assign"] = policy.has(actor, "opportunity.assign")
     out["doc_types"] = docs.DOC_TYPES
+    from weza.domains.customer.service import EDITABLE, FIELD_LABELS
+    out["fact_fields"] = {k: FIELD_LABELS[k] for k in sorted(EDITABLE)}
     out["members"] = [m for m in opp_svc.team_members(db, actor.institution_id) if "OFFICER" in m["roles"]
                       or "MANAGER" in m["roles"]]
     return out
@@ -657,6 +669,7 @@ class InfoRequestIn(BaseModel):
     message: str = Field(..., min_length=1, max_length=1000)
     doc_type: str | None = None
     due_in_days: int | None = Field(None, ge=1, le=30)
+    fact_key: str | None = Field(None, max_length=60)
 
 
 @router.post("/opportunities/{opp_id}/info-requests", status_code=201)
@@ -687,6 +700,13 @@ def cancel_info_request(opp_id: uuid.UUID, request_id: uuid.UUID, body: CancelIn
         raise NotFound("Not found.")
     opp_svc.cancel_info_request(db, actor, o, r, body.reason)
     return opportunity(opp_id, actor, db)
+
+
+@router.delete("/opportunities/{opp_id}/info-requests/{request_id}")
+def delete_info_request(opp_id: uuid.UUID, request_id: uuid.UUID, reason: str | None = Query(None, max_length=500),
+                        actor: Actor = A, db: Session = DB):
+    """Spec alias for cancel. The request is closed as CANCELLED and kept for audit — never deleted."""
+    return cancel_info_request(opp_id, request_id, CancelInfoIn(reason=reason), actor, db)
 
 
 @router.get("/opportunities/{opp_id}/documents/{doc_id}")
@@ -722,12 +742,15 @@ def previews(actor: Actor = A, db: Session = DB):
         return {"enabled": False, "previews": []}
     rows = db.execute(select(Preview).where(Preview.institution_id == actor.institution_id,
                                             Preview.expires_at > utcnow()).order_by(Preview.created_at.desc())).scalars()
-    return {"enabled": True, "previews": [{"id": str(p.id), **p.payload, "interest": p.interest_state,
-                                           "expires_at": p.expires_at.isoformat()} for p in rows]}
+    return {"enabled": True, "reasons": opp_svc.REASON_SIGNALS,
+            "previews": [{"id": str(p.id), **p.payload, "interest": p.interest_state,
+                          "expires_at": p.expires_at.isoformat()} for p in rows]}
 
 
 class InterestIn(BaseModel):
     state: str = Field(..., pattern="^(INTERESTED|NEED_MORE_INFORMATION|NOT_INTERESTED)$")
+    reason: str | None = None  # required with NOT_INTERESTED — one of opp_svc.REASON_SIGNALS
+    note: str | None = Field(None, max_length=500)
 
 
 @router.post("/previews/{preview_id}/interest")
@@ -736,8 +759,21 @@ def interest(preview_id: uuid.UUID, body: InterestIn, actor: Actor = A, db: Sess
     p = db.get(Preview, preview_id)
     if p is None or p.institution_id != actor.institution_id:
         raise NotFound("Not found.")
+    if body.state == "NOT_INTERESTED" and body.reason not in opp_svc.REASON_SIGNALS:
+        raise ValidationFailed("Tell us why you're passing — it feeds your near-match intelligence.",
+                               code="REASON_REQUIRED")
     p.interest_state, p.interest_by = body.state, actor.id
-    audit(db, actor, "preview.interest", "preview", p.id, after={"state": body.state})
+    signal = db.execute(select(ReasonSignal).where(ReasonSignal.preview_id == p.id)).scalar_one_or_none()
+    if body.state == "NOT_INTERESTED":
+        if signal is None:
+            signal = ReasonSignal(institution_id=p.institution_id, preview_id=p.id, need_id=p.need_id,
+                                  reason=body.reason, created_by=actor.id)
+            db.add(signal)
+        signal.reason, signal.note = body.reason, body.note
+    elif signal is not None:
+        db.delete(signal)  # the institution changed its mind; the pass reason no longer applies
+    audit(db, actor, "preview.interest", "preview", p.id,
+          after={"state": body.state, "reason": body.reason if body.state == "NOT_INTERESTED" else None})
     if body.state in ("INTERESTED", "NEED_MORE_INFORMATION"):
         from weza.domains.need.models import FinancialNeed
         from weza.domains.notification.service import notify_customer
@@ -803,6 +839,12 @@ def radius(actor: Actor = A, db: Session = DB):
 def demand(days: int = Query(90, le=365), actor: Actor = A, db: Session = DB):
     policy.require(actor, "analytics.read")
     return insights.demand_intelligence(db, actor.institution_id, days)
+
+
+@router.get("/intelligence/reason-signals")
+def reason_signals(days: int = Query(90, le=365), actor: Actor = A, db: Session = DB):
+    policy.require(actor, "analytics.read")
+    return insights.reason_signals(db, actor.institution_id, days)
 
 
 @router.get("/intelligence/product-gaps")

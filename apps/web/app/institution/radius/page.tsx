@@ -13,6 +13,7 @@ export default function Radius() {
   const r = useApi<any>("/inst/intelligence/radius");
   const cfg = useApi<any>("/public/config");
   const appetites = useApi<any>("/inst/appetites");
+  const passed = useApi<any>("/inst/intelligence/reason-signals");
   const [whatIf, setWhatIf] = useState<{ base: any; criteria: Rule[]; product_ids: string[]; min: number; result?: any } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -48,6 +49,23 @@ export default function Radius() {
             </Card>
           ))}
         </div>
+      )}
+      {passed.data && (
+        <Card title="Why we passed" subtitle={`Reasons your team gave on previews, last ${passed.data.window_days} days`} className="mt-6">
+          {passed.data.total == null ? (
+            <p className="text-[14px] text-muted">Not enough passes yet to show without identifying anyone (needs at least 5).</p>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-3">
+              {([["Reason", passed.data.by_reason], ["Sector", passed.data.by_sector], ["Region", passed.data.by_region]] as [string, Record<string, number>][]).map(([label, rows]) => (
+                <div key={label}>
+                  <div className="mb-1 text-[13px] font-medium">{label}</div>
+                  <ul className="space-y-1 text-[13px]">{Object.entries(rows).map(([k, v]) => <li key={k} className="flex justify-between gap-2"><span className="text-muted">{k}</span><span className="num">{v}</span></li>)}</ul>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="mt-3 text-[12px] text-muted">{passed.data.note}</p>
+        </Card>
       )}
       {whatIf && (
         <Card title={`What-if: ${whatIf.base.appetite}`} className="mt-6" subtitle="Adjust criteria and simulate. Nothing is saved — changes go through Appetite Studio and approval.">

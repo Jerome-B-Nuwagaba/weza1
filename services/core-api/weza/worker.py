@@ -101,6 +101,7 @@ JOBS: list[tuple[str, float, Callable[[], object]]] = [
     ("graph_timers", 15, run_graph_timers),
     ("service_targets", 60, _sweep(opp_svc.service_target_sweep)),
     ("freshness", 300, _sweep(opp_svc.freshness_sweep)),
+    ("info_request_expiry", 900, _sweep(opp_svc.info_request_expiry_sweep)),
     ("notify_retry", 60, _sweep(notify.retry_sweep)),
     ("notify_escalation", 60, _sweep(notify.escalation_sweep)),
     ("waiting_room", 600, waiting_room_sweep),
