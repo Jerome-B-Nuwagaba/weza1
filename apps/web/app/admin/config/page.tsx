@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
+import { ActionError } from "@/components/ActionError";
 import { useMe } from "@/components/StaffShell";
 import { Badge, Banner, Button, Card, ErrorState, Field, Input, KV, Loading, Modal, PageHeader, Select, StateBadge, Tabs, Textarea, useToast } from "@/components/ui";
 import { date } from "@/lib/format";
@@ -19,7 +20,7 @@ export default function Config() {
   const [consent, setConsent] = useState<{ title: string; text: string } | null>(null);
   const [path, setPath] = useState("SME");
   const [weights, setWeights] = useState<Record<string, number>>({});
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<ApiError | null>(null);
   const { toast, node } = useToast();
   useEffect(() => c.data && setWeights(c.data.match_weights.data), [c.data]);
   async function run(fn: () => Promise<any>, msg: string) {
@@ -29,12 +30,12 @@ export default function Config() {
       toast(msg);
       return true;
     } catch (e) {
-      setErr((e as ApiError).message);
+      setErr(e as ApiError);
       return false;
     }
   }
   if (c.loading) return <Loading />;
-  if (c.error) return <ErrorState error={c.error} />;
+  if (c.error) return <ErrorState error={c.error} onRetry={c.reload} />;
   const d = c.data;
   const sum = Object.values(weights).reduce((a, b) => a + Number(b || 0), 0);
   const ks = Object.fromEntries(d.kill_switches.map((k: any) => [k.key, k]));
@@ -42,7 +43,7 @@ export default function Config() {
     <>
       {node}
       <PageHeader title="Configuration & network controls" subtitle="Every change is versioned or audited with a reason. Uganda is configuration, not hard-coded architecture." />
-      {err && <Banner tone="danger" className="mb-4">{err}</Banner>}
+      <ActionError error={err} className="mb-4" />
       <Card title="Kill switches" subtitle="TSD §75 — audited, reason required." className="mb-4">
         <div className="space-y-3">
           <Row label="Pause all routing" on={!!ks.pause_all_routing.value.on} note={ks.pause_all_routing.reason} onToggle={() => setSw({ key: "pause_all_routing", value: { on: !ks.pause_all_routing.value.on } })} disabled={!can("admin.network_control")} />

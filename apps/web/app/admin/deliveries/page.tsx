@@ -13,7 +13,7 @@ export default function Deliveries() {
     <>
       <PageHeader title="Events & delivery" subtitle="Transactional outbox → consumers with bounded retry → dead letter. Replays are safe: consumers are idempotent." />
       <Tabs tabs={[["DEAD", "Dead-lettered"], ["PENDING", "Pending / retrying"], ["DONE", "Delivered (recent)"]]} value={status} onChange={setStatus} />
-      {r.loading ? <Loading /> : r.error ? <ErrorState error={r.error} /> : (
+      {r.loading ? <Loading /> : r.error ? <ErrorState error={r.error} onRetry={r.reload} /> : (
         <>
           {r.data.deliveries.length === 0 ? <EmptyState title={status === "DEAD" ? "No dead letters" : "Nothing here"} /> : (
             <Table head={["Event", "Consumer", "Attempts", "Error", "At", ""]}>

@@ -4,8 +4,9 @@ import { useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { dateTime, moneyFull } from "@/lib/format";
+import { ActionError } from "@/components/ActionError";
 import { useMe } from "@/components/StaffShell";
-import { Banner, Button, EmptyState, ErrorState, Field, Loading, Modal, PageHeader, Select, StateBadge, Textarea } from "@/components/ui";
+import { Button, EmptyState, ErrorState, Field, Loading, Modal, PageHeader, Select, StateBadge, Textarea } from "@/components/ui";
 
 export default function Disputes() {
   const { can } = useMe();
@@ -13,7 +14,7 @@ export default function Disputes() {
   const [mv, setMv] = useState<{ d: any; state: string } | null>(null);
   const [decision, setDecision] = useState("");
   const [note, setNote] = useState("");
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<ApiError | null>(null);
   async function save() {
     setErr(null);
     try {
@@ -22,13 +23,13 @@ export default function Disputes() {
       setNote("");
       setDecision("");
     } catch (e) {
-      setErr((e as ApiError).message);
+      setErr(e as ApiError);
     }
   }
   return (
     <>
       <PageHeader title="Billing disputes" subtitle="OPEN → UNDER REVIEW ⇄ FURTHER INVESTIGATION → DECIDED → CLOSED. Reversals and credits are new events; history is never edited." />
-      {r.loading ? <Loading /> : r.error ? <ErrorState error={r.error} /> : r.data.disputes.length === 0 ? <EmptyState title="No disputes" /> : (
+      {r.loading ? <Loading /> : r.error ? <ErrorState error={r.error} onRetry={r.reload} /> : r.data.disputes.length === 0 ? <EmptyState title="No disputes" /> : (
         <div className="space-y-3">
           {r.data.disputes.map((d: any) => (
             <div key={d.id} className="rounded-xl border border-line bg-surface p-4">
@@ -47,7 +48,7 @@ export default function Disputes() {
         <div className="space-y-3">
           {mv?.state === "DECIDED" && <Field label="Decision"><Select value={decision} onChange={(e) => setDecision(e.target.value)} options={[["", "Choose…"], ["CHARGE_VALID", "Charge valid"], ["CHARGE_REVERSED", "Charge reversed (reversal event)"], ["OPPORTUNITY_REPLACED", "Opportunity replaced (credit event)"]]} /></Field>}
           <Field label="Note"><Textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
-          {err && <Banner tone="danger">{err}</Banner>}
+          <ActionError error={err} />
         </div>
       </Modal>
     </>

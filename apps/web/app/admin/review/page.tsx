@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { ActionError } from "@/components/ActionError";
 import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { dateTime } from "@/lib/format";
-import { Badge, Banner, Button, EmptyState, ErrorState, Field, Loading, Modal, PageHeader, Tabs, Textarea } from "@/components/ui";
+import { Badge, Button, EmptyState, ErrorState, Field, Loading, Modal, PageHeader, Tabs, Textarea } from "@/components/ui";
 
 const ACTIONS: Record<string, [string, string][]> = {
   DUPLICATE_HOLD: [["release", "Release & route"], ["close", "Close as duplicate"]],
@@ -18,7 +19,7 @@ export default function Review() {
   const r = useApi<any>(`/admin/review?status=${status}`, [status]);
   const [act, setAct] = useState<{ item: any; action: string } | null>(null);
   const [note, setNote] = useState("");
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<ApiError | null>(null);
   async function save() {
     setErr(null);
     try {
@@ -26,7 +27,7 @@ export default function Review() {
       setAct(null);
       setNote("");
     } catch (e) {
-      setErr((e as ApiError).message);
+      setErr(e as ApiError);
     }
   }
   const link = (i: any) => i.object_type === "institution" ? `/admin/institutions/${i.object_id}` : i.object_type === "integrity_case" ? "/admin/integrity" : i.object_type === "opportunity" ? `/admin/graph?q=${i.object_id}` : i.object_type === "customer" ? null : null;
@@ -34,7 +35,7 @@ export default function Review() {
     <>
       <PageHeader title="Human Control Centre" subtitle="Where WEZA stops and asks a person: low-confidence AI, conflicts, integrity, routing failures, duplicates, failed events and workflows." />
       <Tabs tabs={[["OPEN", "Open"], ["RESOLVED", "Resolved"]]} value={status} onChange={setStatus} />
-      {r.loading ? <Loading /> : r.error ? <ErrorState error={r.error} /> : r.data.items.length === 0 ? <EmptyState title="Nothing waiting for a human" /> : (
+      {r.loading ? <Loading /> : r.error ? <ErrorState error={r.error} onRetry={r.reload} /> : r.data.items.length === 0 ? <EmptyState title="Nothing waiting for a human" /> : (
         <div className="space-y-2">
           {r.data.items.map((i: any) => (
             <div key={i.id} className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-4 md:flex-row md:items-center md:justify-between">
@@ -54,7 +55,7 @@ export default function Review() {
       )}
       <Modal open={!!act} onClose={() => setAct(null)} title={act ? `${act.action} — ${act.item.title}` : ""} footer={<Button onClick={save} disabled={note.length < 3}>Confirm</Button>}>
         <Field label="Note (audited)" required><Textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
-        {err && <Banner tone="danger" className="mt-3">{err}</Banner>}
+        <ActionError error={err} className="mt-3" />
       </Modal>
     </>
   );

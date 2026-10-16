@@ -20,8 +20,8 @@ export default function AdminOpportunities() {
         <Select value={fresh} onChange={(e) => setFresh(e.target.value)} options={[["", "Any freshness"], ["FRESH", "Fresh"], ["ATTENTION_REQUIRED", "Needs attention"], ["STALE", "Stale"], ["EXPIRED", "Expired"]]} />
         <Input placeholder="Reference…" value={q} onChange={(e) => setQ(e.target.value)} />
       </div>
-      {r.loading && !r.data ? <Loading /> : r.error ? <ErrorState error={r.error} /> : (
-        <Table head={["Reference", "Institution", "Amount", "Need", "Match", "State", "Owner", "Age"]}>
+      {r.loading && !r.data ? <Loading /> : r.error ? <ErrorState error={r.error} onRetry={r.reload} /> : (
+        <Table head={["Reference", "Institution", "Amount", "Need", "Match", "State", "Owner", "Age"]} empty={r.data.items.length === 0}>
           {r.data.items.map((o: any) => (
             <tr key={o.id}>
               <Td><Link href={`/admin/graph?q=${o.reference}`} className="font-medium text-blue-800 hover:underline">{o.reference}</Link>{o.integrity_hold && <Badge tone="warning" className="ml-1">hold</Badge>}</Td>

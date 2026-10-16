@@ -1,29 +1,30 @@
 "use client";
 
 import { useState } from "react";
+import { ActionError } from "@/components/ActionError";
 import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { dateTime } from "@/lib/format";
-import { Badge, Banner, Button, EmptyState, ErrorState, Field, Loading, Modal, PageHeader, StateBadge, Textarea } from "@/components/ui";
+import { Badge, Button, EmptyState, ErrorState, Field, Loading, Modal, PageHeader, StateBadge, Textarea } from "@/components/ui";
 
 export default function Integrity() {
   const r = useApi<any>("/admin/integrity");
   const [dec, setDec] = useState<{ id: string; result: string } | null>(null);
   const [note, setNote] = useState("");
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<ApiError | null>(null);
   async function save() {
     try {
       r.setData(await api(`/admin/integrity/${dec!.id}/decide`, { body: { result: dec!.result, note } }));
       setDec(null);
       setNote("");
     } catch (e) {
-      setErr((e as ApiError).message);
+      setErr(e as ApiError);
     }
   }
   return (
     <>
       <PageHeader title="Marketplace integrity" subtitle={r.data?.note || "Duplicate, velocity, device and synthetic-pattern signals."} />
-      {r.loading ? <Loading /> : r.error ? <ErrorState error={r.error} /> : r.data.cases.length === 0 ? <EmptyState title="No integrity cases" /> : (
+      {r.loading ? <Loading /> : r.error ? <ErrorState error={r.error} onRetry={r.reload} /> : r.data.cases.length === 0 ? <EmptyState title="No integrity cases" /> : (
         <div className="space-y-3">
           {r.data.cases.map((c: any) => (
             <div key={c.id} className="rounded-xl border border-line bg-surface p-4">
@@ -41,7 +42,7 @@ export default function Integrity() {
       )}
       <Modal open={!!dec} onClose={() => setDec(null)} title={dec?.result === "ALLOW" ? "Allow — route the held opportunity" : "Block — close and block the customer"} footer={<Button variant={dec?.result === "ALLOW" ? "primary" : "danger"} onClick={save} disabled={note.length < 3}>Confirm</Button>}>
         <Field label="Decision note (audited)" required><Textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
-        {err && <Banner tone="danger" className="mt-3">{err}</Banner>}
+        <ActionError error={err} className="mt-3" />
       </Modal>
     </>
   );
