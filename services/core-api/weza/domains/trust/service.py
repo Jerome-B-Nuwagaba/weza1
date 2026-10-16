@@ -23,6 +23,7 @@ def audit(db: Session, actor: Actor, action: str, object_type: str, object_id, *
         institution_id=institution_id if institution_id is not None else actor.institution_id,
         action=action, object_type=object_type, object_id=str(object_id), before=_jsonable(before),
         after=_jsonable(after), reason=reason, versions=_jsonable(versions), correlation_id=correlation_id(),
+        ip=actor.ip or None,
     )
     db.add(ev)
     return ev

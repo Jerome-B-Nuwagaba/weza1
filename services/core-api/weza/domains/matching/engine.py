@@ -331,6 +331,9 @@ def match_need(db: Session, need: FinancialNeed, *, trigger: str = "customer", c
     if prev != readiness or trigger != "customer":
         emit(db, "NeedMatched", topic="matching", aggregate_type="need", aggregate_id=need.id,
              data={"readiness": readiness, "matches": len(ranked), "previous": prev, "trigger": trigger})
+    if prev is not None and prev != readiness:
+        emit(db, "CustomerReadinessUpdated", topic="matching", aggregate_type="need", aggregate_id=need.id,
+             data={"readiness": readiness, "previous": prev, "trigger": trigger})
     return {"readiness": readiness, "matches": [m for m, _ in ranked], "ready": ready, "almost": almost,
             "fields": fields}
 

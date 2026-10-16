@@ -26,6 +26,7 @@ class Actor:
     team_id: uuid.UUID | None = None
     mfa: bool = False
     display: str = ""
+    ip: str = ""  # client IP of the request (recorded on audit events)
 
     @property
     def is_weza(self) -> bool:

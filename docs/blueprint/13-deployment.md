@@ -23,10 +23,10 @@ LOCAL (docker-compose or native) · DEV (Render preview) · TEST (CI ephemeral P
 ## 3. CI/CD pipeline (GitHub Actions)
 `commit → lint/format (ruff, eslint, dart analyze) → type-check (mypy, tsc) → unit + graph + integration tests (Postgres service) → security (bandit, pip-audit, npm audit, gitleaks) → build (Docker image, Next.js, Flutter APK) → container scan (trivy) → deploy (Render/Vercel auto-deploy from main) → smoke tests against deployed URL`.
 
-## 4. Azure target (future production; IaC included in `infrastructure/azure`)
-Container Apps (api, worker), Azure Database for PostgreSQL Flexible (PITR), Service Bus (topics from §08), Blob Storage (versioning, private endpoints), Key Vault, Entra ID, API Management, Application Insights. RPO 15 min / RTO 4 h proposed for approval. Bicep templates are provided, but they are not deployed in V1-test.
+## 4. Azure target (possible future production — not built)
+A possible future target: Container Apps (api, worker), Azure Database for PostgreSQL Flexible (PITR), Service Bus (topics from §08), Blob Storage (versioning, private endpoints), Key Vault, Entra ID, API Management, Application Insights. RPO 15 min / RTO 4 h proposed for approval. **No Azure infrastructure-as-code or Azure adapters are in the repository**; the system runs end to end on Render + Vercel with PostgreSQL-backed outbox, retries and storage.
 
 ## 5. Production go-live blockers (not needed for testing)
 Entra ID / enterprise SSO decision (C5) · approved consent text by legal counsel (Uganda Data Protection and Privacy Act 2019 alignment) · WhatsApp Business verified number · penetration test · DR test.
 
-Built, awaiting accounts: the ClamAV scanner adapter (C7), Africa's Talking and Twilio SMS adapters, and SMTP/SMTPS email. With `ENV=production` the API refuses to start until these are configured, along with real secrets, enforced MFA, SMS OTP delivery and explicit CORS origins (`Settings.production_problems`).
+Built, awaiting accounts: the ClamAV scanner adapter (C7), Africa's Talking, Twilio and Infobip SMS adapters, and SMTP/SMTPS email. Failed staff notifications retry with backoff in PostgreSQL, then dead-letter for admin replay. With `ENV=production` the API refuses to start until these are configured, along with real secrets, enforced MFA, SMS OTP delivery and explicit CORS origins (`Settings.production_problems`).

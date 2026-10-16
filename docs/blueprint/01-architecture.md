@@ -71,7 +71,7 @@ flowchart TB
 | `services/core-api` (worker entrypoint) | same codebase, `python -m weza.worker` | Outbox dispatcher, graph timers (`next_action_at`), service-target ageing, freshness, Waiting Room re-clearing, notification delivery/retry, digests, retention, integrity sweeps |
 | `apps/web` | Next.js 15 | Customer web (`/`, `/start`, `/c/*`), Institution Portal (`/institution/*`), Admin (`/admin/*`), WhatsApp simulator (`/whatsapp-sim`) |
 | `apps/mobile` | Flutter 3 | Customer app |
-| `infrastructure/` | Render blueprint, Vercel config, Azure Bicep (reference) | IaC |
+| `render.yaml`, `apps/web/vercel.json` | Render blueprint, Vercel config (no Azure IaC yet) | IaC |
 
 The AI service is a **module** (`weza.intelligence.ai`) inside the monolith with a clean interface, extractable later (TSD §82 "extract only when justified").
 

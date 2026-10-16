@@ -78,3 +78,93 @@ def test_consent_withdrawal_closes_open_requests(client, as_user, journey):
     assert r.status_code == 422
     view = client.get(f"/api/v1/inst/opportunities/{oid}", headers=h).json()
     assert view["can_request_info"] is False and "response_text" not in view["info_requests"][0]
+
+
+def _ask(client, h, oid, **body):
+    return client.post(f"/api/v1/inst/opportunities/{oid}/info-requests", headers=_k(h), json=body)
+
+
+def test_privacy_violation_is_403(client, as_user, journey):
+    """Spec §2B: asking without a disclosure PERMIT is a privacy violation, not a validation error."""
+    j, oid, owner = _routed(journey, "0772400011")
+    other = next(e for e in ("officer@lakeside.demo", "officer2@lakeside.demo", "asset@lakeside.demo") if e != owner)
+    r = _ask(client, as_user(other), oid, kind="QUESTION", message="How many staff do you have?")
+    assert r.status_code == 403 and r.json()["error"]["code"] == "PRIVACY_VIOLATION"
+
+
+def test_expiry_sweep_closes_overdue_requests_and_tells_both_sides(client, as_user, journey):
+    from datetime import timedelta
+
+    from weza.domains.opportunity import service as opp_svc
+    from weza.domains.opportunity.models import InfoRequest
+    from weza.platform.db import session_scope, utcnow
+    j, oid, owner = _routed(journey, "0772400012")
+    h = as_user(owner)
+    req_id = _ask(client, h, oid, kind="QUESTION", message="When did you start trading?").json()["info_requests"][0]["id"]
+    assert client.get(f"/api/v1/inst/opportunities/{oid}", headers=h).json()["awaiting_customer"] is True
+    with session_scope() as db:
+        db.get(InfoRequest, req_id).due_at = utcnow() - timedelta(minutes=1)
+    with session_scope() as db:
+        assert opp_svc.info_request_expiry_sweep(db) >= 1
+    drain()
+    view = client.get(f"/api/v1/inst/opportunities/{oid}", headers=h).json()
+    assert view["info_requests"][0]["status"] == "EXPIRED" and view["awaiting_customer"] is False
+    assert any(a["kind"] == "INFO_REQUEST_EXPIRED" for a in view["activity"])
+    notes = client.get("/api/v1/me/notifications", headers=j.customer_headers).json()["notifications"]
+    assert any(n["title"] == "A request has expired" for n in notes)
+    # An expired request can't be answered
+    r = client.post(f"/api/v1/me/info-requests/{req_id}/fulfil", headers=j.customer_headers,
+                    json={"response_text": "2019"})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "NOT_OPEN"
+
+
+def test_spec_route_aliases_and_waiting_flag_in_feed(client, as_user, journey):
+    j, oid, owner = _routed(journey, "0772400013")
+    h = as_user(owner)
+    req_id = _ask(client, h, oid, kind="QUESTION", message="Who are your main suppliers?").json()["info_requests"][0]["id"]
+    mine =client.get("/api/v1/inst/my-day", headers=h).json()["sections"]
+    item = next(i for s in mine.values() for i in s if i["id"] == oid)
+    assert item["awaiting_customer"] and item["next_action"] == "Waiting for customer info"
+    r = client.delete(f"/api/v1/inst/opportunities/{oid}/info-requests/{req_id}", headers=h,
+                      params={"reason": "Asked by phone instead"})
+    assert r.status_code == 200 and r.json()["info_requests"][0]["status"] == "CANCELLED"
+    assert r.json()["info_requests"][0]["cancel_reason"] == "Asked by phone instead"
+
+
+def test_answer_saved_to_profile_with_provenance_and_market_recleared(client, as_user, journey):
+    """Spec §5: an answer tied to a profile field becomes a SELF_REPORTED fact sourced to the request, and the
+    customer's open demand is re-cleared."""
+    from sqlalchemy import select
+
+    from weza.domains.customer.service import current_facts
+    from weza.domains.matching.models import ClearingRun
+    from weza.domains.opportunity.models import InfoRequest
+    from weza.platform.db import session_scope
+    phone = "0772400014"
+    j, oid, owner = _routed(journey, phone)
+    h = as_user(owner)
+    bad = _ask(client, h, oid, kind="QUESTION", message="Turnover?", fact_key="identity.nin")
+    assert bad.status_code == 422 and bad.json()["error"]["code"] == "FACT_KEY_INVALID"
+    req_id = _ask(client, h, oid, kind="QUESTION", message="What is your current monthly turnover?",
+                  fact_key="business.monthly_turnover").json()["info_requests"][0]["id"]
+    # The same customer has another request still at the options stage (active demand)
+    j2 = journey("I need UGX 8 million for a delivery motorcycle")
+    j2.send(action="confirm")
+    j2.verify(phone)
+    j2.answer_profile({"need.tenor_months": "12 months"})
+    r = client.post(f"/api/v1/me/info-requests/{req_id}/fulfil", headers=j.customer_headers,
+                    json={"response_text": "not sure"})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "ANSWER_INVALID"
+    r = client.post(f"/api/v1/me/info-requests/{req_id}/fulfil", headers=j.customer_headers,
+                    json={"response_text": "15 million"})
+    assert r.status_code == 200, r.text
+    drain()
+    with session_scope() as db:
+        cid = db.get(InfoRequest, req_id).customer_id
+        fact = current_facts(db, cid)["business.monthly_turnover"]
+        assert fact.value["v"] == 15_000_000 and fact.verification_state == "SELF_REPORTED"
+        assert fact.source == "CUSTOMER" and fact.source_channel == "info_request"
+        assert fact.source_ref == f"info_request:{req_id}"
+        runs = db.execute(select(ClearingRun).where(ClearingRun.trigger_event == "InfoRequestFulfilled",
+                                                    ClearingRun.trigger_ref == req_id)).scalars().all()
+        assert runs

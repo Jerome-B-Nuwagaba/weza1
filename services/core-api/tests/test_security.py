@@ -128,15 +128,20 @@ def test_log_redaction():
 
 
 def test_audit_is_append_only(database):
-    """AT-48 / TSD §53: audit rows cannot be updated or deleted."""
+    """AT-48 / TSD §53: audit rows cannot be updated or deleted. Uses its own row so it never passes vacuously."""
+    from weza.domains.trust.service import audit
+    from weza.platform.context import SYSTEM
+    with session_scope() as db:
+        ev = audit(db, SYSTEM, "test.append_only", "test", "x")
+        db.flush()
+        row_id = str(ev.id)
     eng = sa.create_engine(database)
     with pytest.raises(Exception, match="append-only"):
         with eng.begin() as c:
-            c.execute(sa.text("UPDATE trust.audit_event SET action='tampered' WHERE id = (SELECT id FROM "
-                              "trust.audit_event LIMIT 1)"))
+            c.execute(sa.text("UPDATE trust.audit_event SET action='tampered' WHERE id = :id"), {"id": row_id})
     with pytest.raises(Exception, match="append-only"):
         with eng.begin() as c:
-            c.execute(sa.text("DELETE FROM trust.audit_event WHERE id = (SELECT id FROM trust.audit_event LIMIT 1)"))
+            c.execute(sa.text("DELETE FROM trust.audit_event WHERE id = :id"), {"id": row_id})
 
 
 def test_zero_core_integration_boundary():

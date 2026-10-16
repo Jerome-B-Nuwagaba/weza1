@@ -172,6 +172,29 @@ def demand_intelligence(db: Session, institution_id: uuid.UUID | None = None, da
             "note": f"Aggregated WEZA marketplace demand. Groups with fewer than {engine.K_ANON} customers are combined."}
 
 
+def reason_signals(db: Session, institution_id: uuid.UUID, days: int = 90) -> dict:
+    """Why this institution passed on previews (NOT_INTERESTED), for its near-match review. Built only from the
+    non-identifiable preview payload, and every breakdown is k-anonymised."""
+    from weza.domains.opportunity.models import Preview, ReasonSignal
+    from weza.domains.opportunity.service import REASON_SIGNALS
+    since = utcnow() - timedelta(days=days)
+    rows = db.execute(select(ReasonSignal, Preview).join(Preview, Preview.id == ReasonSignal.preview_id).where(
+        ReasonSignal.institution_id == institution_id, ReasonSignal.created_at >= since)).all()
+    by_reason, by_sector, by_region = Counter(), Counter(), Counter()
+    for sig, p in rows:
+        by_reason[REASON_SIGNALS.get(sig.reason, sig.reason)] += 1
+        by_sector[UGANDA["sectors"].get(p.payload.get("sector") or "", "Unspecified")] += 1
+        by_region[p.payload.get("region") or "Unknown"] += 1
+    total = len(rows)
+    return {"window_days": days, "total": total if total >= engine.K_ANON else None,
+            "by_reason": engine.suppress(by_reason) if total >= engine.K_ANON else {},
+            "by_sector": engine.suppress(by_sector) if total >= engine.K_ANON else {},
+            "by_region": engine.suppress(by_region) if total >= engine.K_ANON else {},
+            "note": f"Reasons your team gave for passing on anonymous previews. Shown once there are at least "
+                    f"{engine.K_ANON}; smaller groups are combined. Use it to review appetite — WEZA never changes "
+                    "your rules."}
+
+
 def product_gaps(db: Session, days: int = 90) -> list[dict]:
     """Unmet-demand clusters (L2). Decision support only — never creates products (HUMAN_PRODUCT_DECISION)."""
     since = utcnow() - timedelta(days=days)

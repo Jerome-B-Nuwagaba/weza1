@@ -28,6 +28,7 @@ class AuditEvent(IdMixin, Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     versions: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     correlation_id: Mapped[str] = mapped_column(String(64), default="")
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)  # client IP of the request, when known
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 

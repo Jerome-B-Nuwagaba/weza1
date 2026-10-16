@@ -45,13 +45,16 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str | None = None
     whatsapp_app_secret: str | None = None
     whatsapp_verify_token: str | None = None
-    sms_provider: str = "console"  # console | simulator | africastalking | twilio
+    sms_provider: str = "console"  # console | simulator | africastalking | twilio | infobip
     africastalking_username: str | None = None  # "sandbox" uses the Africa's Talking sandbox
     africastalking_api_key: str | None = None
     africastalking_sender_id: str | None = None  # registered alphanumeric sender, optional
     twilio_account_sid: str | None = None
     twilio_auth_token: str | None = None
     twilio_from: str | None = None  # E.164 number or Messaging Service SID (MG…)
+    infobip_base_url: str | None = None  # your account's API base, e.g. https://xxxxx.api.infobip.com
+    infobip_api_key: str | None = None
+    infobip_sender: str | None = None  # registered sender ID or number, optional
     smtp_url: str | None = None  # smtp://user:pass@host:587 (STARTTLS) or smtps://user:pass@host:465 (TLS)
     smtp_from: str | None = None  # e.g. "WEZA <noreply@weza.africa>"; defaults to the SMTP username
 
@@ -87,6 +90,9 @@ class Settings(BaseSettings):
         elif self.sms_provider == "twilio":
             if not (self.twilio_account_sid and self.twilio_auth_token and self.twilio_from):
                 problems.append("TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM missing")
+        elif self.sms_provider == "infobip":
+            if not (self.infobip_base_url and self.infobip_api_key):
+                problems.append("INFOBIP_BASE_URL / INFOBIP_API_KEY missing")
         else:
             problems.append(f"SMS_PROVIDER '{self.sms_provider}' does not deliver messages")
         if self.malware_scanner != "clamav":

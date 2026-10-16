@@ -13,12 +13,13 @@ from weza.config import get_settings
 from weza.domains.identity.models import Membership, User
 from weza.domains.institution.models import NotificationPref
 from weza.domains.misc_models import ChannelMessage, Notification
+from weza.domains.notification import retry_queue
 from weza.platform import crypto
 from weza.platform.controls import channel_disabled
 from weza.platform.db import utcnow
 
 log = logging.getLogger("weza.notify")
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = retry_queue.MAX_ATTEMPTS
 PRIORITY_ORDER = {"NORMAL": 0, "HIGH": 1, "URGENT": 2}
 
 
@@ -96,7 +97,36 @@ def _twilio_send(phone_e164: str, body: str) -> bool:
         return False
 
 
-SMS_ADAPTERS = {"africastalking": _africastalking_send, "twilio": _twilio_send}
+def _infobip_send(phone_e164: str, body: str) -> bool:
+    s = get_settings()
+    if not (s.infobip_base_url and s.infobip_api_key):
+        log.error("sms_not_configured", extra={"data": {"provider": "infobip"}})
+        return False
+    base = s.infobip_base_url.rstrip("/")
+    if not base.startswith("https://"):
+        base = "https://" + base.removeprefix("http://")
+    msg = {"destinations": [{"to": phone_e164.lstrip("+")}], "text": body}
+    if s.infobip_sender:
+        msg["from"] = s.infobip_sender
+    try:
+        r = httpx.post(f"{base}/sms/2/text/advanced", json={"messages": [msg]}, timeout=10,
+                       headers={"Authorization": f"App {s.infobip_api_key}", "Accept": "application/json"})
+        if r.status_code >= 300:
+            log.warning("sms_failed", extra={"data": {"provider": "infobip", "status": r.status_code}})
+            return False
+        sent = r.json().get("messages") or []
+        # Accepted messages report status group PENDING (queued) or DELIVERED; REJECTED/UNDELIVERABLE are failures.
+        ok = bool(sent) and all((m.get("status") or {}).get("groupName") in ("PENDING", "DELIVERED") for m in sent)
+        if not ok:
+            log.warning("sms_rejected", extra={"data": {"provider": "infobip", "status": [
+                (m.get("status") or {}).get("name") for m in sent]}})
+        return ok
+    except (httpx.HTTPError, ValueError):
+        log.warning("sms_failed", extra={"data": {"provider": "infobip"}})
+        return False
+
+
+SMS_ADAPTERS = {"africastalking": _africastalking_send, "twilio": _twilio_send, "infobip": _infobip_send}
 
 
 def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> bool:
@@ -214,9 +244,9 @@ def deliver(db: Session, note: Notification, user: User | None = None) -> None:
             note.status = "SENT"
         else:
             note.status = "SENT"
-    except Exception as exc:  # noqa: BLE001 — retried by the worker, then dead-lettered
-        note.status = "FAILED" if note.attempts < MAX_ATTEMPTS else "DEAD"
-        note.last_error = str(exc)[:500]
+        note.next_attempt_at = None
+    except Exception as exc:  # noqa: BLE001 — retried with backoff by the worker, then dead-lettered
+        retry_queue.record_failure(note, exc)
 
 
 def _send_email(to: str, subject: str, body: str) -> None:
@@ -246,7 +276,11 @@ def _send_email(to: str, subject: str, body: str) -> None:
 
 
 def retry_sweep(db: Session) -> int:
-    rows = db.execute(select(Notification).where(Notification.status == "FAILED").limit(100)).scalars().all()
+    """Redeliver FAILED rows whose backoff has elapsed."""
+    due = (Notification.status == "FAILED") & (
+        Notification.next_attempt_at.is_(None) | (Notification.next_attempt_at <= utcnow()))
+    rows = db.execute(select(Notification).where(due).order_by(Notification.next_attempt_at)
+                      .limit(100).with_for_update(skip_locked=True)).scalars().all()
     for n in rows:
         deliver(db, n)
     return len(rows)

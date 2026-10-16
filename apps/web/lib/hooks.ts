@@ -51,7 +51,6 @@ export function useAction<A extends unknown[], R>(fn: (...a: A) => Promise<R>) {
         setPending(false);
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [fn],
   );
   return { run, pending, error, setError };

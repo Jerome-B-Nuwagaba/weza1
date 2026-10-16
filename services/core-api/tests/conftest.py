@@ -50,6 +50,17 @@ def database():
     yield url
 
 
+@pytest.fixture(autouse=True)
+def _reset_ip_rate_limits(database):
+    """Every test client shares one IP and the same demo logins, so journey/OTP/login limits would accumulate across
+    the suite. Reset them per test; tests that exercise rate limiting trip them within a single test."""
+    from weza.platform.db import session_scope
+    with session_scope() as db:
+        db.execute(sa.text("DELETE FROM platform.rate_counter WHERE bucket LIKE 'otp:ip:%' "
+                           "OR bucket LIKE 'journey:ip:%' OR bucket LIKE 'login:%'"))
+    yield
+
+
 @pytest.fixture(scope="session")
 def app(database):
     from weza.main import create_app

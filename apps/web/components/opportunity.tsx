@@ -39,6 +39,12 @@ export function TargetBadge({ o }: { o: any }) {
   return <Badge tone={late ? "danger" : soon ? "warning" : "muted"}>First contact {minutesLabel(o.minutes_to_target)}</Badge>;
 }
 
+/** PENDING_INFO is derived from open requests to the customer; the opportunity keeps its state and queue rank. */
+export function AwaitingBadge({ o }: { o: any }) {
+  if (!o.awaiting_customer) return null;
+  return <Badge tone="gold">Waiting for customer{o.open_info_requests > 1 ? ` (${o.open_info_requests})` : ""}</Badge>;
+}
+
 export function OpportunityRow({ o, compact }: { o: any; compact?: boolean }) {
   return (
     <Link href={`/institution/opportunities/${o.id}`} className={cx("flex gap-4 border-b border-line px-4 py-3.5 last:border-0 hover:bg-canvas", o.match_score >= 90 && "bg-gold-100/30")}>
@@ -50,6 +56,7 @@ export function OpportunityRow({ o, compact }: { o: any; compact?: boolean }) {
           <PriorityBadge p={o.priority} />
           <FreshnessBadge f={o.freshness} />
           {o.integrity_hold && <Badge tone="warning">On hold</Badge>}
+          <AwaitingBadge o={o} />
           {o.is_demo && <Badge tone="muted">Demo</Badge>}
         </div>
         <div className="mt-0.5 text-[13px] text-muted">

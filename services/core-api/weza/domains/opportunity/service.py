@@ -28,7 +28,7 @@ from weza.domains.trust.service import audit, record_decision
 from weza.platform.context import SYSTEM, Actor
 from weza.platform.controls import StateMachine, routing_paused
 from weza.platform.db import utcnow
-from weza.platform.errors import Conflict, NotFound, ValidationFailed
+from weza.platform.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from weza.platform.events import emit
 
 TERMINAL = {"CLOSED", "WITHDRAWN", "EXPIRED", "ROUTING_FAILED"}
@@ -57,6 +57,15 @@ DECLINE_REASONS = {
     "CREDIT_HISTORY": "Credit history", "INCOME_TURNOVER": "Income / turnover", "COLLATERAL": "Collateral",
     "CUSTOMER_WITHDREW": "Customer withdrew", "APPETITE_CHANGED": "Appetite changed", "UNREACHABLE": "Customer unreachable",
     "OTHER": "Other",
+}
+
+
+# Why an institution passed on a (non-identifiable) preview — structured so it can feed near-match intelligence.
+REASON_SIGNALS = {
+    "TURNOVER_TOO_LOW": "Turnover / income too low", "HIGH_SECTOR_RISK": "Sector risk too high",
+    "OUTSIDE_REGION": "Outside our region", "TICKET_SIZE": "Amount outside our range",
+    "TENOR": "Repayment period doesn't fit", "INSUFFICIENT_HISTORY": "Not enough trading history",
+    "CAPACITY": "No capacity right now", "OTHER": "Other",
 }
 
 
@@ -468,15 +477,26 @@ def customer_withdraw(db: Session, actor: Actor, opp: Opportunity, reason: str |
 
 INFO_REQUEST_KINDS = ("DOCUMENT", "QUESTION")
 MAX_OPEN_INFO_REQUESTS = 5
+INFO_REQUEST_SM = StateMachine("Information request", {"OPEN": {"FULFILLED", "CANCELLED", "EXPIRED"}})
 # Customers are told WEZA and institutions never ask for these; refuse to relay a message that does.
 _FORBIDDEN_ASKS = re.compile(r"\b(pin|password|passcode|otp|one[- ]time code|verification code)\b", re.I)
 
 
+def _move_request(r: InfoRequest, to: str) -> None:
+    if r.status != "OPEN":
+        raise ValidationFailed("This request is already closed.", code="NOT_OPEN")
+    INFO_REQUEST_SM.check(r.status, to)
+    r.status, r.resolved_at = to, utcnow()
+
+
 def request_info(db: Session, actor: Actor, opp: Opportunity, *, kind: str, message: str,
-                 doc_type: str | None = None, due_in_days: int | None = None) -> InfoRequest:
+                 doc_type: str | None = None, due_in_days: int | None = None,
+                 fact_key: str | None = None) -> InfoRequest:
     """Ask the customer for a document or an answer. Only the people who may see the customer (Disclosure Gateway
-    PERMIT) can ask, and a document can only be requested when DOCUMENTS is in the consent."""
+    PERMIT) can ask, and a document can only be requested when DOCUMENTS is in the consent — anything else is a
+    privacy violation (403). A question may name a profile field; the answer is then saved with provenance."""
     from weza.domains.customer.documents import DOC_TYPES
+    from weza.domains.customer.service import EDITABLE
     policy.require(actor, "opportunity.request_info")
     policy.require_tenant(actor, opp.institution_id)
     if opp.integrity_hold:
@@ -486,18 +506,21 @@ def request_info(db: Session, actor: Actor, opp: Opportunity, *, kind: str, mess
     decision = policy.decide_opportunity_access(db, actor, opp, db.get(Assignment, opp.id),
                                                 db.get(Consent, opp.consent_id), purpose="REQUEST_INFO")
     if decision.result != "PERMIT":
-        raise ValidationFailed("Only the assigned officer or their manager can ask this customer for information, "
-                               "and only while consent is valid.", code="NOT_PERMITTED",
-                               details=[{"reason": decision.reason}])
+        raise Forbidden("Only the assigned officer or their manager can ask this customer for information, and only "
+                        "while consent is valid.", code="PRIVACY_VIOLATION", details=[{"reason": decision.reason}])
     if kind not in INFO_REQUEST_KINDS:
         raise ValidationFailed("Unknown request type.")
     if kind == "DOCUMENT":
         if "documents" not in decision.fields:
-            raise ValidationFailed("The customer did not consent to share documents with you.", code="CONSENT_SCOPE")
+            raise Forbidden("The customer did not consent to share documents with you.", code="PRIVACY_VIOLATION",
+                            details=[{"reason": "consent_scope"}])
         if doc_type not in DOC_TYPES:
             raise ValidationFailed("Choose a document type.")
+        fact_key = None
     else:
         doc_type = None
+        if fact_key and fact_key not in EDITABLE:
+            raise ValidationFailed("That profile field can't be updated from an answer.", code="FACT_KEY_INVALID")
     message = (message or "").strip()
     if not message:
         raise ValidationFailed("Tell the customer what you need and why.", code="MESSAGE_REQUIRED")
@@ -509,14 +532,14 @@ def request_info(db: Session, actor: Actor, opp: Opportunity, *, kind: str, mess
         raise ValidationFailed(f"There are already {open_count} open requests — wait for answers or cancel one.",
                                code="TOO_MANY_OPEN")
     r = InfoRequest(opportunity_id=opp.id, institution_id=opp.institution_id, customer_id=opp.customer_id, kind=kind,
-                    doc_type=doc_type, message=message, requested_by=actor.id,
+                    doc_type=doc_type, fact_key=fact_key or None, message=message, requested_by=actor.id,
                     due_at=utcnow() + timedelta(days=due_in_days or 3))
     db.add(r)
     db.flush()
     _log(db, opp, "INFO_REQUESTED", actor, note=message, data={"request_id": str(r.id), "kind": kind,
-                                                               "doc_type": doc_type})
+                                                               "doc_type": doc_type, "fact_key": r.fact_key})
     audit(db, actor, "info_request.created", "info_request", r.id, institution_id=opp.institution_id,
-          after={"opportunity": str(opp.id), "kind": kind, "doc_type": doc_type})
+          after={"opportunity": str(opp.id), "kind": kind, "doc_type": doc_type, "fact_key": r.fact_key})
     emit(db, "InfoRequested", topic="opportunity", aggregate_type="opportunity", aggregate_id=opp.id,
          institution_id=opp.institution_id, data={"request_id": str(r.id), "kind": kind, "doc_type": doc_type,
                                                   "reference": opp.reference})
@@ -528,9 +551,8 @@ def cancel_info_request(db: Session, actor: Actor, opp: Opportunity, r: InfoRequ
     policy.require_tenant(actor, opp.institution_id)
     if r.opportunity_id != opp.id:
         raise NotFound("Not found.")
-    if r.status != "OPEN":
-        raise ValidationFailed("This request is already closed.", code="NOT_OPEN")
-    r.status, r.resolved_at, r.cancel_reason = "CANCELLED", utcnow(), reason
+    _move_request(r, "CANCELLED")
+    r.cancel_reason = reason
     _log(db, opp, "INFO_REQUEST_CANCELLED", actor, note=reason, data={"request_id": str(r.id)})
     audit(db, actor, "info_request.cancelled", "info_request", r.id, institution_id=opp.institution_id, reason=reason)
     emit(db, "InfoRequestCancelled", topic="opportunity", aggregate_type="opportunity", aggregate_id=opp.id,
@@ -539,7 +561,8 @@ def cancel_info_request(db: Session, actor: Actor, opp: Opportunity, r: InfoRequ
 
 def fulfil_info_request(db: Session, actor: Actor, r: InfoRequest, *, response_text: str | None = None,
                         document_id: uuid.UUID | None = None) -> InfoRequest:
-    """The customer answers. Answers are only accepted while the consent behind the opportunity is still granted."""
+    """The customer answers. Answers are only accepted while the consent behind the opportunity is still granted.
+    An answer to a question tied to a profile field is saved as a self-reported fact sourced to this request."""
     if r.customer_id != actor.id:
         raise NotFound("Not found.")
     if r.status != "OPEN":
@@ -548,10 +571,21 @@ def fulfil_info_request(db: Session, actor: Actor, r: InfoRequest, *, response_t
     consent = db.get(Consent, opp.consent_id)
     if consent is None or consent.status != "GRANTED" or opp.state not in OPEN_STATES:
         raise ValidationFailed("This request is no longer active.", code="NOT_OPEN")
+    fact_saved = False
     if r.kind == "QUESTION":
         response_text = (response_text or "").strip()
         if not response_text:
             raise ValidationFailed("Please type your answer.", code="ANSWER_REQUIRED")
+        if r.fact_key:
+            from weza.domains.customer import service as customer_svc
+            value, hint = customer_svc.parse_fact_value(r.fact_key, response_text)
+            if value is None:
+                raise ValidationFailed(hint or "Please check your answer.", code="ANSWER_INVALID")
+            # A confirmed/verified value from another source is not overwritten (upsert_fact returns the conflict).
+            _, conflict = customer_svc.upsert_fact(db, actor.id, r.fact_key, value, source="CUSTOMER",
+                                                   channel="info_request", confirmed=False,
+                                                   source_ref=f"info_request:{r.id}")
+            fact_saved = conflict is None
         r.response_text = response_text
     else:
         d = db.get(Document, document_id) if document_id else None
@@ -560,13 +594,15 @@ def fulfil_info_request(db: Session, actor: Actor, r: InfoRequest, *, response_t
         if d.pipeline_state not in ("STORED", "CONFIRMED"):
             raise ValidationFailed("That document is still being checked or was rejected.", code="DOCUMENT_NOT_READY")
         r.document_id = d.id
-    r.status, r.resolved_at = "FULFILLED", utcnow()
-    _log(db, opp, "INFO_PROVIDED", actor, data={"request_id": str(r.id), "kind": r.kind})
+    _move_request(r, "FULFILLED")
+    _log(db, opp, "INFO_PROVIDED", actor, data={"request_id": str(r.id), "kind": r.kind, "fact_key": r.fact_key})
     audit(db, actor, "info_request.fulfilled", "info_request", r.id, institution_id=opp.institution_id,
-          after={"kind": r.kind, "document_id": str(r.document_id) if r.document_id else None})
+          after={"kind": r.kind, "document_id": str(r.document_id) if r.document_id else None,
+                 "fact_key": r.fact_key if fact_saved else None})
     emit(db, "InfoRequestFulfilled", topic="opportunity", aggregate_type="opportunity", aggregate_id=opp.id,
          institution_id=opp.institution_id, data={"request_id": str(r.id), "kind": r.kind,
-                                                  "reference": opp.reference})
+                                                  "reference": opp.reference, "fact_saved": fact_saved,
+                                                  "customer_id": str(opp.customer_id)})
     return r
 
 
@@ -575,18 +611,45 @@ def close_open_info_requests(db: Session, opp: Opportunity, reason: str) -> int:
     rows = db.execute(select(InfoRequest).where(InfoRequest.opportunity_id == opp.id,
                                                 InfoRequest.status == "OPEN")).scalars().all()
     for r in rows:
-        r.status, r.resolved_at, r.cancel_reason = "CANCELLED", utcnow(), reason
+        _move_request(r, "CANCELLED")
+        r.cancel_reason = reason
     return len(rows)
+
+
+def info_request_expiry_sweep(db: Session) -> int:
+    """Worker job (every 15 min): open requests past their due date expire, so neither side waits forever."""
+    rows = db.execute(select(InfoRequest).where(InfoRequest.status == "OPEN", InfoRequest.due_at.is_not(None),
+                                                InfoRequest.due_at < utcnow())
+                      .with_for_update(skip_locked=True).limit(200)).scalars().all()
+    for r in rows:
+        opp = db.get(Opportunity, r.opportunity_id)
+        _move_request(r, "EXPIRED")
+        _log(db, opp, "INFO_REQUEST_EXPIRED", SYSTEM, data={"request_id": str(r.id)})
+        audit(db, SYSTEM, "info_request.expired", "info_request", r.id, institution_id=opp.institution_id)
+        emit(db, "InfoRequestExpired", topic="opportunity", aggregate_type="opportunity", aggregate_id=opp.id,
+             institution_id=opp.institution_id, data={"request_id": str(r.id), "kind": r.kind,
+                                                      "reference": opp.reference})
+    return len(rows)
+
+
+def open_info_request_counts(db: Session, opp_ids: list[uuid.UUID]) -> dict[uuid.UUID, int]:
+    if not opp_ids:
+        return {}
+    return dict(db.execute(select(InfoRequest.opportunity_id, func.count()).where(
+        InfoRequest.opportunity_id.in_(opp_ids), InfoRequest.status == "OPEN")
+        .group_by(InfoRequest.opportunity_id)).all())
 
 
 def info_requests(db: Session, opp_id: uuid.UUID, *, include_responses: bool) -> list[dict]:
     from weza.domains.customer.documents import DOC_TYPES
+    from weza.domains.customer.service import FIELD_LABELS
     from weza.domains.identity.models import User
     out = []
     for r in db.execute(select(InfoRequest).where(InfoRequest.opportunity_id == opp_id)
                         .order_by(InfoRequest.created_at)).scalars():
         u = db.get(User, r.requested_by)
-        item = {"id": str(r.id), "kind": r.kind, "doc_type": r.doc_type,
+        item = {"id": str(r.id), "kind": r.kind, "doc_type": r.doc_type, "fact_key": r.fact_key,
+                "fact_label": FIELD_LABELS.get(r.fact_key) if r.fact_key else None,
                 "doc_label": DOC_TYPES.get(r.doc_type, r.doc_type) if r.doc_type else None, "message": r.message,
                 "status": r.status, "requested_by": u.full_name if u else None, "created_at": r.created_at.isoformat(),
                 "due_at": r.due_at.isoformat() if r.due_at else None,
@@ -666,10 +729,12 @@ def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
 
 
 def summary(db: Session, opp: Opportunity, a: Assignment | None = None, product_names: dict | None = None,
-            users: dict | None = None) -> dict:
-    """Non-identifiable opportunity card (safe for any role with opportunity.read_meta)."""
+            users: dict | None = None, open_requests: dict | None = None) -> dict:
+    """Non-identifiable opportunity card (safe for any role with opportunity.read_meta). `open_requests` is a
+    pre-fetched {opportunity_id: count} for list views; otherwise it is looked up."""
     if a is None:
         a = db.get(Assignment, opp.id)
+    pending = (open_requests if open_requests is not None else open_info_request_counts(db, [opp.id])).get(opp.id, 0)
     snap = opp.snapshot or {}
     expl = (snap.get("match") or {}).get("explanation") or {}
     from weza.domains.identity.models import User
@@ -696,15 +761,19 @@ def summary(db: Session, opp: Opportunity, a: Assignment | None = None, product_
         "age_hours": int((now - opp.qualified_at).total_seconds() // 3600),
         "qualified_at": opp.qualified_at.isoformat(), "routed_at": opp.routed_at.isoformat() if opp.routed_at else None,
         "integrity_hold": opp.integrity_hold, "is_demo": opp.is_demo,
-        "next_action": _next_action(opp, a),
+        # PENDING_INFO is derived, not a state: queue rank and service targets are unaffected.
+        "awaiting_customer": pending > 0, "open_info_requests": pending,
+        "next_action": _next_action(opp, a, awaiting_customer=pending > 0),
     }
 
 
-def _next_action(opp: Opportunity, a: Assignment | None) -> str:
+def _next_action(opp: Opportunity, a: Assignment | None, awaiting_customer: bool = False) -> str:
     if opp.integrity_hold:
         return "On hold — WEZA checks in progress"
     if a is None or a.user_id is None:
         return "Assign"
+    if awaiting_customer and opp.state in OPEN_STATES:
+        return "Waiting for customer info"
     return {"ROUTED": "Review & contact", "RECEIVED": "Contact customer", "ASSIGNED": "Contact customer",
             "CONTACTED": "Record progress", "PROCEEDING": "Report outcome", "SUBMITTED_TO_INSTITUTION": "Report outcome",
             "REPORTED_APPROVED": "Report disbursement"}.get(opp.state, "—")
