@@ -30,6 +30,29 @@ def routed_to_lakeside(journey, phone: str):
         return j, str(o.id), owner
 
 
+def opp_for(inst_name: str, assigned: bool = True) -> tuple[str, str | None]:
+    """An open seeded opportunity of the named institution: (opportunity id, assigned user's email or None)."""
+    from sqlalchemy import select
+
+    from weza.domains.consent.models import Consent
+    from weza.domains.identity.models import User
+    from weza.domains.institution.models import Institution
+    from weza.domains.opportunity.models import Assignment, Opportunity
+    from weza.platform.db import session_scope
+    with session_scope() as db:
+        inst = db.execute(select(Institution).where(Institution.display_name == inst_name)).scalar_one()
+        # Deterministic: the oldest seeded opportunity that other tests haven't put on hold or had consent withdrawn
+        q = select(Opportunity, Assignment).join(Assignment, Assignment.opportunity_id == Opportunity.id).join(
+            Consent, Consent.id == Opportunity.consent_id).where(
+            Opportunity.institution_id == inst.id, Opportunity.state.in_(["ASSIGNED", "CONTACTED", "PROCEEDING"]),
+            Opportunity.is_demo.is_(True), Opportunity.integrity_hold.is_(False), Consent.status == "GRANTED"
+        ).order_by(Opportunity.qualified_at, Opportunity.id)
+        q = q.where(Assignment.user_id.is_not(None)) if assigned else q
+        o, a = db.execute(q.limit(1)).first()
+        owner = db.get(User, a.user_id).email if a.user_id else None
+        return str(o.id), owner
+
+
 def login(client, email: str, password: str = "WezaDemo!2026") -> dict:
     r = client.post("/api/v1/auth/login", json={"email": email, "password": password})
     assert r.status_code == 200, r.text

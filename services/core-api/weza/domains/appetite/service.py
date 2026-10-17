@@ -16,7 +16,7 @@ from weza.domains.product.models import Product, ProductVersion
 from weza.domains.product.service import RULE_FIELDS
 from weza.domains.trust import policy
 from weza.domains.trust.service import audit
-from weza.platform.context import Actor
+from weza.platform.context import SYSTEM, Actor
 from weza.platform.db import utcnow
 from weza.platform.errors import NotFound, ValidationFailed
 from weza.platform.events import emit
@@ -142,13 +142,16 @@ def approve(db: Session, actor: Actor, av: AppetiteVersion, approve_: bool, note
         audit(db, actor, "appetite.rejected", "appetite", ap.id, after={"version": av.version}, reason=note)
         return
     av.status, av.approver_id, av.approved_at = "APPROVED", actor.id, utcnow()
-    audit(db, actor, "appetite.approved", "appetite", ap.id, after={"version": av.version}, reason=note)
+    before = {"status": ap.lifecycle_status, "active_version_id": ap.active_version_id}
     inst = db.get(Institution, ap.institution_id)
     if ap.lifecycle_status in ("ACTIVE", "PAUSED") or inst.status == "ACTIVE":
         _make_current(db, actor, ap, av)
     else:
         ap.lifecycle_status = "APPROVED"
         ap.active_version_id = av.id
+    audit(db, actor, "appetite.approved", "appetite", ap.id, before=before,
+          after={"version": av.version, "status": ap.lifecycle_status, "active_version_id": ap.active_version_id},
+          reason=note)
 
 
 def _make_current(db: Session, actor: Actor, ap: Appetite, av: AppetiteVersion) -> None:
@@ -177,8 +180,10 @@ def activate_appetite(db: Session, actor: Actor, ap: Appetite, from_institution_
     av = db.get(AppetiteVersion, ap.active_version_id) if ap.active_version_id else None
     if av is None or av.status != "APPROVED":
         raise ValidationFailed("Approve a version of this appetite first.")
+    before = ap.lifecycle_status
     _make_current(db, actor, ap, av)
-    audit(db, actor, "appetite.activated", "appetite", ap.id, after={"version": av.version})
+    audit(db, actor, "appetite.activated", "appetite", ap.id, before={"status": before},
+          after={"status": ap.lifecycle_status, "version": av.version})
 
 
 def set_lifecycle(db: Session, actor: Actor, ap: Appetite, to: str, reason: str) -> None:
@@ -200,15 +205,33 @@ def set_lifecycle(db: Session, actor: Actor, ap: Appetite, to: str, reason: str)
          aggregate_type="appetite", aggregate_id=ap.id, institution_id=ap.institution_id, data={"status": to})
 
 
+def expiry_sweep(db: Session) -> int:
+    """ACTIVE/PAUSED mandates whose campaign has ended move to EXPIRED (terminal). Matching already ignores them
+    (engine.active_supply); this makes the lifecycle say so and withdraws them from customers' open options."""
+    n = 0
+    for ap, av in db.execute(select(Appetite, AppetiteVersion).join(
+            AppetiteVersion, AppetiteVersion.id == Appetite.active_version_id).where(
+            Appetite.lifecycle_status.in_(["ACTIVE", "PAUSED"]), AppetiteVersion.campaign_to < date.today())).all():
+        before, ap.lifecycle_status = ap.lifecycle_status, "EXPIRED"
+        audit(db, SYSTEM, "appetite.expired", "appetite", ap.id, before={"status": before}, after={"status": "EXPIRED"},
+              reason=f"Campaign ended {av.campaign_to.isoformat()}")
+        emit(db, "AppetitePaused", topic="institution", aggregate_type="appetite", aggregate_id=ap.id,
+             institution_id=ap.institution_id, data={"status": "EXPIRED"})
+        n += 1
+    return n
+
+
 def set_capacity_override(db: Session, actor: Actor, ap: Appetite, override: str | None, reason: str) -> None:
     policy.require(actor, "appetite.edit")
     policy.require_tenant(actor, ap.institution_id)
     if override not in (None, "PAUSED", "LIMITED"):
         raise ValidationFailed("Override must be PAUSED, LIMITED or cleared.")
+    before = {"override": ap.capacity_override, "capacity_state": ap.capacity_state}
     ap.capacity_override = override
     ap.capacity_state = override or "ACTIVE"
     engine.refresh_capacity(db, ap)
-    audit(db, actor, "appetite.capacity_override", "appetite", ap.id, after={"override": override}, reason=reason)
+    audit(db, actor, "appetite.capacity_override", "appetite", ap.id, before=before,
+          after={"override": override, "capacity_state": ap.capacity_state}, reason=reason)
     emit(db, "CapacityChanged", topic="institution", aggregate_type="appetite", aggregate_id=ap.id,
          institution_id=ap.institution_id, data={"to": ap.capacity_state, "manual": True})
 

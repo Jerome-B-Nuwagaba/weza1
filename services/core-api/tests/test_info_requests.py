@@ -168,3 +168,50 @@ def test_answer_saved_to_profile_with_provenance_and_market_recleared(client, as
         runs = db.execute(select(ClearingRun).where(ClearingRun.trigger_event == "InfoRequestFulfilled",
                                                     ClearingRun.trigger_ref == req_id)).scalars().all()
         assert runs
+
+
+def test_requests_stay_within_the_consented_categories(client, as_user, journey):
+    """Consent scope (trust/policy.py): without DOCUMENTS consent no document can be requested; without FINANCIAL consent
+    no financial profile field can be asked for — and the form only offers fields the customer agreed to share."""
+    import uuid
+
+    from weza.domains.consent.models import Consent
+    from weza.domains.opportunity.models import Opportunity
+    from weza.platform.db import session_scope
+    j, oid, owner = _routed(journey, "0772400015")
+    with session_scope() as db:
+        c = db.get(Consent, db.get(Opportunity, uuid.UUID(oid)).consent_id)
+        c.data_categories = ["CONTACT", "PROFILE"]
+    h = as_user(owner)
+    for body in ({"kind": "DOCUMENT", "doc_type": "bank_statement", "message": "Six months of statements please."},
+                 {"kind": "QUESTION", "message": "What is your monthly turnover?", "fact_key": "business.monthly_turnover"}):
+        r = _ask(client, h, oid, **body)
+        assert r.status_code == 403 and r.json()["error"]["code"] == "PRIVACY_VIOLATION", r.text
+    r = _ask(client, h, oid, kind="QUESTION", message="How long has the business traded?", fact_key="business.age_months")
+    assert r.status_code == 201, r.text
+    view = client.get(f"/api/v1/inst/opportunities/{oid}", headers=h).json()
+    assert "business.age_months" in view["fact_fields"] and "business.monthly_turnover" not in view["fact_fields"]
+    assert view["can_request_documents"] is False
+
+
+def test_infected_upload_never_reaches_the_institution(client, as_user, journey):
+    """Quarantine pipeline: a file that fails the malware scan is REJECTED, its bytes are discarded, and it can't be
+    used to answer a request or be downloaded by the institution."""
+    from weza.domains.customer.documents import EICAR
+    from weza.domains.customer.models import DocumentBlob
+    from weza.platform.db import session_scope
+    j, oid, owner = _routed(journey, "0772400016")
+    h = as_user(owner)
+    req = _ask(client, h, oid, kind="DOCUMENT", doc_type="bank_statement",
+               message="Please share your statements.").json()["info_requests"][0]
+    doc = client.post("/api/v1/me/documents", headers=j.customer_headers, data={"doc_type": "bank_statement"},
+                      files={"file": ("statement.pdf", b"%PDF-1.4\n" + EICAR, "application/pdf")}).json()
+    assert doc["state"] == "REJECTED"
+    with session_scope() as db:
+        assert db.get(DocumentBlob, doc["id"]) is None
+    r = client.post(f"/api/v1/me/info-requests/{req['id']}/respond", headers=j.customer_headers,
+                    json={"document_id": doc["id"]})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "DOCUMENT_NOT_READY"
+    assert client.get(f"/api/v1/inst/opportunities/{oid}/documents/{doc['id']}", headers=h).status_code == 404
+    view = client.get(f"/api/v1/inst/opportunities/{oid}", headers=h).json()
+    assert doc["id"] not in {d["id"] for d in view["customer"].get("documents", [])}

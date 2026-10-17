@@ -599,9 +599,7 @@ def _feed_query(db: Session, actor: Actor, view: str | None, state: str | None, 
                 min_match: int | None, sector: str | None, q: str | None):
     query = select(Opportunity).where(Opportunity.institution_id == actor.institution_id)
     query = query.outerjoin(Assignment, Assignment.opportunity_id == Opportunity.id)
-    only_officer = "OFFICER" in actor.roles and not actor.roles & {"MANAGER", "INST_ADMIN", "EXECUTIVE", "BUSINESS",
-                                                                  "CREDIT_RISK", "COMPLIANCE"}
-    if only_officer or view == "mine":
+    if policy.officer_only(actor) or view == "mine":
         query = query.where(Assignment.user_id == actor.id)
     if view == "unassigned":
         query = query.where(or_(Assignment.user_id.is_(None), Assignment.opportunity_id.is_(None)),
@@ -679,7 +677,8 @@ def opportunity(opp_id: uuid.UUID, actor: Actor = A, db: Session = DB):
     out["can_assign"] = policy.has(actor, "opportunity.assign")
     out["doc_types"] = docs.DOC_TYPES
     from weza.domains.customer.service import EDITABLE, FIELD_LABELS
-    out["fact_fields"] = {k: FIELD_LABELS[k] for k in sorted(EDITABLE)}
+    consented = set(out["consent"]["categories"] or [])
+    out["fact_fields"] = {k: FIELD_LABELS[k] for k in sorted(EDITABLE) if policy.fact_category(k) in consented}
     out["members"] = [m for m in opp_svc.team_members(db, actor.institution_id) if "OFFICER" in m["roles"]
                       or "MANAGER" in m["roles"]]
     return out
