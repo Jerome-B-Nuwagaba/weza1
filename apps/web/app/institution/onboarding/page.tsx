@@ -38,9 +38,12 @@ export default function Onboarding() {
         <ol className="divide-y divide-line">
           {o.items.map((i: any) => (
             <li key={i.key} className="flex items-center justify-between gap-3 py-3">
-              <span className="flex items-center gap-3 text-[14.5px]">
+              <span className="flex items-start gap-3 text-[14.5px]">
                 {i.done ? <CheckCircle2 className="h-5 w-5 text-success" /> : <Circle className="h-5 w-5 text-muted" />}
-                <span className={i.done ? "text-ink" : "font-medium text-ink"}>{i.label}</span>
+                <span>
+                  <span className={i.done ? "text-ink" : "font-medium text-ink"}>{i.label}</span>
+                  {!i.done && i.who && <span className="mt-0.5 block text-[12.5px] text-muted">{i.who}</span>}
+                </span>
               </span>
               {!i.done && <Link href={i.link} className="text-[13px] font-medium text-blue-800 hover:underline">Set up</Link>}
             </li>

@@ -3,7 +3,8 @@ Domain event → Notification policy → Recipient resolution → Channel select
 
 import logging
 import uuid
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy import select
@@ -19,11 +20,54 @@ from weza.platform.controls import channel_disabled
 from weza.platform.db import utcnow
 
 log = logging.getLogger("weza.notify")
-MAX_ATTEMPTS = retry_queue.MAX_ATTEMPTS
+MAX_ATTEMPTS = retry_queue.MAX_ATTEMPTS  # staff notifications (retry_queue: backoff, then dead-letter)
+# Customer WhatsApp messages that failed with a retryable Meta error (retry_failed_channel_messages)
+RETRY_BACKOFF_SECONDS = 60  # multiplied by the attempt number
+RETRY_MAX_RESENDS = 2
+RETRY_WINDOW_MINUTES = 30  # conversation messages go stale; never replay them hours later
 PRIORITY_ORDER = {"NORMAL": 0, "HIGH": 1, "URGENT": 2}
 
 
 # ------------------------------------------------------------------ customer channel adapters
+
+
+@dataclass
+class SendResult:
+    ok: bool
+    provider_message_id: str | None = None
+    error_code: str | None = None
+    retryable: bool = False
+    # WhatsApp only: auth | config | rate_limit | window | recipient | invalid | server | network | uncertain
+    category: str = ""
+
+
+# Cloud API error codes → category (developers.facebook.com/docs/whatsapp/cloud-api/support/error-codes).
+# Retrying is only safe where Meta did not accept the message; "uncertain" is never retried automatically.
+_AUTH_CODES = {0, 3, 10, 102, 190} | set(range(200, 300))  # expired/invalid token, missing permission
+_CONFIG_CODES = {368, 131031, 131045, 133010}  # number blocked/locked, certificate, number not registered
+_RATE_CODES = {4, 80007, 130429, 131048, 131056}  # app / account / throughput / spam / pair rate limits
+_WINDOW_CODES = {131047}  # more than 24 h since the customer's last message: needs an approved template
+_RECIPIENT_CODES = {131021, 131026, 131030}  # undeliverable / not on the test-number allowed list / self
+_SERVER_CODES = {1, 2, 131000, 131016, 133004}
+_RETRYABLE = {"rate_limit", "server", "network"}
+
+
+def classify_graph_error(http_status: int, code: int | str | None) -> str:
+    try:
+        c = int(code) if code is not None else None
+    except (TypeError, ValueError):
+        c = None
+    for codes, category in ((_AUTH_CODES, "auth"), (_CONFIG_CODES, "config"), (_RATE_CODES, "rate_limit"),
+                            (_WINDOW_CODES, "window"), (_RECIPIENT_CODES, "recipient"), (_SERVER_CODES, "server")):
+        if c is not None and c in codes:
+            return category
+    if http_status == 429:
+        return "rate_limit"
+    if http_status >= 500:
+        return "server"
+    if http_status in (401, 403):
+        return "auth"
+    return "invalid"
 
 
 def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: str = "sms", kind: str = "info",
@@ -36,19 +80,56 @@ def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: s
         return False
     provider = "simulator"
     status = "SENT"
-    if channel == "whatsapp" and s.whatsapp_token and s.whatsapp_phone_number_id:
+    wamid = error_code = None
+    if channel == "whatsapp" and s.whatsapp_send_ready:
         provider = "whatsapp_cloud"
-        status = "SENT" if _whatsapp_send(phone_e164, body, payload) else "FAILED"
-    elif channel == "sms" and s.sms_provider in SMS_ADAPTERS:
-        provider = s.sms_provider
+        res = _whatsapp_send(phone_e164, body, payload)
+        # SENT = Meta accepted the request (not delivery: that arrives later as a status webhook).
+        # UNCERTAIN = the request may have reached Meta; never re-sent automatically, to avoid duplicates.
+        status = "SENT" if res.ok else "UNCERTAIN" if res.category == "uncertain" else "FAILED"
+        wamid, error_code = res.provider_message_id, res.error_code
+        if res.ok or res.category == "uncertain":  # lets callers know a retry could now duplicate a reply
+            db.info["wa_submitted"] = db.info.get("wa_submitted", 0) + 1
+        if not res.ok:  # names/flags only — never the number or the message text
+            log.warning("whatsapp_send_failed", extra={"data": {"err": res.error_code, "category": res.category,
+                                                                "retryable": res.retryable}})
+            if res.category in ("auth", "config"):
+                _alert_whatsapp_unavailable(db, res)
+            if res.retryable:
+                payload = {**(payload or {}), "_retry_to": _enc_phone(phone_e164), "_retries": 0,
+                           "_retry_after": (utcnow() + timedelta(seconds=RETRY_BACKOFF_SECONDS)).isoformat()}
+    elif channel == "sms" and s.sms_provider_name in SMS_ADAPTERS:
+        provider = s.sms_provider_name  # built-in gateways: Africa's Talking, Twilio, Infobip
         status = "SENT" if SMS_ADAPTERS[provider](phone_e164, body) else "FAILED"
-    elif channel == "sms" and s.sms_provider not in ("console", "simulator"):
-        log.error("sms_provider_unknown", extra={"data": {"provider": s.sms_provider}})
-        provider, status = s.sms_provider[:20], "FAILED"
-    # Only the simulator inbox needs the text of a one-time code; once a real provider delivers it, never keep it.
-    stored = body if provider == "simulator" or kind != "otp" else "[one-time code redacted]"
-    db.add(ChannelMessage(channel=channel, to_index=crypto.blind_index("phone", phone_e164), body=stored,
-                          payload={"kind": kind, **(payload or {})}, provider=provider, status=status))
+        if status == "FAILED":
+            error_code = "PROVIDER_ERROR"
+    elif channel == "sms" and s.sms_provider_name != "console":
+        # Any other provider (incl. SMS_PROVIDER=whatsapp) goes through the provider-agnostic slot in notification/sms.py.
+        from weza.domains.notification import sms
+        sender, why = sms.resolve(s)
+        provider = s.sms_provider_name
+        if sender is None and not s.is_production and s.otp_delivery == "display":
+            # Dev convenience: a half-configured provider must not block local journeys — show it in the simulator.
+            log.warning("sms_provider_unavailable_dev_fallback", extra={"data": {"why": why}})
+            provider = "simulator"
+        elif sender is None:
+            status, error_code = "FAILED", why
+            log.error("sms_provider_unavailable", extra={"data": {"provider": provider, "why": why}})
+        else:
+            try:
+                res = sender.send(phone_e164, body)
+            except Exception:  # noqa: BLE001 — a provider bug must not break the journey
+                log.exception("sms_send_crashed")
+                res = SendResult(False, error_code="PROVIDER_ERROR")
+            status = "SENT" if res.ok else "FAILED"
+            wamid, error_code = res.provider_message_id, res.error_code
+            if not res.ok:
+                log.warning("sms_send_failed", extra={"data": {"err": res.error_code}})
+    if kind == "otp" and provider != "simulator":
+        body = "[one-time code redacted]"  # only the simulator inbox needs it; never keep a real one-time code
+    db.add(ChannelMessage(channel=channel, to_index=crypto.blind_index("phone", phone_e164), body=body,
+                          payload={"kind": kind, **(payload or {})}, provider=provider, status=status,
+                          provider_message_id=wamid, error_code=error_code))
     return status == "SENT"
 
 
@@ -129,9 +210,66 @@ def _infobip_send(phone_e164: str, body: str) -> bool:
 SMS_ADAPTERS = {"africastalking": _africastalking_send, "twilio": _twilio_send, "infobip": _infobip_send}
 
 
-def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> bool:
+def _alert_whatsapp_unavailable(db: Session, res: SendResult) -> None:
+    """Token expired / permission missing / number not usable: every reply will fail until someone fixes the Meta
+    setup, so raise one (deduplicated) operations review item instead of failing silently."""
+    from weza.domains.integrity.service import add_review
+    log.error("whatsapp_unavailable", extra={"data": {"err": res.error_code, "category": res.category}})
+    add_review(db, "WHATSAPP_UNAVAILABLE", f"WhatsApp sending is failing ({res.category}, Meta error {res.error_code})."
+               " Check WHATSAPP_TOKEN, its permissions and the phone number status in Meta.", "channel", "whatsapp",
+               severity="HIGH", detail={"error_code": res.error_code, "category": res.category},
+               dedupe_key="WHATSAPP_UNAVAILABLE")
+
+
+def _enc_phone(phone_e164: str) -> str:
+    from weza.domains.need.journey import _enc
+    return _enc(phone_e164)
+
+
+def _dec_phone(token: str) -> str:
+    from weza.domains.need.journey import _dec
+    return _dec(token)
+
+
+def retry_failed_channel_messages(db: Session, now: datetime | None = None) -> int:
+    """Re-send recent WhatsApp messages that failed with a retryable error (rate limit, Meta server error, or a
+    connection that never reached Meta), a couple of times. Uncertain outcomes are never re-sent."""
+    now = now or utcnow()
     s = get_settings()
-    url = f"https://graph.facebook.com/v21.0/{s.whatsapp_phone_number_id}/messages"
+    if not s.whatsapp_send_ready:
+        return 0
+    rows = db.execute(select(ChannelMessage).where(
+        ChannelMessage.provider == "whatsapp_cloud", ChannelMessage.status == "FAILED",
+        ChannelMessage.payload.has_key("_retry_to"),  # noqa: W601 — JSONB key test, not dict.has_key
+        ChannelMessage.created_at >= now - timedelta(minutes=RETRY_WINDOW_MINUTES))
+        .order_by(ChannelMessage.created_at).limit(50).with_for_update(skip_locked=True)).scalars().all()
+    n = 0
+    for m in rows:
+        meta = m.payload
+        if datetime.fromisoformat(meta["_retry_after"]) > now:
+            continue
+        n += 1
+        res = _whatsapp_send(_dec_phone(meta["_retry_to"]), m.body, meta)
+        clean = {k: v for k, v in meta.items() if not k.startswith("_retry")}
+        if res.ok:
+            m.status, m.provider_message_id, m.error_code, m.payload = "SENT", res.provider_message_id, None, clean
+        else:
+            m.error_code = res.error_code
+            if res.category == "uncertain":
+                m.status = "UNCERTAIN"
+            elif res.category in ("auth", "config"):
+                _alert_whatsapp_unavailable(db, res)
+            tries = meta["_retries"] + 1
+            if res.retryable and tries < RETRY_MAX_RESENDS:
+                m.payload = {**meta, "_retries": tries,
+                             "_retry_after": (now + timedelta(seconds=RETRY_BACKOFF_SECONDS * (tries + 1))).isoformat()}
+            else:
+                m.payload = clean
+                log.warning("whatsapp_retry_gave_up", extra={"data": {"err": res.error_code}})
+    return n
+
+
+def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> SendResult:
     buttons = (payload or {}).get("quick_replies") or []
     if buttons and len(buttons) <= 3:
         msg = {"messaging_product": "whatsapp", "to": phone_e164.lstrip("+"), "type": "interactive",
@@ -144,11 +282,92 @@ def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> bool:
             body = body + "\n\nReply with: " + " / ".join(b["label"] for b in buttons)
         msg = {"messaging_product": "whatsapp", "to": phone_e164.lstrip("+"), "type": "text",
                "text": {"body": body[:4096]}}
+    return _graph_post(msg)
+
+
+def graph_call(method: str, path: str, *, token: str | None = None, params: dict | None = None,
+               body: dict | None = None) -> tuple[int, dict]:
+    """Graph API request for WhatsApp account set-up (Embedded Signup onboarding). Returns (HTTP status, JSON body);
+    status 0 means the request failed on the network. Callers must never log the token or the response body."""
+    url = f"https://graph.facebook.com/{get_settings().graph_api_version}/{path.lstrip('/')}"
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        if method == "GET":
+            r = httpx.get(url, params=params, headers=headers, timeout=15)
+        else:
+            r = httpx.post(url, params=params, json=body, headers=headers, timeout=15)
+    except httpx.HTTPError:
+        return 0, {}
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    return r.status_code, data if isinstance(data, dict) else {}
+
+
+def http_get(url: str, headers: dict, timeout: float) -> httpx.Response:
+    """WhatsApp media download. Outbound HTTP lives only in this module (zero-core-integration boundary test)."""
+    return httpx.get(url, headers=headers, timeout=timeout)
+
+
+def _graph_post(msg: dict) -> SendResult:
+    s = get_settings()
+    url = f"https://graph.facebook.com/{s.graph_api_version}/{s.whatsapp_phone_number_id}/messages"
     try:
         r = httpx.post(url, json=msg, headers={"Authorization": f"Bearer {s.whatsapp_token}"}, timeout=10)
-        return r.status_code < 300
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+        # The request never left this server: safe to retry.
+        return SendResult(False, error_code="NETWORK", retryable=True, category="network")
     except httpx.HTTPError:
+        # Read/write timeout or dropped connection after sending: Meta may have accepted it. Don't resend.
+        return SendResult(False, error_code="UNCERTAIN", category="uncertain")
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if r.status_code < 300:
+        wamid = ((data.get("messages") or [{}])[0] or {}).get("id")
+        return SendResult(True, provider_message_id=wamid)
+    err = data.get("error") or {}
+    if not isinstance(err, dict):
+        err = {}
+    code = str(err.get("code") or f"HTTP_{r.status_code}")[:32]
+    category = classify_graph_error(r.status_code, err.get("code"))
+    return SendResult(False, error_code=code, retryable=category in _RETRYABLE, category=category)
+
+
+# Delivery-status callbacks (Cloud API `statuses`): forward-only so retried/out-of-order callbacks can't regress.
+_STATUS_RANK = {"sent": 1, "failed": 2, "delivered": 3, "read": 4}
+
+
+def apply_delivery_status(db: Session, wamid: str, status: str, at: datetime | None = None,
+                          error_code: str | None = None) -> bool:
+    """Record a provider delivery status on the outbound ChannelMessage. Returns True if it changed anything."""
+    new = _STATUS_RANK.get(status)
+    if not wamid or new is None:
         return False
+    msg = db.execute(select(ChannelMessage).where(ChannelMessage.provider_message_id == wamid)
+                     .with_for_update()).scalars().first()
+    if msg is None or new <= _STATUS_RANK.get(msg.provider_status or "", 0):
+        return False
+    msg.provider_status = status
+    msg.status_at = at or utcnow()
+    if status == "failed":
+        msg.status = "FAILED"
+        msg.error_code = (error_code or "")[:32] or None
+    else:
+        msg.status = "SENT"
+        msg.error_code = None
+    return True
+
+
+def parse_status_time(ts) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(int(ts), UTC)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 # ------------------------------------------------------------------ staff notifications
@@ -229,7 +448,9 @@ def notify_customer(db: Session, customer_id: uuid.UUID, event_type: str, *, tit
                         status="DELIVERED"))
     phone = vault_read(db, cust.vault_token).get("phone")
     if phone:
-        text = f"WEZA: {body}" + (f" {get_settings().public_web_url}{link}" if link else "")
+        # WhatsApp customers live in the chat (no web session): no web link, just tell them where to reply.
+        text = (f"WEZA: {body} Reply here any time." if ch == "whatsapp"
+                else f"WEZA: {body}" + (f" {get_settings().public_web_url}{link}" if link else ""))
         send_customer_message(db, phone, text, channel=ch, kind=event_type, payload={"quick_replies": quick_replies or []})
 
 

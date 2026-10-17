@@ -159,8 +159,8 @@ def test_audit_is_append_only(database):
 
 
 def test_zero_core_integration_boundary():
-    """AT-49 / FR-039: the only outbound HTTP calls are the customer channels (WhatsApp, SMS), the AI provider and the
-    identity registry used to verify applicants (gnuGRID) — there is no connector to any institution core banking,
+    """AT-49 / FR-039: the only outbound HTTP calls are the customer channels (WhatsApp, SMS), the AI provider, the
+    identity registry used to verify applicants and the credit bureau (gnuGRID) — there is no connector to any institution core banking,
     CRM, LOS or database."""
     root = Path(__file__).resolve().parents[1] / "weza"
     offenders = []
@@ -168,7 +168,8 @@ def test_zero_core_integration_boundary():
         src = f.read_text(encoding="utf8")
         if re.search(r"httpx\.(get|post|put|request|Client)|requests\.|urllib\.request", src):
             offenders.append(f.relative_to(root).as_posix())
-    assert sorted(offenders) == ["domains/notification/service.py", "domains/verification/adapters.py"], offenders
+    assert sorted(offenders) == ["domains/notification/service.py", "domains/verification/adapters.py",
+                                 "integrations/gnugrid.py"], offenders
     assert "graph.facebook.com" in (root / "domains/notification/service.py").read_text(encoding="utf8")
 
 
@@ -179,8 +180,10 @@ def test_every_network_touchpoint_is_known():
     allowed = {
         "platform/db.py": "WEZA's own PostgreSQL",
         "domains/customer/documents.py": "ClamAV malware scanner (clamd socket)",
-        "domains/notification/service.py": "customer channels: Meta WhatsApp, Infobip SMS",
+        "domains/notification/service.py": "customer channels: Meta WhatsApp, SMS gateways",
+        "domains/notification/whatsapp_media.py": "customer channel: media customers send on WhatsApp (Meta Graph)",
         "domains/verification/adapters.py": "identity registry (gnuGRID)",
+        "integrations/gnugrid.py": "credit bureau (gnuGRID CRB), Just-In-Time at lender selection",
         "domains/intelligence/ai.py": "AI provider (Anthropic)",
     }
     pattern = (r"\bsocket\.(create_connection|socket)\b|create_engine\(|\bpsycopg2?\.connect|\b(pyodbc|pymssql|cx_Oracle|"
@@ -188,3 +191,14 @@ def test_every_network_touchpoint_is_known():
                r"\bimport (anthropic|openai|httpx|requests|aiohttp)\b|urllib\.request|httpx\.")
     found = {f.relative_to(root).as_posix() for f in root.rglob("*.py") if re.search(pattern, f.read_text(encoding="utf8"))}
     assert found <= set(allowed), f"unreviewed network access in {sorted(found - set(allowed))}"
+
+
+def test_tests_never_use_real_channel_credentials_or_network():
+    """A developer's .env may hold real Meta credentials: the harness blanks them and blocks outbound HTTP."""
+    import httpx
+
+    from weza.config import get_settings
+    s = get_settings()
+    assert not (s.whatsapp_send_ready or s.whatsapp_webhook_ready or s.sms_ready)
+    with pytest.raises(AssertionError, match="real network call"):
+        httpx.post("https://graph.facebook.com/v25.0/x/messages", json={})

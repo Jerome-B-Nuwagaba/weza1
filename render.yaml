@@ -50,3 +50,9 @@ services:
         sync: false
       - key: WHATSAPP_VERIFY_TOKEN
         sync: false
+      - key: WHATSAPP_BUSINESS_NUMBER   # digits with country code; powers the website's "Continue on WhatsApp" link
+        sync: false
+      - key: BOOTSTRAP_ADMIN_EMAIL      # real (non-demo) environments: first WEZA administrator, created once on start
+        sync: false
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false

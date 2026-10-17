@@ -42,7 +42,7 @@ class Fact(IdMixin, Base):
     source_channel: Mapped[str] = mapped_column(String(16), default="web")
     source_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    verification_state: Mapped[str] = mapped_column(String(16), default="SELF_REPORTED")
+    verification_state: Mapped[str] = mapped_column(String(24), default="SELF_REPORTED")
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     fresh_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
