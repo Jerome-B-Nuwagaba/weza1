@@ -73,6 +73,12 @@ def require(actor: Actor, permission: str) -> None:
                         details=[{"permission": permission}])
 
 
+def officer_only(actor: Actor) -> bool:
+    """A relationship officer with no broader institution role: sees and works only their assigned opportunities."""
+    return "OFFICER" in actor.roles and not actor.roles & {"MANAGER", "INST_ADMIN", "EXECUTIVE", "BUSINESS",
+                                                           "CREDIT_RISK", "COMPLIANCE"}
+
+
 def require_tenant(actor: Actor, institution_id: uuid.UUID) -> None:
     """Cross-tenant requests return 404 so object existence is not leaked (AT-SEC-01)."""
     if actor.is_weza:
@@ -97,6 +103,13 @@ CATEGORY_FIELDS = {
     "DOCUMENTS": ["documents"],
 }
 DEFAULT_CATEGORIES = ["CONTACT", "IDENTITY", "PROFILE", "FINANCIAL", "DOCUMENTS"]
+FINANCIAL_FACTS = {"business.monthly_turnover", "employment.monthly_net_income", "farm.annual_income",
+                   "finance.monthly_repayments"}
+
+
+def fact_category(fact_key: str) -> str:
+    """Consent category an institution needs before asking a customer for this profile field."""
+    return "FINANCIAL" if fact_key in FINANCIAL_FACTS else "PROFILE"
 
 
 @dataclass

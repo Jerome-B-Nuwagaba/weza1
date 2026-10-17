@@ -1,17 +1,19 @@
 """Trust plane: tenant isolation, disclosure gateway, preview allow-list, redaction, audit, error contract
 (AT-SEC-01…06, AT-31, AT-48, AT-49, AT-API-01)."""
 
+import json
 import logging
 import re
+import uuid
 from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy import select
 
+from tests.helpers import opp_for
 from weza.consumers import preview_payload
 from weza.domains.identity.models import User
-from weza.domains.institution.models import Institution
 from weza.domains.matching.models import Match
 from weza.domains.need.models import FinancialNeed
 from weza.domains.opportunity.models import Assignment, Opportunity
@@ -19,20 +21,9 @@ from weza.platform.db import session_scope
 from weza.platform.logging import JsonFormatter, redact
 
 
-def _opp_for(inst_name: str, assigned: bool = True) -> tuple[str, str | None]:
-    with session_scope() as db:
-        inst = db.execute(select(Institution).where(Institution.display_name == inst_name)).scalar_one()
-        q = select(Opportunity, Assignment).join(Assignment, Assignment.opportunity_id == Opportunity.id).where(
-            Opportunity.institution_id == inst.id, Opportunity.state.in_(["ASSIGNED", "CONTACTED", "PROCEEDING"]))
-        q = q.where(Assignment.user_id.is_not(None)) if assigned else q
-        o, a = db.execute(q.limit(1)).first()
-        owner = db.get(User, a.user_id).email if a.user_id else None
-        return str(o.id), owner
-
-
 def test_cross_tenant_access_is_404(client, as_user):
     """AT-SEC-01: Institution A cannot see that Institution B's opportunity exists."""
-    opp_id, _ = _opp_for("Pearl SACCO")
+    opp_id, _ = opp_for("Pearl SACCO")
     r = client.get(f"/api/v1/inst/opportunities/{opp_id}", headers=as_user("manager@lakeside.demo"))
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "NOT_FOUND"
@@ -40,15 +31,16 @@ def test_cross_tenant_access_is_404(client, as_user):
 
 def test_assigned_officer_sees_consented_fields_unassigned_officer_does_not(client, as_user):
     """AT-SEC-02 / TSD §29: disclosure depends on relationship + consent, enforced server-side."""
-    opp_id, owner = _opp_for("Lakeside Bank")
+    opp_id, owner = opp_for("Lakeside Bank")
     r = client.get(f"/api/v1/inst/opportunities/{opp_id}", headers=as_user(owner))
     assert r.status_code == 200
     cust = r.json()["customer"]
-    assert cust["restricted"] is False and cust["fields"].get("phone", "").startswith("+256")
+    assert cust["restricted"] is False, cust
+    assert cust["fields"].get("phone", "").startswith("+256")
+    # An officer sees only their own assigned work: a colleague's opportunity is "not found", like another tenant's
     other = next(e for e in ("officer@lakeside.demo", "officer2@lakeside.demo", "asset@lakeside.demo") if e != owner)
     r2 = client.get(f"/api/v1/inst/opportunities/{opp_id}", headers=as_user(other))
-    assert r2.status_code == 200
-    assert r2.json()["customer"]["restricted"] is True and r2.json()["customer"]["fields"] == {}
+    assert r2.status_code == 404
     # Executives get opportunity intelligence but never identity
     r3 = client.get(f"/api/v1/inst/opportunities/{opp_id}", headers=as_user("exec@lakeside.demo"))
     assert r3.json()["customer"]["fields"] == {}
@@ -78,6 +70,23 @@ def test_consent_withdrawal_hides_identity(client, as_user, journey):
     assert r.status_code == 200
     after = client.get(f"/api/v1/inst/opportunities/{oid}", headers=h).json()
     assert after["customer"]["fields"] == {} and after["customer"]["restriction_reason"] == "consent_not_valid"
+
+
+def test_customers_own_words_are_shown_only_with_permitted_disclosure(client, as_user, journey):
+    """The free-text purpose may name the customer: feed cards and restricted views show only the category label."""
+    from tests.helpers import routed_to_lakeside
+    _, oid, owner = routed_to_lakeside(journey, "0772470002")
+    words = "restock Nakato Pharmacy, Plot 12 Kampala Road, call 0772470002"
+    with session_scope() as db:
+        o = db.get(Opportunity, uuid.UUID(oid))
+        o.snapshot = {**o.snapshot, "need": {**o.snapshot["need"], "purpose": words}}
+    permitted = client.get(f"/api/v1/inst/opportunities/{oid}", headers=as_user(owner)).json()
+    assert permitted["customer"]["restricted"] is False and permitted["snapshot"]["need"]["purpose"] == words
+    restricted = client.get(f"/api/v1/inst/opportunities/{oid}", headers=as_user("exec@lakeside.demo"))
+    assert restricted.status_code == 200 and restricted.json()["customer"]["restricted"] is True
+    feed = client.get("/api/v1/inst/opportunities", headers=as_user("manager@lakeside.demo")).text
+    for body in (restricted.text, feed, json.dumps(permitted["need"])):
+        assert "Nakato" not in body and "0772470002" not in body and "Kampala Road" not in body
 
 
 def test_preview_payload_is_non_identifiable():
@@ -142,6 +151,11 @@ def test_audit_is_append_only(database):
     with pytest.raises(Exception, match="append-only"):
         with eng.begin() as c:
             c.execute(sa.text("DELETE FROM trust.audit_event WHERE id = :id"), {"id": row_id})
+    with pytest.raises(Exception, match="append-only"):
+        with eng.begin() as c:
+            c.execute(sa.text("TRUNCATE trust.audit_event"))
+    with eng.begin() as c:
+        assert c.execute(sa.text("SELECT count(*) FROM trust.audit_event WHERE id = :id"), {"id": row_id}).scalar() == 1
 
 
 def test_zero_core_integration_boundary():
@@ -156,3 +170,21 @@ def test_zero_core_integration_boundary():
             offenders.append(f.relative_to(root).as_posix())
     assert sorted(offenders) == ["domains/notification/service.py", "domains/verification/adapters.py"], offenders
     assert "graph.facebook.com" in (root / "domains/notification/service.py").read_text(encoding="utf8")
+
+
+def test_every_network_touchpoint_is_known():
+    """AT-49, wider net: any socket, database driver/engine, mail or SDK client outside this allow-list fails, so a
+    connector to an institution's core banking, LOS or CRM can't slip in without a deliberate review."""
+    root = Path(__file__).resolve().parents[1] / "weza"
+    allowed = {
+        "platform/db.py": "WEZA's own PostgreSQL",
+        "domains/customer/documents.py": "ClamAV malware scanner (clamd socket)",
+        "domains/notification/service.py": "customer channels: Meta WhatsApp, Infobip SMS",
+        "domains/verification/adapters.py": "identity registry (gnuGRID)",
+        "domains/intelligence/ai.py": "AI provider (Anthropic)",
+    }
+    pattern = (r"\bsocket\.(create_connection|socket)\b|create_engine\(|\bpsycopg2?\.connect|\b(pyodbc|pymssql|cx_Oracle|"
+               r"oracledb|mysql\.connector|pymysql|pymongo|ldap3|zeep|paramiko|ftplib|smtplib|grpc)\b|"
+               r"\bimport (anthropic|openai|httpx|requests|aiohttp)\b|urllib\.request|httpx\.")
+    found = {f.relative_to(root).as_posix() for f in root.rglob("*.py") if re.search(pattern, f.read_text(encoding="utf8"))}
+    assert found <= set(allowed), f"unreviewed network access in {sorted(found - set(allowed))}"

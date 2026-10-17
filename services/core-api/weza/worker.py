@@ -14,6 +14,7 @@ from sqlalchemy import select
 import weza.consumers  # noqa: F401 — registers consumers
 import weza.domains.need.journey  # noqa: F401 — registers graphs
 from weza.config import get_settings
+from weza.domains.appetite import service as appetite_svc
 from weza.domains.intelligence import insights
 from weza.domains.matching import engine
 from weza.domains.matching.models import WaitingEntry
@@ -105,6 +106,7 @@ JOBS: list[tuple[str, float, Callable[[], object]]] = [
     ("notify_retry", 60, _sweep(notify.retry_sweep)),
     ("notify_escalation", 60, _sweep(notify.escalation_sweep)),
     ("waiting_room", 600, waiting_room_sweep),
+    ("appetite_expiry", 3600, _sweep(appetite_svc.expiry_sweep)),
     ("dead_letters", 120, dead_letter_alerts),
     ("hourly_clearing", 3600, hourly_clearing),
     ("nightly", 86400, nightly),

@@ -21,6 +21,7 @@ from weza.domains.misc_models import AiCallLog, Notification, ReviewItem
 from weza.domains.need.models import FinancialNeed
 from weza.domains.opportunity.models import Assignment, Insight, Opportunity, Outcome
 from weza.domains.product.models import Product
+from weza.domains.trust import policy
 from weza.platform.context import Actor
 from weza.platform.db import utcnow
 from weza.platform.models import EventDelivery, GraphInstance
@@ -30,7 +31,7 @@ PROGRESSING = {"PROCEEDING", "SUBMITTED_TO_INSTITUTION"}
 
 def _scope(db: Session, actor: Actor):
     q = select(Opportunity).where(Opportunity.institution_id == actor.institution_id)
-    if "OFFICER" in actor.roles and not actor.roles & {"MANAGER", "INST_ADMIN", "EXECUTIVE", "BUSINESS", "CREDIT_RISK"}:
+    if policy.officer_only(actor):
         q = q.join(Assignment, Assignment.opportunity_id == Opportunity.id).where(Assignment.user_id == actor.id)
     return q
 

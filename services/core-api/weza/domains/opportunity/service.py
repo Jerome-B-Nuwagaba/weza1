@@ -10,7 +10,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from weza.domains.admin_config import get_config
+from weza.domains.admin_config import UGANDA, get_config
 from weza.domains.appetite.models import Appetite, AppetiteVersion
 from weza.domains.consent.models import Consent
 from weza.domains.customer.models import Customer, Document, ProfileSnapshot
@@ -377,6 +377,8 @@ def mark_received(db: Session, actor: Actor, opp: Opportunity) -> None:
         opp.received_at = utcnow()
         if opp.state == "ROUTED":
             opp.state = "RECEIVED"
+            audit(db, actor, "opportunity.status", "opportunity", opp.id, before={"state": "ROUTED"},
+                  after={"state": "RECEIVED"}, reason="Opened in the workspace")
         emit(db, "OpportunityReceived", topic="opportunity", aggregate_type="opportunity", aggregate_id=opp.id,
              institution_id=opp.institution_id, data={})
     a = db.get(Assignment, opp.id)
@@ -384,13 +386,19 @@ def mark_received(db: Session, actor: Actor, opp: Opportunity) -> None:
         a.acked_at = utcnow()
 
 
-def update_status(db: Session, actor: Actor, opp: Opportunity, to_state: str, note: str | None = None) -> Opportunity:
-    policy.require(actor, "opportunity.update_status")
-    policy.require_tenant(actor, opp.institution_id)
+def _require_assignee_or_manager(db: Session, actor: Actor, opp: Opportunity) -> Assignment | None:
+    """Officers act only on opportunities assigned to them; managers act on any in their institution."""
     a = db.get(Assignment, opp.id)
     if "MANAGER" not in actor.roles and (a is None or a.user_id != actor.id):
         raise ValidationFailed("Only the assigned officer or a manager can update this opportunity.",
                                code="NOT_ASSIGNEE")
+    return a
+
+
+def update_status(db: Session, actor: Actor, opp: Opportunity, to_state: str, note: str | None = None) -> Opportunity:
+    policy.require(actor, "opportunity.update_status")
+    policy.require_tenant(actor, opp.institution_id)
+    a = _require_assignee_or_manager(db, actor, opp)
     if to_state not in INSTITUTION_FORWARD + ["CLOSED"]:
         raise ValidationFailed("Use the outcome action for approvals, declines and disbursements.")
     if opp.integrity_hold:
@@ -434,6 +442,7 @@ def report_outcome(db: Session, actor: Actor, opp: Opportunity, *, state: str, r
     """Lightweight institution-reported outcome (FSD §27, BR-005). An approval may carry indicative terms."""
     policy.require(actor, "opportunity.update_status")
     policy.require_tenant(actor, opp.institution_id)
+    _require_assignee_or_manager(db, actor, opp)
     if state not in ("REPORTED_APPROVED", "REPORTED_DECLINED", "REPORTED_DISBURSED", "WITHDRAWN"):
         raise ValidationFailed("Unknown outcome.")
     if set(terms) - set(TERM_FIELDS):
@@ -523,8 +532,9 @@ def request_info(db: Session, actor: Actor, opp: Opportunity, *, kind: str, mess
         raise ValidationFailed("This opportunity is on hold pending WEZA checks.", code="ON_HOLD")
     if opp.state not in OPEN_STATES or opp.state == "QUALIFIED":
         raise ValidationFailed("This opportunity is no longer open.", code="NOT_OPEN")
-    decision = policy.decide_opportunity_access(db, actor, opp, db.get(Assignment, opp.id),
-                                                db.get(Consent, opp.consent_id), purpose="REQUEST_INFO")
+    consent = db.get(Consent, opp.consent_id)
+    decision = policy.decide_opportunity_access(db, actor, opp, db.get(Assignment, opp.id), consent,
+                                                purpose="REQUEST_INFO")
     if decision.result != "PERMIT":
         raise Forbidden("Only the assigned officer or their manager can ask this customer for information, and only "
                         "while consent is valid.", code="PRIVACY_VIOLATION", details=[{"reason": decision.reason}])
@@ -541,6 +551,10 @@ def request_info(db: Session, actor: Actor, opp: Opportunity, *, kind: str, mess
         doc_type = None
         if fact_key and fact_key not in EDITABLE:
             raise ValidationFailed("That profile field can't be updated from an answer.", code="FACT_KEY_INVALID")
+        if fact_key and policy.fact_category(fact_key) not in consent.data_categories:
+            raise Forbidden("The customer did not consent to share this kind of information with you.",
+                            code="PRIVACY_VIOLATION", details=[{"reason": "consent_scope",
+                                                                "category": policy.fact_category(fact_key)}])
     message = (message or "").strip()
     if not message:
         raise ValidationFailed("Tell the customer what you need and why.", code="MESSAGE_REQUIRED")
@@ -571,6 +585,7 @@ def cancel_info_request(db: Session, actor: Actor, opp: Opportunity, r: InfoRequ
     policy.require_tenant(actor, opp.institution_id)
     if r.opportunity_id != opp.id:
         raise NotFound("Not found.")
+    _require_assignee_or_manager(db, actor, opp)
     _move_request(r, "CANCELLED")
     r.cancel_reason = reason
     _log(db, opp, "INFO_REQUEST_CANCELLED", actor, note=reason, data={"request_id": str(r.id)})
@@ -691,6 +706,8 @@ def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
     policy.require(actor, "opportunity.read_meta")
     policy.require_tenant(actor, opp.institution_id)
     a = db.get(Assignment, opp.id)
+    if policy.officer_only(actor) and (a is None or a.user_id != actor.id):
+        raise NotFound("Not found.")  # officers see only their assigned work (same 404 as another tenant's)
     consent = db.get(Consent, opp.consent_id)
     decision = policy.decide_opportunity_access(db, actor, opp, a, consent)
     if decision.result == "DENY":
@@ -728,7 +745,11 @@ def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
               after={"fields": sorted(customer_block["fields"].keys())})
         emit(db, "OpportunityViewed", topic="opportunity", aggregate_type="opportunity", aggregate_id=opp.id,
              institution_id=opp.institution_id, data={"fields": len(customer_block["fields"])})
-    return {**summary(db, opp, a), "customer": customer_block, "snapshot": opp.snapshot,
+    snapshot = opp.snapshot or {}
+    if decision.result != "PERMIT" and snapshot.get("need"):
+        # The purpose phrase is the customer's own words and may name them; without PERMIT show only the category.
+        snapshot = {**snapshot, "need": {**snapshot["need"], "purpose": purpose_label(opp.purpose_category)}}
+    return {**summary(db, opp, a), "customer": customer_block, "snapshot": snapshot,
             "consent": {"status": consent.status if consent else None,
                         "categories": consent.data_categories if consent else [],
                         "version": consent.template_version if consent else None,
@@ -749,6 +770,11 @@ def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
             and opp.state in OPEN_STATES and not opp.integrity_hold,
             "can_request_documents": "documents" in decision.fields,
             "decline_reasons": DECLINE_REASONS}
+
+
+def purpose_label(category: str | None) -> str | None:
+    """Fixed label for a purpose category, never the customer's free-text phrase (which may contain identifiers)."""
+    return UGANDA["purpose_categories"].get(category or "", category)
 
 
 def summary(db: Session, opp: Opportunity, a: Assignment | None = None, product_names: dict | None = None,
@@ -773,7 +799,7 @@ def summary(db: Session, opp: Opportunity, a: Assignment | None = None, product_
     return {
         "id": str(opp.id), "reference": opp.reference, "state": opp.state, "freshness": opp.freshness,
         "priority": opp.priority, "amount": float(opp.amount), "currency": "UGX",
-        "need": (snap.get("need") or {}).get("purpose") or opp.purpose_category,
+        "need": purpose_label(opp.purpose_category),
         "purpose_category": opp.purpose_category, "customer_type": opp.customer_type, "sector": opp.sector,
         "district": opp.district, "match_score": round(opp.match_score), "quality_score": opp.quality_score,
         "product": (snap.get("product_version") or {}).get("name"),
