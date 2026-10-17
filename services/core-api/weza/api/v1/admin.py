@@ -771,3 +771,31 @@ def weza_users(actor: Actor = W, db: Session = DB):
     rows = db.execute(select(User).where(or_(User.kind == "WEZA"))).scalars()
     return {"users": [{"id": str(u.id), "name": u.full_name, "email": u.email, "roles": u.weza_roles,
                        "mfa_enrolled": u.mfa_enrolled} for u in rows]}
+
+
+# ------------------------------------------------------------------ WhatsApp: connect the business number (coexistence)
+
+
+@router.get("/whatsapp/embedded-signup")
+def whatsapp_signup_config(actor: Actor = W):
+    """Launch settings for Embedded Signup (Tech Provider onboarding of the WhatsApp Business app number)."""
+    policy.require(actor, "admin.config")
+    from weza.domains.notification import whatsapp_onboarding
+    return whatsapp_onboarding.launch_config()
+
+
+class SignupIn(BaseModel):
+    code: str = Field(..., min_length=10, max_length=2048)
+    waba_id: str | None = Field(None, max_length=32)
+    event: str | None = Field(None, max_length=64)
+
+
+@router.post("/whatsapp/embedded-signup")
+def whatsapp_signup_connect(body: SignupIn, actor: Actor = W, db: Session = DB):
+    """Exchange the Embedded Signup code (valid ~30 s), subscribe this app to the WABA, report the number's status."""
+    policy.require(actor, "admin.config")
+    require_step_up(actor)
+    from weza.domains.notification import whatsapp_onboarding
+    from weza.platform.controls import rate_limit
+    rate_limit(db, f"es:{actor.id}", 10, 3600)
+    return whatsapp_onboarding.connect(db, actor, code=body.code, waba_id=body.waba_id or None, event=body.event)

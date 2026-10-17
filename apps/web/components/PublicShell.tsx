@@ -25,7 +25,7 @@ export function PublicShell({ children, compact }: { children: React.ReactNode; 
         <footer className="border-t border-line bg-surface">
           <div className="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-6 text-[13px] text-muted sm:flex-row sm:justify-between">
             <span>WEZA creates access. Financial institutions make the credit decision.</span>
-            <span>WEZA does not hold or lend money. <Link href="/legal/consent" className="underline">Consent & privacy</Link></span>
+            <span>WEZA does not hold or lend money. <Link href="/legal/consent" className="underline">Consent & privacy</Link> · <Link href="/legal/privacy" className="underline">Privacy policy</Link></span>
           </div>
         </footer>
       )}

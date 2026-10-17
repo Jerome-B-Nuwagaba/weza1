@@ -669,7 +669,8 @@ def consent_node(ctx: Ctx, st: dict, t: Trigger) -> Step:
                               need_id=need.id, match_id=m.id,
                               template_id=uuid.UUID(t.payload.get("value") or st["consent_template_id"]),
                               categories=t.payload.get("categories"), channel=st.get("channel", "web"),
-                              contact_channel=t.payload.get("contact_channel") or (pref.contact_channel if pref else "phone"),
+                              contact_channel=t.payload.get("contact_channel") or ("whatsapp" if st.get("channel") == "whatsapp" else (
+                                  pref.contact_channel if pref else "phone")),
                               contact_window=t.payload.get("contact_window") or (pref.contact_window if pref else "ANY"))
         need.status = "CONSENTED"
         return Step(to="CREATE_OPPORTUNITY", patch={"consent_id": str(c.id)})
@@ -875,7 +876,7 @@ def whatsapp_text(o: dict) -> str | None:
     if card == "otp_input" and d.get("dev_code"):
         return f"(Test mode) Your code is {d['dev_code']}"
     if card == "documents_needed":
-        return "Upload documents securely here: {web}/c/documents"
+        return "Please send each document right here in this chat as a clear photo or PDF (up to 10 MB)."
     return None
 
 

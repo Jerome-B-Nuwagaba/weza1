@@ -74,6 +74,7 @@ const ADMIN_NAV: [string, Item[]][] = [
     { href: "/admin/audit", label: "Audit", icon: BookOpen },
     { href: "/admin/deliveries", label: "Events & delivery", icon: Wrench },
     { href: "/admin/config", label: "Configuration", icon: Sliders },
+    { href: "/admin/whatsapp", label: "WhatsApp connection", icon: MessageSquareText, perm: "admin.config" },
   ]],
 ];
 

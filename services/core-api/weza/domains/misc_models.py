@@ -52,6 +52,31 @@ class ChannelMessage(IdMixin, Base):
     provider: Mapped[str] = mapped_column(String(20), default="simulator")
     status: Mapped[str] = mapped_column(String(16), default="SENT")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    # Provider delivery tracking (WhatsApp Cloud API): wamid, last callback status (sent|delivered|read|failed)
+    provider_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    provider_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WhatsappInbox(IdMixin, Base):
+    """One row per inbound WhatsApp message id (Meta retries are deduplicated by the unique key).
+    Content is stored encrypted until processed, then wiped. See notification/whatsapp_inbound.py."""
+
+    __tablename__ = "whatsapp_inbox"
+    __table_args__ = ({"schema": "notification"},)
+
+    provider_message_id: Mapped[str] = mapped_column(String(128), unique=True)
+    msg_type: Mapped[str] = mapped_column(String(24))
+    phone_index: Mapped[str] = mapped_column(String(64), index=True)  # blind index — never the raw number
+    payload_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # PENDING|DONE|DROPPED|IGNORED|FAILED (FAILED = gave up after processing errors; escalated for review)
+    status: Mapped[str] = mapped_column(String(12), default="PENDING", index=True)
+    reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")  # processing errors so far
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class IntegritySignal(IdMixin, Base):
