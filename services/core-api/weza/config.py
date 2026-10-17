@@ -81,6 +81,17 @@ class Settings(BaseSettings):
     sms_sender_id: str | None = None
     smtp_url: str | None = None
 
+    # Credit Reference Bureau (GnuGrid CRB Enquiries API v1.08) — identity checks via KYC enquiries.
+    # Empty/unset/REPLACE_ME = NOT CONFIGURED: the identity check is skipped (it is advisory), nothing is sent.
+    # >>> USER INPUT REQUIRED: base URL and client credentials from GnuGrid; the enquiry `reason` text and, for an
+    # aggregator, the institution `pi_code`. LIVE enquiries are charged per SUCCESSFUL request.
+    crb_base_url: str | None = None  # e.g. https://<gnugrid-host>/api (no trailing /v1)
+    crb_client_id: str | None = None
+    crb_client_secret: str | None = None
+    crb_enquiry_reason: str | None = None  # sent as `reason` (mandatory in the API)
+    crb_pi_code: str | None = None  # optional; aggregators only
+    crb_timeout_seconds: float = 20.0
+
     access_token_minutes: int = 15
     refresh_token_days: int = 7
     customer_session_days: int = 30
@@ -105,6 +116,20 @@ class Settings(BaseSettings):
     def graph_api_version(self) -> str:
         v = (self.whatsapp_api_version or "").strip()
         return v if re.fullmatch(r"v\d{1,3}\.\d{1,2}", v) else DEFAULT_GRAPH_API_VERSION
+
+    @property
+    def crb_missing(self) -> list[str]:
+        """Setting names the CRB identity check still needs (names only — safe to log)."""
+        need = {"CRB_BASE_URL": self.crb_base_url, "CRB_CLIENT_ID": self.crb_client_id,
+                "CRB_CLIENT_SECRET": self.crb_client_secret, "CRB_ENQUIRY_REASON": self.crb_enquiry_reason}
+        missing = [k for k, v in need.items() if not is_configured(v)]
+        if not missing and not (self.crb_base_url or "").strip().lower().startswith("https://"):
+            missing.append("CRB_BASE_URL (must be https://)")
+        return missing
+
+    @property
+    def crb_ready(self) -> bool:
+        return not self.crb_missing
 
     @property
     def whatsapp_embedded_signup_missing(self) -> list[str]:
@@ -151,6 +176,9 @@ class Settings(BaseSettings):
             "WHATSAPP_BUSINESS_ACCOUNT_ID": is_configured(self.whatsapp_business_account_id),
             "WHATSAPP_APP_ID": is_configured(self.whatsapp_app_id),
             "WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID": is_configured(self.whatsapp_embedded_signup_config_id),
+            "CRB_BASE_URL": is_configured(self.crb_base_url), "CRB_CLIENT_ID": is_configured(self.crb_client_id),
+            "CRB_CLIENT_SECRET": is_configured(self.crb_client_secret),
+            "CRB_ENQUIRY_REASON": is_configured(self.crb_enquiry_reason), "CRB_PI_CODE": is_configured(self.crb_pi_code),
             "SMS_PROVIDER": self.sms_provider_name != "console", "SMS_API_KEY": is_configured(self.sms_api_key),
             "SMS_USERNAME": is_configured(self.sms_username), "SMS_SENDER_ID": is_configured(self.sms_sender_id),
         }

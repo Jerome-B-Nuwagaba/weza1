@@ -23,6 +23,7 @@ export const FIELD_META: Record<string, { label: string; kind: "money" | "months
   monthly_repayments: { label: "Existing monthly repayments (UGX)", kind: "money" },
   debt_service_ratio: { label: "Repayments ÷ capacity (0–1)", kind: "ratio" },
   has_nin: { label: "National ID provided", kind: "bool" },
+  identity_verified: { label: "Identity verified (credit bureau)", kind: "bool" },
 };
 
 export type Rule = { field: string; op: string; value: any; label?: string; weight?: number; must?: boolean };

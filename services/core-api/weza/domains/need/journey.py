@@ -257,6 +257,11 @@ def verify_phone(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if st.get("customer_id"):
         return Step(to="BUILD_PROFILE")
     if t.kind == "ENTER":
+        if st.get("channel") == "whatsapp" and st.get("channel_phone_enc") and not st.get("otp_challenge_id"):
+            # The customer is writing from this number and Meta authenticated the sender (signed webhook). A code
+            # sent back into the same chat proves nothing new, so the channel itself verifies the number.
+            # Web/app keep the OTP: a browser proves nothing about a phone, and the OTP issues their session.
+            return _phone_verified(ctx, st, _dec(st["channel_phone_enc"]), method="whatsapp_channel")
         if st.get("channel_phone_enc") and not st.get("otp_challenge_id"):
             return _send_otp(ctx, st, _dec(st["channel_phone_enc"]))
         if st.get("otp_challenge_id"):
@@ -291,20 +296,28 @@ def verify_phone(ctx: Ctx, st: dict, t: Trigger) -> Step:
         emit(ctx.db, "PhoneVerificationFailed", topic="customer", aggregate_type="need", aggregate_id=st["need_id"],
              data={"code": res.code})
         return Step(wait=Wait(REPLY, DAY), patch=patch)
-    phone = _dec(st["phone_enc"])
+    return _phone_verified(ctx, st, _dec(st["phone_enc"]), method="otp")
+
+
+def _phone_verified(ctx: Ctx, st: dict, phone: str, *, method: str) -> Step:
+    """The phone is proven (OTP, or the WhatsApp channel itself): link or create the customer and continue."""
     need = _need(ctx, st)
     customer, is_new = customer_svc.get_or_create_by_phone(ctx.db, phone, attribution_id=need.attribution_id,
                                                            device_hash=st.get("device_hash"))
     need.customer_id = customer.id
     need.status = "PHONE_VERIFIED"
     ctx.instance.customer_id = customer.id
-    token = identity.create_customer_session(ctx.db, customer.id, st.get("channel", "web"))
-    ctx.card("session", {"token": token, "customer_id": str(customer.id), "returning": not is_new})
+    if method == "otp":  # web/app need a session; WhatsApp is identified by the chat itself
+        token = identity.create_customer_session(ctx.db, customer.id, st.get("channel", "web"))
+        ctx.card("session", {"token": token, "customer_id": str(customer.id), "returning": not is_new})
     audit(ctx.db, Actor(kind="CUSTOMER", id=customer.id, display="customer"), "customer.phone_verified", "customer",
-          customer.id)
+          customer.id, after={"method": method})
     emit(ctx.db, "PhoneVerified", topic="customer", aggregate_type="need", aggregate_id=need.id,
-         data={"returning": not is_new})
-    ctx.say("Thank you — your number is verified." + (" Welcome back!" if not is_new else ""))
+         data={"returning": not is_new, "method": method})
+    if method == "otp":
+        ctx.say("Thank you — your number is verified." + (" Welcome back!" if not is_new else ""))
+    elif not is_new:
+        ctx.say("Welcome back!")
     st2 = {**st, "customer_id": str(customer.id)}
     _sync_customer_from_intent(ctx, st2)
     return Step(to="BUILD_PROFILE", patch={"customer_id": str(customer.id), "otp_challenge_id": None,
@@ -341,11 +354,155 @@ def build_profile(ctx: Ctx, st: dict, t: Trigger) -> Step:
     need = _need(ctx, st)
     if need.status in ("PHONE_VERIFIED", "INTENT_CONFIRMED"):
         need.status = "PROFILE_IN_PROGRESS"
+    if not (st.get("idv_done") or st.get("idv_declined")):
+        from weza.domains.verification import service as idv
+        if idv.needs_check(ctx.db, uuid.UUID(st["customer_id"])):
+            return Step(to="VERIFY_IDENTITY", patch={"idv_stage": None})
     skipped = set(st.get("skipped") or [])
     qs = [q for q in customer_svc.missing_questions(ctx.db, need, uuid.UUID(st["customer_id"])) if q["key"] not in skipped]
     if not qs or st.get("profile_questions", 0) >= MAX_PROFILE_QUESTIONS:
         return Step(to="READINESS_CHECK")
     return Step(to="ASK_PROFILE", patch={"pending_q": qs[0], "answer_attempts": 0})
+
+
+# ------------------------------------------------------------------ identity check (credit bureau, advisory)
+
+MAX_IDV_CORRECTIONS = 1  # after one correction the customer continues; an unresolved result is escalated
+MAX_IDV_CHECKS_PER_DAY = 3
+_IDV_FIELD_LABELS = {"name": "name", "date_of_birth": "date of birth"}
+_IDV_UNCONFIRMED = ("We couldn't confirm your identity automatically. You can carry on — institutions will see your "
+                    "identity as not yet verified.")
+
+
+def _idv_consent(ctx: Ctx, again: bool = False) -> Step:
+    from weza.domains.verification import service as idv
+    ctx.say(("Shall I run the identity check again with the corrected details? " if again else "") + idv.CONSENT_TEXT,
+            quick_replies=[qr("Yes, check", "idv_consent", "yes"), qr("No, skip", "idv_consent", "no")])
+    return Step(wait=Wait(REPLY, DAY), patch={"idv_stage": "consent"})
+
+
+def _idv_continue(ctx: Ctx, msg: str | None = None, **patch) -> Step:
+    if msg:
+        ctx.say(msg)
+    return Step(to="BUILD_PROFILE", patch={"idv_stage": None, "idv_done": True, **patch})
+
+
+def verify_identity(ctx: Ctx, st: dict, t: Trigger) -> Step:
+    """Collect what the bureau needs, obtain consent, run the check, explain the outcome. Outcomes come only from
+    verification.service (deterministic); nothing here or in the AI may claim a result that did not happen."""
+    from weza.domains.verification import service as idv
+    cust_id = uuid.UUID(st["customer_id"])
+    stage = st.get("idv_stage")
+    if t.kind == "ENTER":
+        missing = idv.missing_for_check(ctx.db, cust_id)
+        if "nin" in missing or "full_name" in missing:
+            return Step(to="BUILD_PROFILE", patch={"idv_done": True})  # nothing to check against
+        if "date_of_birth" in missing:
+            ctx.say("What is your date of birth? Together with your name and National ID it lets us confirm your "
+                    "identity with the credit reference bureau.", hint="e.g. 31/03/1993",
+                    quick_replies=[qr("Skip", "skip")])
+            return Step(wait=Wait(REPLY, DAY), patch={"idv_stage": "dob"})
+        return _idv_consent(ctx)
+    action, value, text = _action(t), str(t.payload.get("value") or ""), _text(t)
+    low = text.lower()
+    if stage in ("fix_name", "fix_nin") and (action == "skip" or low in ("skip", "no", "no thanks", "continue")):
+        return _idv_continue(ctx, "OK — we'll continue. Institutions will see your identity as not yet verified.")
+
+    if stage in ("dob", "fix_dob"):
+        if action == "skip" or low in ("skip", "no", "no thanks"):
+            return _idv_continue(ctx, "No problem — we'll continue without the identity check.", idv_declined=True)
+        dob = parsing.parse_dob(text)
+        if not dob:
+            return _reask(ctx, st, "Please type your date of birth like 31/03/1993.")
+        customer_svc.upsert_fact(ctx.db, cust_id, "identity.date_of_birth", dob, channel=st.get("channel", "web"),
+                                 confirmed=True)
+        return _idv_consent(ctx, again=stage == "fix_dob")
+
+    if stage == "fix_name":
+        name = parsing.parse_name(text)
+        if not name:
+            return _reask(ctx, st, "Please type your full name as it appears on your National ID, e.g. 'Okello "
+                                   "John Bosco'.")
+        customer_svc.upsert_fact(ctx.db, cust_id, "identity.full_name", name, channel=st.get("channel", "web"),
+                                 confirmed=True)
+        return _idv_consent(ctx, again=True)
+
+    if stage == "fix_nin":
+        nin = parsing.parse_nin(text)
+        if not nin:
+            return _reask(ctx, st, _help_for({"type": "nin"}))
+        customer_svc.upsert_fact(ctx.db, cust_id, "identity.nin", nin, channel=st.get("channel", "web"),
+                                 confirmed=True)
+        return _idv_consent(ctx, again=True)
+
+    if stage == "fix_menu":
+        pick = value or ("name" if "name" in low else "date_of_birth" if ("birth" in low or "dob" in low)
+                         else "nin" if ("id" in low.split() or "nin" in low) else "continue" if low else "")
+        if pick == "name":
+            ctx.say("Please type your full name exactly as it appears on your National ID.")
+            return Step(wait=Wait(REPLY, DAY), patch={"idv_stage": "fix_name"})
+        if pick == "date_of_birth":
+            ctx.say("Please type your date of birth.", hint="e.g. 31/03/1993")
+            return Step(wait=Wait(REPLY, DAY), patch={"idv_stage": "fix_dob"})
+        if pick == "nin":
+            ctx.say("Please type your National ID Number (NIN) exactly as it appears on your ID card.")
+            return Step(wait=Wait(REPLY, DAY), patch={"idv_stage": "fix_nin"})
+        return _idv_continue(ctx, "OK — we'll continue. Institutions will see your identity as not yet verified.")
+
+    # stage == "consent"
+    yes = value == "yes" or low in ("yes", "y", "ok", "okay", "agree", "i agree", "yes, check")
+    no = value == "no" or low in ("no", "n", "skip", "no thanks", "no, skip")
+    if not (yes or no):
+        return _reask(ctx, st, "Please reply Yes to run the identity check, or No to skip it.")
+    if no:
+        return _idv_continue(ctx, "No problem — we'll continue without the identity check.", idv_declined=True)
+    if idv.attempts_today(ctx.db, cust_id) >= MAX_IDV_CHECKS_PER_DAY:
+        return _idv_continue(ctx, "We've already tried the identity check several times today. You can carry on — "
+                                  "your identity will show as not yet verified.")
+    actor = Actor(kind="CUSTOMER", id=cust_id, display="customer")
+    audit(ctx.db, actor, "identity_check.consented", "customer", cust_id,
+          after={"consent_version": idv.CONSENT_VERSION, "text_hash": idv.CONSENT_TEXT_HASH,
+                 "channel": st.get("channel", "web")})
+    res = idv.run_check(ctx.db, cust_id, need_id=uuid.UUID(st["need_id"]), channel=st.get("channel", "web"),
+                        consented_at=utcnow())
+    return _idv_explain(ctx, st, res)
+
+
+def _idv_explain(ctx: Ctx, st: dict, res) -> Step:
+    corrections = st.get("idv_corrections", 0)
+    can_fix = corrections < MAX_IDV_CORRECTIONS
+    o = res.outcome
+    if o == "VERIFIED":
+        return _idv_continue(ctx, "Thank you — your name and date of birth match the record at the credit reference "
+                                  "bureau. Institutions will see your identity as verified.")
+    if o in ("DISCREPANCY", "NO_RECORD", "INVALID_IDENTIFIER") and can_fix:
+        if o == "DISCREPANCY":
+            bad = [k for k in ("name", "date_of_birth") if res.field_results.get(k) == "MISMATCH"]
+            what = " and ".join(_IDV_FIELD_LABELS[k] for k in bad) or "details"
+            ctx.say(f"The {what} you gave doesn't match the record held by the credit reference bureau. This often "
+                    "comes from spelling, name order or a typing mistake, and it doesn't stop your request. "
+                    "Would you like to correct it?",
+                    quick_replies=[*(qr(f"Fix my {_IDV_FIELD_LABELS[k]}", "idv_fix", k) for k in bad),
+                                   qr("Continue", "idv_fix", "continue")])
+        else:
+            ctx.say("We couldn't find a record for that National ID number at the credit reference bureau."
+                    if o == "NO_RECORD" else "The credit reference bureau couldn't read that National ID number.",
+                    quick_replies=[qr("Check my ID number", "idv_fix", "nin"), qr("Continue", "idv_fix", "continue")])
+        return Step(wait=Wait(REPLY, DAY), patch={"idv_stage": "fix_menu", "idv_corrections": corrections + 1})
+    if o in ("DISCREPANCY", "NO_RECORD", "INVALID_IDENTIFIER"):
+        from weza.domains.integrity.service import add_review
+        add_review(ctx.db, "IDENTITY_UNVERIFIED", f"Identity check still {o} after the customer's correction. Not an "
+                   "indication of fraud on its own: review before relying on the identity.", "customer",
+                   st["customer_id"], severity="MEDIUM", detail={"outcome": o, "check_id": str(res.check_id)},
+                   dedupe_key=f"IDENTITY_UNVERIFIED:{res.check_id}")
+        return _idv_continue(ctx, "Thanks. We'll continue — institutions will see your identity as not yet verified, "
+                                  "and our team may follow up.")
+    if o in ("UNAVAILABLE", "CONFIG_ERROR"):
+        return _idv_continue(ctx, "The identity check isn't available right now. You can carry on — institutions "
+                                  "will see your identity as not yet verified.")
+    if o in ("NOT_CONFIGURED", "INSUFFICIENT_INFO"):
+        return _idv_continue(ctx)
+    return _idv_continue(ctx, _IDV_UNCONFIRMED)  # AMBIGUOUS / INCONCLUSIVE / PENDING / UNCERTAIN
 
 
 def ask_profile(ctx: Ctx, st: dict, t: Trigger) -> Step:
@@ -827,7 +984,8 @@ GRAPH = register(GraphDef(type="customer_journey", version=1, start="GREET", nod
     "ASK_INTENT": Node(ask_intent, 2, R), "CONFIRM_INTENT": Node(confirm_intent, 0, R),
     "REVISE_INTENT": Node(revise_intent, 1), "CONFIRM_INTENT_WAIT": Node(confirm_intent_wait, 0, R),
     "VERIFY_PHONE": Node(verify_phone, 2, R), "BUILD_PROFILE": Node(build_profile, 2),
-    "ASK_PROFILE": Node(ask_profile, 2, R), "RESOLVE_CONFLICT": Node(resolve_conflict, 0, R),
+    "ASK_PROFILE": Node(ask_profile, 2, R), "VERIFY_IDENTITY": Node(verify_identity, 1, R),
+    "RESOLVE_CONFLICT": Node(resolve_conflict, 0, R),
     "READINESS_CHECK": Node(readiness_check, 2), "REQUEST_MISSING_ITEM": Node(request_missing_item, 2, R),
     "OFFER_WAITING_ROOM": Node(offer_waiting_room, 0, "SAVE_EXIT"), "WAITING_ROOM": Node(waiting_room, 3, "EXPIRE"),
     "PRESENT_OPTIONS": Node(present_options, 0, R), "RERANK": Node(rerank, 2), "CONSENT": Node(consent_node, 0, R),

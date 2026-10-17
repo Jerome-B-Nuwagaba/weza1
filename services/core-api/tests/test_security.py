@@ -148,7 +148,9 @@ def test_zero_core_integration_boundary():
         src = f.read_text(encoding="utf8")
         if re.search(r"httpx\.(get|post|put|request|Client)|requests\.|urllib\.request", src):
             offenders.append(f.relative_to(root).as_posix())
-    assert offenders == ["domains/notification/service.py"], offenders
+    # Two allowed integrations: the customer channel (WhatsApp, in notification/service.py) and the credit reference
+    # bureau (independent identity checks; not an institution core system).
+    assert sorted(offenders) == ["domains/notification/service.py", "domains/verification/gnugrid.py"], offenders
     assert "graph.facebook.com" in (root / "domains/notification/service.py").read_text(encoding="utf8")
 
 

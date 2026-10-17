@@ -24,7 +24,10 @@ MATERIAL_KEYS = {
 }
 FACT_FRESH_DAYS = 180
 
-VAULT_KEYS = {"identity.full_name": "full_name", "identity.nin": "nin", "identity.email": "email"}
+VAULT_KEYS = {"identity.full_name": "full_name", "identity.nin": "nin", "identity.email": "email",
+              "identity.date_of_birth": "date_of_birth"}
+# Identity details compared with the credit bureau: changing one invalidates an earlier identity verification.
+CRB_CHECKED_KEYS = {"identity.full_name", "identity.nin", "identity.date_of_birth"}
 
 
 def get_or_create_by_phone(db: Session, phone_e164: str, *, attribution_id=None, device_hash: str | None = None,
@@ -67,9 +70,16 @@ def upsert_fact(db: Session, customer_id: uuid.UUID, key: str, value, *, source:
     existing confirmed value from a *different* source disagrees — WEZA never silently picks one (Skill §19)."""
     if key in VAULT_KEYS:
         cust = db.get(Customer, customer_id)
+        previous = identity.vault_read(db, cust.vault_token).get(VAULT_KEYS[key])
         identity.vault_update(db, cust.vault_token, **{VAULT_KEYS[key]: value})
-        if key == "identity.nin" and value:
-            cust.verification_level = "IDENTITY"
+        # A typed NIN is only *provided*; "IDENTITY" is set solely by a VERIFIED credit-bureau check
+        # (verification.service). New identity details void an earlier verification.
+        if key in CRB_CHECKED_KEYS and previous is not None and previous != value:
+            if cust.verification_level == "IDENTITY":
+                cust.verification_level = "PHONE"
+            stale = current_facts(db, customer_id).get("identity.crb_verified")
+            if stale is not None:
+                stale.superseded_at = utcnow()
         key, value = key + "_captured", bool(value)
     existing = current_facts(db, customer_id).get(key)
     now = utcnow()
@@ -154,6 +164,7 @@ def rule_fields(need, facts: dict, docs: set[str] | None = None, customer: Custo
         "monthly_repayments": float(repayments) if repayments is not None else None,
         "debt_service_ratio": round(dsr, 3) if dsr is not None else None,
         "has_nin": bool(f.get("identity.nin_captured")),
+        "identity_verified": bool(f.get("identity.crb_verified")),  # VERIFIED credit-bureau identity check
         "phone_verified": customer is not None,
         "documents": sorted(docs or []),
     }

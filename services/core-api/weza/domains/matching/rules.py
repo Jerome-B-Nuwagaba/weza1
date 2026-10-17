@@ -13,7 +13,8 @@ FIELD_LABELS = {
     "employment_months": "Time with employer", "monthly_income": "Monthly income", "farm_activity": "Farming activity",
     "operating_months": "Operating history", "annual_income": "Annual income",
     "monthly_repayments": "Existing repayments", "debt_service_ratio": "Existing repayments vs income",
-    "has_nin": "National ID provided", "documents": "Documents",
+    "has_nin": "National ID provided", "identity_verified": "Identity verified (credit bureau)",
+    "documents": "Documents",
 }
 MONEY_FIELDS = {"amount", "monthly_turnover", "monthly_income", "annual_income", "monthly_repayments"}
 MONTH_FIELDS = {"tenor_months", "business_age_months", "employment_months", "operating_months"}

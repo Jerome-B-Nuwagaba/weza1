@@ -10,7 +10,6 @@ import hmac
 import itertools
 import json
 import logging
-import re
 from datetime import timedelta
 
 import httpx
@@ -307,7 +306,10 @@ def test_inbound_button_reply_advances_journey(client, wa_inbound):
     text_msg(client, phone, "I need 5 million for stock for my shop")
     assert send(client, rw.build("button", phone=phone, button_id="confirm")).status_code == 200
     ((jid, node),) = journeys_for(phone)
-    assert node == "VERIFY_PHONE"
+    # WhatsApp: the sender's number is verified by the channel, so the journey goes straight to the profile
+    # questions and no verification code is sent into the same chat.
+    assert node == "ASK_PROFILE"
+    assert not any("verification code" in (m.body or "") for m in out_messages(phone))
 
 
 def test_duplicate_provider_message_id_processed_once(client, wa_inbound):
@@ -883,13 +885,10 @@ def media_msg(client, phone, kind, media_id, **fields):
 
 
 def verified_journey(client, phone) -> dict:
-    """Walk a WhatsApp journey through OTP verification; returns {'id', 'customer_id'}."""
+    """Walk a WhatsApp journey to the profile questions; returns {'id', 'customer_id'}. The chat's own number is
+    verified by the channel (no OTP on WhatsApp)."""
     text_msg(client, phone, "I need 5 million for stock for my shop")
     send(client, rw.build("button", phone=phone, button_id="confirm"))
-    text_msg(client, phone, "0" + phone[3:])
-    otp = next(re.search(r"code is (\d{6})", m.body).group(1) for m in reversed(out_messages(phone))
-               if m.channel == "sms" and "verification code" in m.body)
-    text_msg(client, phone, otp)
     ((jid, node),) = journeys_for(phone)
     with session_scope() as db:
         cid = db.get(GraphInstance, jid).state.get("customer_id")

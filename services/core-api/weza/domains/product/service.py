@@ -18,7 +18,7 @@ from weza.platform.events import emit
 RULE_FIELDS = {"amount", "tenor_months", "customer_type", "sector", "district", "region", "purpose_category",
                "business_age_months", "monthly_turnover", "business_registered", "employment_type", "employment_months",
                "monthly_income", "farm_activity", "operating_months", "annual_income", "monthly_repayments",
-               "debt_service_ratio", "has_nin"}
+               "debt_service_ratio", "has_nin", "identity_verified"}
 FAMILIES = {"SME_WORKING_CAPITAL": "SME working capital", "SME_GROWTH": "SME growth / expansion",
             "ASSET_FINANCE": "Asset & equipment finance", "SALARY_LOAN": "Salary loan", "SCHOOL_FEES": "School fees",
             "AGRI_INPUTS": "Agricultural inputs", "AGRI_ASSET": "Agricultural assets", "PERSONAL": "Personal loan"}

@@ -464,8 +464,10 @@ def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
             "annual_income": facts.get("farm.annual_income"), "monthly_repayments": facts.get("finance.monthly_repayments"),
         }
         customer_block["fields"] = {k: v for k, v in available.items() if k in decision.fields and v is not None}
+        from weza.domains.verification import service as idv
         customer_block["verification"] = {"phone": True, "nin_provided": bool(vault.get("nin")),
                                           "level": cust.verification_level,
+                                          **idv.status_for(db, opp.customer_id),  # outcome only, never bureau data
                                           "note": "Marketplace verification only — not institution KYC."}
         if "documents" in decision.fields:
             customer_block["documents"] = [

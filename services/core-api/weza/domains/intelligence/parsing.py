@@ -237,6 +237,33 @@ def parse_nin(text: str) -> str | None:
     return t if re.fullmatch(UGANDA["identity_types"][0]["regex"], t) else None
 
 
+_MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
+                                       "dec"], start=1)}
+
+
+def parse_dob(text: str) -> str | None:
+    """Date of birth → ISO 'YYYY-MM-DD'. Numeric dates are day-first (31/03/1993) as written in Uganda; also
+    accepts 1993-03-31 and '31 March 1993' / 'March 31, 1993'. Rejects impossible and future dates."""
+    import datetime as _dt
+    t = (text or "").strip().lower().replace(",", " ")
+    y = m = d = None
+    if mt := re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", t):
+        y, m, d = (int(x) for x in mt.groups())
+    elif mt := re.fullmatch(r"(\d{1,2})[-/. ](\d{1,2})[-/. ](\d{4})", t):
+        d, m, y = (int(x) for x in mt.groups())
+    elif mt := re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]{3,9})\s+(\d{4})", t):
+        d, m, y = int(mt.group(1)), _MONTHS.get(mt.group(2)[:3]), int(mt.group(3))
+    elif mt := re.fullmatch(r"([a-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})", t):
+        m, d, y = _MONTHS.get(mt.group(1)[:3]), int(mt.group(2)), int(mt.group(3))
+    if not (y and m and d):
+        return None
+    try:
+        day = _dt.date(y, m, d)
+    except ValueError:
+        return None
+    return day.isoformat() if 1900 <= y and day <= _dt.date.today() else None
+
+
 def parse_name(text: str) -> str | None:
     t = re.sub(r"(?i)^(my name is|i am|i'm|name:)\s*", "", text.strip()).strip(" .")
     if 3 <= len(t) <= 80 and re.fullmatch(r"[A-Za-z][A-Za-z' .-]+", t) and len(t.split()) >= 2:

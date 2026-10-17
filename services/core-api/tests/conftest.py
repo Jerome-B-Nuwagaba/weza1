@@ -19,7 +19,8 @@ os.environ.pop("ANTHROPIC_API_KEY", None)  # tests exercise the deterministic (A
 # blank them: tests always start in simulator/console mode and opt in with fake values via monkeypatch.
 for _name in ("ANTHROPIC_API_KEY", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_APP_SECRET",
               "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_API_VERSION", "WHATSAPP_BUSINESS_ACCOUNT_ID", "WHATSAPP_BUSINESS_NUMBER",
-              "WHATSAPP_OTP_TEMPLATE_NAME", "WHATSAPP_APP_ID", "WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID", "SMS_PROVIDER", "SMS_API_KEY", "SMS_USERNAME", "SMS_SENDER_ID", "SMTP_URL"):
+              "WHATSAPP_OTP_TEMPLATE_NAME", "WHATSAPP_APP_ID", "WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID", "SMS_PROVIDER", "SMS_API_KEY", "SMS_USERNAME", "SMS_SENDER_ID", "SMTP_URL",
+              "CRB_BASE_URL", "CRB_CLIENT_ID", "CRB_CLIENT_SECRET", "CRB_ENQUIRY_REASON", "CRB_PI_CODE"):
     os.environ[_name] = ""
 logging.getLogger("pgserver").setLevel(logging.CRITICAL)
 

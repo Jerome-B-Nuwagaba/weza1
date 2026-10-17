@@ -3,7 +3,7 @@
     cd services\\core-api
     .venv\\Scripts\\python scripts\\configure_env.py
 
-It asks for each WHATSAPP_* and SMS_* setting listed in .env.example (hidden input for secrets), skips anything you
+It asks for each WHATSAPP_*, SMS_* and CRB_* setting listed in .env.example (hidden input for secrets), skips anything you
 leave blank, and writes ONLY to the untracked services/core-api/.env. It refuses to run unless git ignores that file.
 It never prints, logs or echoes a value; at the end it lists only which names are set and which are not.
 """
@@ -16,8 +16,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PREFIXES = ("WHATSAPP_", "SMS_")
-SECRETS = {"WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_TOKEN", "SMS_API_KEY"}
+PREFIXES = ("WHATSAPP_", "SMS_", "CRB_")
+SECRETS = {"WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_TOKEN", "SMS_API_KEY", "CRB_CLIENT_SECRET"}
 PLACEHOLDER = "REPLACE_ME"
 _KEY = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 
