@@ -18,7 +18,8 @@ from weza.platform.db import utcnow
 from weza.platform.events import emit
 
 FAILED = ("MISMATCH", "NOT_FOUND")
-PROVIDER_LABELS = {"simulator": "WEZA test registry", "gnugrid": "gnuGRID"}
+PROVIDER_LABELS = {"simulator": "WEZA test registry", "gnugrid": "gnuGRID", "gnugrid_crb": "gnuGRID",
+                   "crb_mock": "WEZA test bureau"}
 
 
 class ProviderUnavailable(Exception):
@@ -61,6 +62,13 @@ def run_check(db: Session, check: IdentityCheck) -> IdentityCheck:
     if result is None or result.status == "ERROR":
         check.status, check.last_error = "ERROR", (result.error if result else "unknown provider")[:500]
         raise ProviderUnavailable(check.last_error)
+    return record_result(db, check, result)
+
+
+def record_result(db: Session, check: IdentityCheck, result) -> IdentityCheck:
+    """Apply a final registry outcome (VERIFIED | MISMATCH | NOT_FOUND) to the check and the customer. Used by the
+    capture-time check above and by the Just-In-Time CRB pull, which returns identity status in the same call."""
+    customer = db.get(Customer, check.customer_id)
     check.status, check.checked_at = result.status, utcnow()
     check.name_match, check.dob_match, check.provider_ref = result.name_match, result.dob_match, result.provider_ref
     check.last_error = None

@@ -138,6 +138,10 @@ def qualify(db: Session, actor: Actor, need: FinancialNeed, match: Match, consen
             raise ValidationFailed("We need to confirm your National ID before sharing your request. This usually "
                                    "takes a moment — please try again shortly, or check the number in your profile.",
                                    code="IDENTITY_NOT_VERIFIED")
+    from weza.domains.consent import crb_service
+    if crb_service.blocks_sharing(db, customer.id, inst.id):
+        raise ValidationFailed("The credit bureau couldn't confirm your National ID details, so nothing was shared. "
+                               "Please check the number and name in your profile.", code="IDENTITY_CHECK_FAILED")
     if need.intent_confirmed_at is None:
         raise ValidationFailed("Please confirm your request first.", code="INTENT_NOT_CONFIRMED")
     active_for_need = db.execute(select(func.count()).select_from(Opportunity).where(
@@ -736,6 +740,10 @@ def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
                                           "identity": identity_summary(db, opp.customer_id),
                                           "note": "Identity checked against the national register where shown. "
                                                   "This is not institution KYC or a credit decision."}
+        from weza.domains.consent.crb_service import report_for_institution
+        credit = report_for_institution(db, opp.customer_id, opp.institution_id)  # only with CRB consent to this lender
+        if credit:
+            customer_block["credit_report"] = credit
         if "documents" in decision.fields:
             customer_block["documents"] = [
                 {"id": str(d.id), "doc_type": d.doc_type, "filename": d.filename, "size": d.size}

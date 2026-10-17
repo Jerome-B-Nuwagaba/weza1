@@ -92,9 +92,11 @@ def _norm(v) -> str:
 
 def upsert_fact(db: Session, customer_id: uuid.UUID, key: str, value, *, source: str = "CUSTOMER",
                 channel: str = "web", confidence: float | None = None, confirmed: bool = False,
-                source_ref: str | None = None) -> tuple[Fact | None, Fact | None]:
+                source_ref: str | None = None, verification_state: str | None = None
+                ) -> tuple[Fact | None, Fact | None]:
     """Record a fact. Returns (new_fact, conflicting_fact). A conflict is returned (and nothing written) when an
-    existing confirmed value from a *different* source disagrees — WEZA never silently picks one (Skill §19)."""
+    existing confirmed value from a *different* source disagrees — WEZA never silently picks one (Skill §19).
+    `verification_state` overrides the default for facts verified by a third party (e.g. VERIFIED_THIRD_PARTY)."""
     if key in VAULT_KEYS:
         cust = db.get(Customer, customer_id)
         before = identity.vault_read(db, cust.vault_token)
@@ -106,10 +108,20 @@ def upsert_fact(db: Session, customer_id: uuid.UUID, key: str, value, *, source:
         if key in ("identity.nin", "identity.full_name") and changed and nin_known:
             if cust.verification_level == "IDENTITY":
                 cust.verification_level = "PHONE"
-            from weza.domains.verification.service import request_check
-            check = request_check(db, cust)  # PENDING until the registry answers
-            emit(db, "IdentityCaptured", topic="customer", aggregate_type="customer", aggregate_id=customer_id,
-                 data={"changed": key, "check_id": str(check.id)})
+            # A bureau report (and any failure it recorded) belongs to the identity it was pulled for
+            for f in db.execute(select(Fact).where(Fact.customer_id == customer_id, Fact.key.like("crb.%"),
+                                                   Fact.superseded_at.is_(None))).scalars():
+                f.superseded_at = utcnow()
+            from weza.domains.consent.crb_service import supersede_checks
+            supersede_checks(db, customer_id)
+            from weza.config import get_settings
+            if get_settings().identity_provider != "gnugrid":
+                from weza.domains.verification.service import request_check
+                check = request_check(db, cust)  # PENDING until the registry answers
+                emit(db, "IdentityCaptured", topic="customer", aggregate_type="customer", aggregate_id=customer_id,
+                     data={"changed": key, "check_id": str(check.id)})
+            # With the real gnuGRID, identity is checked Just-In-Time with the CRB pull at lender selection
+            # (weza/domains/consent/crb_service.py), so typing a NIN never triggers a billed call.
         key, value = key + "_captured", bool(value)
     existing = current_facts(db, customer_id).get(key)
     now = utcnow()
@@ -126,7 +138,8 @@ def upsert_fact(db: Session, customer_id: uuid.UUID, key: str, value, *, source:
         existing.superseded_at = now
     fact = Fact(customer_id=customer_id, key=key, value={"v": value}, source=source, source_channel=channel,
                 source_ref=source_ref, confidence=confidence,
-                verification_state="CONFIRMED" if confirmed else ("EXTRACTED" if source == "AI_EXTRACTED" else "SELF_REPORTED"),
+                verification_state=verification_state or ("CONFIRMED" if confirmed else
+                                                          ("EXTRACTED" if source == "AI_EXTRACTED" else "SELF_REPORTED")),
                 captured_at=now, confirmed_at=now if confirmed else None,
                 fresh_until=now + timedelta(days=FACT_FRESH_DAYS))
     db.add(fact)

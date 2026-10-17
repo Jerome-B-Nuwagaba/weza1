@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     gnugrid_base_url: str | None = None
     gnugrid_api_key: str | None = None
     gnugrid_verify_path: str = "/v1/identity/verify"  # confirm against gnuGRID's API documentation
+    # gnuGRID CRB, Just-In-Time: pulled only when an applicant has selected a lender and completes gnuGRID's consent
+    # OTP. The mock is free and makes no network calls (dev, staging, CI); production refuses it.
+    gngrid_use_mock: bool = True
+    gnugrid_timeout_seconds: float = 10.0
+    gnugrid_crb_otp_path: str = "/v1/crb/consent/otp"  # confirm against gnuGRID's API documentation
+    gnugrid_crb_verify_path: str = "/v1/crb/consent/verify"  # confirm against gnuGRID's API documentation
 
     # Document malware scanning (blueprint C7): basic is for test only; production uses ClamAV (clamd)
     malware_scanner: str = "basic"  # basic | clamav
@@ -108,6 +114,10 @@ class Settings(BaseSettings):
         else:
             problems.append(f"IDENTITY_PROVIDER '{self.identity_provider}' would mark applicants verified without a "
                             "real registry check")
+        if self.gngrid_use_mock:
+            problems.append("GNGRID_USE_MOCK is true — credit bureau reports would be simulated")
+        elif not (self.gnugrid_base_url and self.gnugrid_api_key):
+            problems.append("GNUGRID_BASE_URL / GNUGRID_API_KEY missing (CRB)")
         if self.malware_scanner != "clamav":
             problems.append("MALWARE_SCANNER must be clamav (the basic scanner is for testing)")
         if not self.smtp_url:
