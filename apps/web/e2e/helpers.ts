@@ -50,6 +50,8 @@ export async function customerSharesWith(request: APIRequestContext, institution
   expect(option, `${institution} should be offered (got ${offered.map((o: any) => o.institution).join(", ")})`).toBeTruthy();
   await send({ action: "select", value: option.match_id });
   await send({ action: "agree", value: cards("consent")[0].template_id });
+  // With CRB_JIT_ENABLED (or the real bureau) WEZA asks for the credit bureau check next: say yes.
+  if (data.node === "CRB_CHECK") await send({ action: "crb_consent", value: "yes" });
   const reference: string = cards("submitted")[0].reference;
   const customer = { Authorization: `Bearer ${session}` };
 

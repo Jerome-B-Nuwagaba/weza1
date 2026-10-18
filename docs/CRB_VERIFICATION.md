@@ -1,13 +1,53 @@
 # CRB identity verification (GnuGrid CRB) and the WhatsApp OTP review
 
-> **Decision (2026-10-18): the profile-time KYC check described here was NOT adopted.** WEZA calls the credit bureau
-> only Just-In-Time, after a customer has selected a lender and given gnuGRID consent
-> (`weza/domains/consent/crb_service.py`, `weza/integrations/gnugrid.py`), so every paid call belongs to a customer on
-> the way to a billable Qualified Opportunity. The `VERIFY_IDENTITY` journey step, its KYC service and
-> `verification/gnugrid.py`, the `identity.verification_check` table and the `CRB_*` settings were left out when
-> `feature/whatsapp-hardening` was merged into `test/e2e-integration`; they remain in commit `f235ee4`.
-> **Still useful:** §3 (the GnuGrid CRB Enquiries API v1.08 contract) is the reference for wiring the real client
-> behind the Just-In-Time pull. §5 (no OTP inside the WhatsApp chat) **was** adopted.
+> **Decision (2026-10-18): the bureau is called only Just-In-Time.** WEZA runs one credit enquiry after a customer
+> has chosen a lender and said "Yes" to the bureau check, so every paid call belongs to a customer on the way to a
+> billable Qualified Opportunity. The profile-time KYC check described in §1–§4 below was **not** adopted (it remains in
+> commit `f235ee4`). §5 (no OTP inside the WhatsApp chat) **was** adopted.
+
+## Go-live: what is built and what to plug in (updated 2026-10-18)
+
+**Built and tested (offline):** `weza/integrations/gnugrid.py` speaks the GnuGrid Enquiries API v1.08 exactly:
+`POST /v1/oauth/token` (client credentials, token cached, refreshed once on 401) → `POST
+/v1/credit-enquiries/request/new` (`identifier`, `entity_type: 0`, `identification_type: ii_country_id`, `reason`,
+`client_consented: "Yes"`, optional `pi_code`) → `POST /v1/credit-enquiries/individual/credit-report` (`enquiry_id`,
+`individual_id`, `format: "json"`), reduced to a summary (score, rating band, open/adverse accounts, worst arrears,
+UGX outstanding balance). The raw report (photo, contacts, addresses) is never stored or logged. The mock bureau
+answers with the same JSON, so the same parser runs in CI and on the demo.
+
+**Journey:** after "I agree — share with {lender}", the `CRB_CHECK` step asks for separate, explicit consent
+(`crb_service.CONSENT_TEXT`, **draft — needs legal approval**). Yes → the check runs; No → the request is shared
+without a report. gnuGRID removed its consent-code methods in API v1.05: WEZA records the consent (version, text
+hash, channel, time on `consent.crb_check`) and sends `client_consented: "Yes"`.
+
+**Outcomes:** VERIFIED (exactly one consistent profile whose surname and one forename appear in the applicant's name)
+→ report shared with that lender only. NOT_FOUND / MISMATCH → sharing refused with a neutral message; MISMATCH goes to
+review. AMBIGUOUS (several matches, formal/informal disagree), PENDING, bureau outages, billing problems → never block;
+review item / HIGH ops alert. Date of birth is not collected, so the identity check is NIN + name.
+
+**Cost protection:** one check per customer and lender at a time (advisory lock); results reused for 30 days; the
+check row and the enquiry id are committed before the next bureau call, so a failed report resumes with the paid
+enquiry; a timeout after sending (or a crash mid-call) becomes UNRESOLVED for operations and is never resent; at most 3
+new enquiries per customer per day.
+
+**To go live, set on Render (`weza-api`) and redeploy:**
+
+| Setting | Value |
+|---|---|
+| `GNUGRID_BASE_URL` | GnuGrid's https web-service URL, without `/v1` (TEST URL first; LIVE URL at migration) |
+| `GNUGRID_CLIENT_ID` / `GNUGRID_CLIENT_SECRET` | API credentials from GnuGrid (test credentials come from a GnuGrid admin user) |
+| `GNUGRID_ENQUIRY_REASON` | The `reason` text agreed with GnuGrid/legal (default "For loan application") |
+| `GNUGRID_PI_CODE` | Only if WEZA enquires as an aggregator for institutions |
+| `GNGRID_USE_MOCK` | `false` (switches from the offline bureau to GnuGrid) |
+| `IDENTITY_PROVIDER` | `gnugrid` (identity comes from the CRB check; no capture-time registry call) |
+
+Check the credentials for free first (token only, no enquiry, nothing charged):
+`python scripts/crb_connection_check.py`.
+
+**To settle with GnuGrid before live traffic:** is the credit-report call charged on top of the enquiry? What does
+`format: "summary"` return? How should PENDING enquiries be completed? Is `pi_code` per institution if WEZA enquires
+on their behalf? Subscription active and float loaded (billing errors: NONE / INSUFFICIENT / EXPIRED / CANCELLED).
+Consent wording approved by legal.
 
 Status (2026-10-16): **implemented and tested against a simulated bureau. Not yet exercised against GnuGrid** —
 the configured base URL is the LIVE, charged environment and no live call has been made. See §9 before any live test.

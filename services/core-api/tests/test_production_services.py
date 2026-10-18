@@ -19,7 +19,8 @@ from weza.platform.db import session_scope
 READY = dict(env="production", secret_key="s" * 40, vault_master_key="k" * 44, blind_index_key="b" * 32,
              mfa_enforced=True, otp_delivery="sms", sms_provider="africastalking", africastalking_username="weza",
              africastalking_api_key="key", malware_scanner="clamav", identity_provider="gnugrid",
-             gnugrid_base_url="https://gnugrid.example", gnugrid_api_key="k", gngrid_use_mock=False, smtp_url="smtps://apikey:pw@smtp.example:465",
+             gnugrid_base_url="https://gnugrid.example", gnugrid_client_id="c", gnugrid_client_secret="s",
+             gngrid_use_mock=False, smtp_url="smtps://apikey:pw@smtp.example:465",
              cors_origins="https://weza.example")
 
 

@@ -686,7 +686,8 @@ def consent_node(ctx: Ctx, st: dict, t: Trigger) -> Step:
                                   pref.contact_channel if pref else "phone")),
                               contact_window=t.payload.get("contact_window") or (pref.contact_window if pref else "ANY"))
         need.status = "CONSENTED"
-        return Step(to="CREATE_OPPORTUNITY", patch={"consent_id": str(c.id)})
+        nxt = "CRB_CHECK" if _crb_check_due(ctx, st, inst.id) else "CREATE_OPPORTUNITY"
+        return Step(to=nxt, patch={"consent_id": str(c.id)})
     if a == "decline":
         m.state = "PRESENTED"
         _need(ctx, st).status = "MATCHED"
@@ -696,6 +697,50 @@ def consent_node(ctx: Ctx, st: dict, t: Trigger) -> Step:
         return Step(to="PRESENT_OPTIONS")
     ctx.say("Please choose 'I agree' to share, or 'Not now'.")
     return Step(wait=Wait(REPLY, DAY))
+
+
+def _crb_check_due(ctx: Ctx, st: dict, institution_id: uuid.UUID) -> bool:
+    """Ask for the Just-In-Time bureau check only when it's enabled, the customer gave a NIN, and no result for this
+    lender can be reused (so nobody is asked, or charged, twice)."""
+    from weza.config import get_settings
+    from weza.domains.consent import crb_service
+    if not get_settings().crb_enabled:
+        return False
+    cust_id = uuid.UUID(st["customer_id"])
+    customer = ctx.db.get(Customer, cust_id)
+    if not identity.vault_read(ctx.db, customer.vault_token).get("nin"):
+        return False
+    return crb_service.reusable(ctx.db, cust_id, institution_id) is None
+
+
+def crb_check(ctx: Ctx, st: dict, t: Trigger) -> Step:
+    """Credit bureau check for the lender the customer just agreed to share with (explicit, separate consent).
+    Outcomes come only from crb_service (deterministic); a bureau problem never stops the request."""
+    from weza.domains.consent import crb_service
+    m = ctx.db.get(Match, uuid.UUID(st["selected_match_id"]))
+    inst = ctx.db.get(Institution, m.institution_id)
+    if t.kind == "ENTER":
+        ctx.say(crb_service.consent_text(inst.display_name),
+                quick_replies=[qr("Yes, check", "crb_consent", "yes"), qr("No, skip", "crb_consent", "no")])
+        return Step(wait=Wait(REPLY, DAY))
+    value, low = str(t.payload.get("value") or ""), _text(t).lower()
+    yes = value == "yes" or low in ("yes", "y", "ok", "okay", "agree", "i agree", "yes, check")
+    no = value == "no" or low in ("no", "n", "skip", "no thanks", "no, skip")
+    if not (yes or no):
+        ctx.say("Please reply Yes to run the credit bureau check, or No to skip it.",
+                quick_replies=[qr("Yes, check", "crb_consent", "yes"), qr("No, skip", "crb_consent", "no")])
+        return Step(wait=Wait(REPLY, DAY))
+    if no:
+        audit(ctx.db, _customer_actor(st), "GNGRID_CRB_CHECK_DECLINED", "match", m.id, institution_id=inst.id)
+        return Step(to="CREATE_OPPORTUNITY")
+    res = crb_service.run_check(ctx.db, _customer_actor(st), inst.id, channel=st.get("channel", "web"))
+    if res["status"] == "VERIFIED":
+        ctx.say(f"Thank you — your National ID details match the credit bureau record. {inst.display_name} will see "
+                "a summary of your credit history.")
+    elif res["status"] not in crb_service.FAILED:  # identity failures are explained when sharing is refused
+        ctx.say(f"The credit bureau check couldn't be completed right now. Your request continues — "
+                f"{inst.display_name} will do its own checks.")
+    return Step(to="CREATE_OPPORTUNITY")
 
 
 def create_opportunity(ctx: Ctx, st: dict, t: Trigger) -> Step:
@@ -844,6 +889,7 @@ GRAPH = register(GraphDef(type="customer_journey", version=1, start="GREET", nod
     "READINESS_CHECK": Node(readiness_check, 2), "REQUEST_MISSING_ITEM": Node(request_missing_item, 2, R),
     "OFFER_WAITING_ROOM": Node(offer_waiting_room, 0, "SAVE_EXIT"), "WAITING_ROOM": Node(waiting_room, 3, "EXPIRE"),
     "PRESENT_OPTIONS": Node(present_options, 0, R), "RERANK": Node(rerank, 2), "CONSENT": Node(consent_node, 0, R),
+    "CRB_CHECK": Node(crb_check, 1, R),
     "CREATE_OPPORTUNITY": Node(create_opportunity, 2), "CONFIRM": Node(confirm, 2),
     "TRACKING": Node(tracking, 2, "COMPLETE"), "RESCUE_ASK": Node(rescue_ask, 0, "CLOSE_NEED"),
     "CLOSE_NEED": Node(close_need, 2), "SAVE_EXIT": Node(save_exit, 2, "EXPIRE"), "REMIND": Node(remind, 2),

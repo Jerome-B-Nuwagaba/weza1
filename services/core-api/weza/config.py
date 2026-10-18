@@ -96,15 +96,21 @@ class Settings(BaseSettings):
     # Identity verification of loan applicants against a registry: simulator (demo/test) | gnugrid
     identity_provider: str = "simulator"
     identity_verification_required: bool = False  # true: requests are only shared once the NIN is verified
-    gnugrid_base_url: str | None = None
+    gnugrid_base_url: str | None = None  # GnuGrid CRB web service URL, without /v1 (test URL first, live at go-live)
+    # Legacy capture-time registry adapter (verification/adapters.py). Not used when IDENTITY_PROVIDER=gnugrid:
+    # identity is then confirmed by the Just-In-Time credit enquiry below.
     gnugrid_api_key: str | None = None
-    gnugrid_verify_path: str = "/v1/identity/verify"  # confirm against gnuGRID's API documentation
-    # gnuGRID CRB, Just-In-Time: pulled only when an applicant has selected a lender and completes gnuGRID's consent
-    # OTP. The mock is free and makes no network calls (dev, staging, CI); production refuses it.
+    gnugrid_verify_path: str = "/v1/identity/verify"
+    # gnuGRID CRB, Just-In-Time (GnuGrid Enquiries API v1.08; see docs/CRB_VERIFICATION.md): one credit enquiry +
+    # credit report, only after the applicant has chosen a lender and said "Yes" to the bureau check. Every
+    # SUCCESSFUL enquiry is charged. The mock speaks the same JSON offline (dev, staging, CI); production refuses it.
     gngrid_use_mock: bool = True
-    gnugrid_timeout_seconds: float = 10.0
-    gnugrid_crb_otp_path: str = "/v1/crb/consent/otp"  # confirm against gnuGRID's API documentation
-    gnugrid_crb_verify_path: str = "/v1/crb/consent/verify"  # confirm against gnuGRID's API documentation
+    crb_jit_enabled: bool = False  # ask for the bureau check in the journey even while the mock is on (demos)
+    gnugrid_client_id: str | None = None
+    gnugrid_client_secret: str | None = None
+    gnugrid_enquiry_reason: str = "For loan application"  # sent as the mandatory `reason`; agree wording with GnuGrid
+    gnugrid_pi_code: str | None = None  # aggregators only: institution code (e.g. CB000, MDI000, SACCO000)
+    gnugrid_timeout_seconds: float = 20.0
 
     # Document malware scanning (blueprint C7): basic is for test only; production uses ClamAV (clamd)
     malware_scanner: str = "basic"  # basic | clamav
@@ -146,16 +152,13 @@ class Settings(BaseSettings):
                 problems.append("SMS_PROVIDER=whatsapp needs WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID")
         else:
             problems.append(f"SMS_PROVIDER '{self.sms_provider}' does not deliver messages")
-        if self.identity_provider == "gnugrid":
-            if not (self.gnugrid_base_url and self.gnugrid_api_key):
-                problems.append("GNUGRID_BASE_URL / GNUGRID_API_KEY missing")
-        else:
+        if self.identity_provider != "gnugrid":
             problems.append(f"IDENTITY_PROVIDER '{self.identity_provider}' would mark applicants verified without a "
                             "real registry check")
         if self.gngrid_use_mock:
             problems.append("GNGRID_USE_MOCK is true — credit bureau reports would be simulated")
-        elif not (self.gnugrid_base_url and self.gnugrid_api_key):
-            problems.append("GNUGRID_BASE_URL / GNUGRID_API_KEY missing (CRB)")
+        else:
+            problems.extend(f"{name} missing (CRB)" for name in self.crb_missing)
         if self.malware_scanner != "clamav":
             problems.append("MALWARE_SCANNER must be clamav (the basic scanner is for testing)")
         if not self.smtp_url:
@@ -175,6 +178,21 @@ class Settings(BaseSettings):
     @property
     def whatsapp_verify_ready(self) -> bool:
         return is_configured(self.whatsapp_verify_token)
+
+    @property
+    def crb_enabled(self) -> bool:
+        """Whether the journey asks for the Just-In-Time bureau check: always with the real bureau, optionally on mock."""
+        return self.crb_jit_enabled or not self.gngrid_use_mock
+
+    @property
+    def crb_missing(self) -> list[str]:
+        """Settings the real GnuGrid client still needs (names only — safe to log and show)."""
+        need = {"GNUGRID_BASE_URL": self.gnugrid_base_url, "GNUGRID_CLIENT_ID": self.gnugrid_client_id,
+                "GNUGRID_CLIENT_SECRET": self.gnugrid_client_secret, "GNUGRID_ENQUIRY_REASON": self.gnugrid_enquiry_reason}
+        missing = [k for k, v in need.items() if not is_configured(v)]
+        if "GNUGRID_BASE_URL" not in missing and not (self.gnugrid_base_url or "").strip().lower().startswith("https://"):
+            missing.append("GNUGRID_BASE_URL (must be https://)")
+        return missing
 
     @property
     def graph_api_version(self) -> str:
