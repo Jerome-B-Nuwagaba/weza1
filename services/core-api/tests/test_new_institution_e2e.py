@@ -75,7 +75,7 @@ def test_new_institution_receives_a_whatsapp_customers_opportunity(client, as_us
     suffix = uuid.uuid4().hex[:6]
     inst = _onboard(client, as_user, suffix)
 
-    # --- customer, entirely over the WhatsApp webhook (signed payloads), including the OTP step
+    # --- customer, entirely over the WhatsApp webhook (signed payloads); the chat number is verified by the channel
     phone = fake_phone()
     verified_journey(client, phone)
     for answer in PROFILE:

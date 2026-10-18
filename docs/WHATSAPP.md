@@ -66,6 +66,10 @@ open request, the customer gets a short instruction instead. Voice notes, video,
 "typed messages" reply. Sending a photo as a *document* in WhatsApp keeps its full quality.
 
 ## Verification codes (OTP) through Meta
+**WhatsApp-started journeys no longer receive a code** (since 2026-10-16): the customer is already writing from the
+number, so the channel verifies it (see [CRB_VERIFICATION.md](CRB_VERIFICATION.md) §5). The settings below now only
+matter for journeys started on the web or app, which still verify the phone by OTP.
+
 Set `SMS_PROVIDER=whatsapp` and the codes are sent through the WhatsApp Cloud API with the same `WHATSAPP_*` credentials.
 Meta only delivers free-form messages inside 24 h of the customer's last message, so for journeys started on the web/app
 create an Authentication template in WhatsApp Manager (copy-code button), wait for approval and set

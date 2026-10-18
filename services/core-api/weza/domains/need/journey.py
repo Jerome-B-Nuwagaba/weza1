@@ -257,6 +257,11 @@ def verify_phone(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if st.get("customer_id"):
         return Step(to="BUILD_PROFILE")
     if t.kind == "ENTER":
+        if st.get("channel") == "whatsapp" and st.get("channel_phone_enc") and not st.get("otp_challenge_id"):
+            # The customer is writing from this number and Meta authenticated the sender (signed webhook). A code
+            # sent back into the same chat proves nothing new, so the channel itself verifies the number.
+            # Web/app keep the OTP: a browser proves nothing about a phone, and the OTP issues their session.
+            return _phone_verified(ctx, st, _dec(st["channel_phone_enc"]), method="whatsapp_channel")
         if st.get("channel_phone_enc") and not st.get("otp_challenge_id"):
             return _send_otp(ctx, st, _dec(st["channel_phone_enc"]))
         if st.get("otp_challenge_id"):
@@ -291,20 +296,28 @@ def verify_phone(ctx: Ctx, st: dict, t: Trigger) -> Step:
         emit(ctx.db, "PhoneVerificationFailed", topic="customer", aggregate_type="need", aggregate_id=st["need_id"],
              data={"code": res.code})
         return Step(wait=Wait(REPLY, DAY), patch=patch)
-    phone = _dec(st["phone_enc"])
+    return _phone_verified(ctx, st, _dec(st["phone_enc"]), method="otp")
+
+
+def _phone_verified(ctx: Ctx, st: dict, phone: str, *, method: str) -> Step:
+    """The phone is proven (OTP, or the WhatsApp channel itself): link or create the customer and continue."""
     need = _need(ctx, st)
     customer, is_new = customer_svc.get_or_create_by_phone(ctx.db, phone, attribution_id=need.attribution_id,
                                                            device_hash=st.get("device_hash"))
     need.customer_id = customer.id
     need.status = "PHONE_VERIFIED"
     ctx.instance.customer_id = customer.id
-    token = identity.create_customer_session(ctx.db, customer.id, st.get("channel", "web"))
-    ctx.card("session", {"token": token, "customer_id": str(customer.id), "returning": not is_new})
+    if method == "otp":  # web/app need a session; WhatsApp is identified by the chat itself
+        token = identity.create_customer_session(ctx.db, customer.id, st.get("channel", "web"))
+        ctx.card("session", {"token": token, "customer_id": str(customer.id), "returning": not is_new})
     audit(ctx.db, Actor(kind="CUSTOMER", id=customer.id, display="customer"), "customer.phone_verified", "customer",
-          customer.id)
+          customer.id, after={"method": method})
     emit(ctx.db, "PhoneVerified", topic="customer", aggregate_type="need", aggregate_id=need.id,
-         data={"returning": not is_new})
-    ctx.say("Thank you — your number is verified." + (" Welcome back!" if not is_new else ""))
+         data={"returning": not is_new, "method": method})
+    if method == "otp":
+        ctx.say("Thank you — your number is verified." + (" Welcome back!" if not is_new else ""))
+    elif not is_new:
+        ctx.say("Welcome back!")
     st2 = {**st, "customer_id": str(customer.id)}
     _sync_customer_from_intent(ctx, st2)
     return Step(to="BUILD_PROFILE", patch={"customer_id": str(customer.id), "otp_challenge_id": None,
