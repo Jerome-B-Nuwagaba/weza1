@@ -20,6 +20,7 @@ import uuid
 from datetime import timedelta
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from weza.config import get_settings
@@ -43,7 +44,7 @@ from weza.integrations.gnugrid import (
 )
 from weza.platform import crypto
 from weza.platform.context import Actor
-from weza.platform.db import SessionLocal, utcnow
+from weza.platform.db import SessionLocal, get_engine, utcnow
 from weza.platform.errors import ValidationFailed
 from weza.schemas.crb import CrbEnquiry, CrbProfile, CRBSummaryReport
 
@@ -65,8 +66,9 @@ REPORT_LABEL = ("Credit bureau summary from gnuGRID CRB, shared with the custome
 # ---------------------------------------------------------------- consent (DRAFT — needs legal approval)
 CONSENT_VERSION = "2026.10-draft"
 CONSENT_TEXT = ("To help {institution} review your request, WEZA can check your record at the credit reference bureau "
-                "(GnuGrid CRB) using your National ID number. {institution} will see a summary of your credit "
-                "history. This does not affect your credit score and never stops your request. Do you agree?")
+                "(GnuGrid CRB) using your National ID number and name. {institution} will see a summary of your "
+                "credit history. Your credit history never stops your request, but if the bureau can't match your "
+                "National ID and name, we won't share your request until they are corrected. Do you agree?")
 
 
 def consent_text(institution: str) -> str:
@@ -188,10 +190,18 @@ def run_check(db: Session, actor: Actor, institution_id: uuid.UUID, *, channel: 
         return {"status": "SKIPPED", "outcome": None, "report": None, "reason": "NIN_REQUIRED"}
     s = get_settings()
     fresh_outcome = report = None
-    own = SessionLocal()  # own transactions: what the bureau charged for is kept even if the caller rolls back
-    lock = f"crb:{actor.id}:{institution_id}"
+    # One check per customer and lender at a time. The advisory lock lives on its own connection, held for the whole
+    # call (a Session may switch pooled connections after each commit, which would strand a session-level lock).
+    lock, lock_conn = f"crb:{actor.id}:{institution_id}", get_engine().connect().execution_options(
+        isolation_level="AUTOCOMMIT")
     try:
-        own.execute(text("SELECT pg_advisory_lock(hashtextextended(:k, 0))"), {"k": lock})
+        lock_conn.execute(text("SET lock_timeout = '30s'"))
+        lock_conn.execute(text("SELECT pg_advisory_lock(hashtextextended(:k, 0))"), {"k": lock})
+    except OperationalError:
+        lock_conn.close()
+        return {"status": "IN_PROGRESS", "outcome": None, "report": None, "reason": "CHECK_IN_PROGRESS"}
+    own = SessionLocal()  # own transactions: what the bureau charged for is kept even if the caller rolls back
+    try:
         client = get_crb_client() if s.gngrid_use_mock or not s.crb_missing else None
         check = reusable(own, actor.id, institution_id)
         if check is not None and check.status == "REQUESTED" and check.created_at < utcnow() - STALE_REQUEST:
@@ -257,11 +267,11 @@ def run_check(db: Session, actor: Actor, institution_id: uuid.UUID, *, channel: 
         provider, reference = check.provider, check.enquiry_reference or check.enquiry_id
         verified_at = check.verified_at
     finally:
+        own.close()
         try:
-            own.execute(text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), {"k": lock})
-            own.commit()
+            lock_conn.execute(text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), {"k": lock})
         finally:
-            own.close()
+            lock_conn.close()
 
     if fresh_outcome:
         _apply(db, actor, check_id, institution_id, fresh_outcome, provider, reference, report)

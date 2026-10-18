@@ -428,6 +428,26 @@ def test_an_interrupted_enquiry_is_never_resent(client, journey, crb_on):
     assert r["status"] == "UNRESOLVED" and gnugrid.MOCK_BUREAU.enquiries == []
 
 
+def _advisory_locks() -> int:
+    from sqlalchemy import text
+    with session_scope() as db:
+        return db.execute(text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'")).scalar_one()
+
+
+def test_no_lock_is_left_behind_whatever_the_outcome(client, journey, crb_on, monkeypatch):
+    j = _selected(journey, "0772480018")
+    j.send(action="agree", value=j.cards("consent")[0]["template_id"])
+    body = {"selected_institution_id": str(_lakeside()), "consent": True}
+    for _ in range(4):  # same customer and lender again and again: never waits on a stranded lock
+        assert client.post("/api/v1/me/crb/check", headers=j.customer_headers, json=body).status_code == 200
+        assert _advisory_locks() == 0
+    monkeypatch.setattr(get_settings(), "gngrid_use_mock", False)  # early return: real bureau not configured
+    with session_scope() as db:
+        db.execute(CrbCheck.__table__.delete().where(CrbCheck.customer_id == _cid(j)))
+    r = client.post("/api/v1/me/crb/check", headers=j.customer_headers, json=body).json()
+    assert r["reason"] == "NOT_CONFIGURED" and _advisory_locks() == 0
+
+
 def test_each_lender_sees_only_the_report_pulled_with_its_consent():
     cid, a, b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     with session_scope() as db:
