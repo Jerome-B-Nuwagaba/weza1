@@ -4,9 +4,30 @@ The service never takes the customer, NIN or lender from a request body: they co
 identity vault and the customer's own lender selection. Only these normalised fields are ever stored or shown — never
 the bureau's raw payload (which carries photos, contact details and addresses)."""
 
+import uuid
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class CRBConsentRequest(BaseModel):
+    selected_institution_id: uuid.UUID
+    consent: bool
+
+
+class CRBConsentOTPChallenge(BaseModel):
+    challenge_id: uuid.UUID
+    selected_institution_id: uuid.UUID
+    expires_at: datetime
+    masked: str
+    digits: int = 10
+    dev_code: str | None = None
+
+
+class CRBConsentOTPVerify(CRBConsentRequest):
+    challenge_id: uuid.UUID | None = None
+    otp: str | None = Field(None, min_length=6, max_length=10, pattern=r"^[0-9]+$")
 
 # Identity outcome of one credit enquiry, decided by WEZA's deterministic rules (crb_service.interpret)
 IdentityOutcome = Literal["VERIFIED", "MISMATCH", "NOT_FOUND", "AMBIGUOUS", "PENDING"]

@@ -1,18 +1,31 @@
 "use client";
 
+import type { ApiError } from "@/lib/api";
+import { downloadFile } from "@/lib/download";
 import { useApi } from "@/lib/hooks";
 import { money, STATE_LABEL } from "@/lib/format";
-import { Bar, BarList, Card, ErrorState, Loading, PageHeader, Stat } from "@/components/ui";
+import { Bar, BarList, Button, Card, ErrorState, Loading, PageHeader, Stat, useToast } from "@/components/ui";
 
 export default function Reports() {
   const r = useApi<any>("/inst/reports/outcomes");
+  const { toast, node } = useToast();
+  async function exportCsv() {
+    try {
+      await downloadFile("/inst/reports/export", "weza-opportunities.csv");
+      toast("Export downloaded");
+    } catch (e) {
+      toast((e as ApiError).message || "Export failed. Please try again.");
+    }
+  }
   if (r.loading) return <Loading />;
   if (r.error) return <ErrorState error={r.error} />;
   const d = r.data;
   const max = Math.max(1, ...d.funnel.map((f: any) => f.count));
   return (
     <>
-      <PageHeader title="Outcomes & reports" subtitle={d.label} />
+      {node}
+      <PageHeader title="Outcomes & reports" subtitle={d.label}
+        actions={<Button variant="secondary" onClick={exportCsv}>Export CSV (no customer identity)</Button>} />
       <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3">
         <Stat label="Opportunities received" value={d.total} />
         <Stat label="Reported approved value" value={money(d.reported_approved_value)} />

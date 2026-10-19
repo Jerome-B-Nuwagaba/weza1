@@ -1,20 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { tokens } from "@/lib/api";
 import { Logo } from "./Logo";
 
 export function PublicShell({ children, compact }: { children: React.ReactNode; compact?: boolean }) {
-  const [hasSession, setHasSession] = useState(false);
-  useEffect(() => setHasSession(!!tokens.customer()), []);
   return (
     <div className="flex min-h-screen flex-col">
       <header className="border-b border-line bg-surface">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-3 px-4">
           <Logo />
           <nav className="flex items-center gap-1 text-[14px]">
-            {hasSession && <Link href="/c/status" className="rounded-lg px-3 py-1.5 text-ink hover:bg-blue-50">My requests</Link>}
+            <Link href="/c/requests" className="rounded-lg px-3 py-1.5 text-ink hover:bg-blue-50">My requests</Link>
             <Link href="/for-institutions" className="hidden rounded-lg px-3 py-1.5 text-muted hover:bg-blue-50 sm:inline">For institutions</Link>
             <Link href="/login" className="rounded-lg px-3 py-1.5 text-muted hover:bg-blue-50">Staff sign in</Link>
           </nav>

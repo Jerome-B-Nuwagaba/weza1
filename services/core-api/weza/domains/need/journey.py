@@ -318,6 +318,10 @@ def _phone_verified(ctx: Ctx, st: dict, phone: str, *, method: str) -> Step:
         ctx.say("Thank you — your number is verified." + (" Welcome back!" if not is_new else ""))
     elif not is_new:
         ctx.say("Welcome back!")
+    if st.get("channel") == "whatsapp":
+        from weza.domains.customer.auth import issue_magic_link
+        ctx.say("Open your requests, profile and documents securely: " + issue_magic_link(ctx.db, customer.id),
+                ephemeral=True)
     st2 = {**st, "customer_id": str(customer.id)}
     _sync_customer_from_intent(ctx, st2)
     return Step(to="BUILD_PROFILE", patch={"customer_id": str(customer.id), "otp_challenge_id": None,
@@ -726,21 +730,37 @@ def crb_check(ctx: Ctx, st: dict, t: Trigger) -> Step:
     value, low = str(t.payload.get("value") or ""), _text(t).lower()
     yes = value == "yes" or low in ("yes", "y", "ok", "okay", "agree", "i agree", "yes, check")
     no = value == "no" or low in ("no", "n", "skip", "no thanks", "no, skip")
-    if not (yes or no):
+    if not (yes or no) and not st.get("crb_challenge_id"):
         ctx.say("Please reply Yes to run the credit bureau check, or No to skip it.",
                 quick_replies=[qr("Yes, check", "crb_consent", "yes"), qr("No, skip", "crb_consent", "no")])
         return Step(wait=Wait(REPLY, DAY))
     if no:
         audit(ctx.db, _customer_actor(st), "GNGRID_CRB_CHECK_DECLINED", "match", m.id, institution_id=inst.id)
         return Step(to="CREATE_OPPORTUNITY")
-    res = crb_service.run_check(ctx.db, _customer_actor(st), inst.id, channel=st.get("channel", "web"))
+    if not st.get("crb_challenge_id") and crb_service.reusable(ctx.db, _customer_actor(st).id, inst.id) is None:
+        challenge = crb_service.issue_consent_otp(ctx.db, _customer_actor(st), inst.id,
+                                                  channel=st.get("channel", "web"))
+        ctx.say(f"Enter the 10-digit WEZA consent code sent to {challenge['masked']} to authorise "
+                f"the credit bureau check for {inst.display_name}.")
+        ctx.card("otp_input", {**challenge, "challenge_id": str(challenge["challenge_id"]),
+                               "selected_institution_id": str(inst.id),
+                               "expires_at": challenge["expires_at"].isoformat(), "purpose": "crb"})
+        return Step(wait=Wait(REPLY, DAY), patch={"crb_challenge_id": str(challenge["challenge_id"])})
+    try:
+        res = crb_service.run_check(ctx.db, _customer_actor(st), inst.id, channel=st.get("channel", "web"),
+            challenge_id=uuid.UUID(st["crb_challenge_id"]) if st.get("crb_challenge_id") else None,
+            otp=_text(t).replace(" ", ""))
+    except ValidationFailed as exc:
+        ctx.say(exc.message)
+        patch = {"crb_challenge_id": None} if exc.code in ("OTP_LOCKED", "OTP_EXPIRED") else {}
+        return Step(wait=Wait(REPLY, DAY), patch=patch)
     if res["status"] == "VERIFIED":
         ctx.say(f"Thank you — your National ID details match the credit bureau record. {inst.display_name} will see "
                 "a summary of your credit history.")
     elif res["status"] not in crb_service.FAILED:  # identity failures are explained when sharing is refused
         ctx.say(f"The credit bureau check couldn't be completed right now. Your request continues — "
                 f"{inst.display_name} will do its own checks.")
-    return Step(to="CREATE_OPPORTUNITY")
+    return Step(to="CREATE_OPPORTUNITY", patch={"crb_challenge_id": None})
 
 
 def create_opportunity(ctx: Ctx, st: dict, t: Trigger) -> Step:
@@ -798,6 +818,53 @@ def tracking(ctx: Ctx, st: dict, t: Trigger) -> Step:
     ctx.say("Here's where things stand:\n" + ("\n".join(lines) if lines else "• Nothing submitted yet."),
             quick_replies=[qr("Refresh status", "status")])
     return Step(wait=Wait(REPLY, 90 * DAY))
+
+
+def handle_consent_withdrawal(db, customer_id: uuid.UUID) -> list[dict]:
+    """An explicit stop command takes precedence over an outstanding information request."""
+    from weza.domains.consent.models import Consent
+    actor = Actor(kind="CUSTOMER", id=customer_id)
+    records = db.execute(select(Consent).where(Consent.customer_id == customer_id,
+                                               Consent.status == "GRANTED").with_for_update()).scalars().all()
+    for consent in records:
+        consent_svc.withdraw(db, actor, consent.id, customer_id, "Customer withdrew through WhatsApp")
+        if consent.opportunity_id:
+            opp = db.execute(select(Opportunity).where(Opportunity.id == consent.opportunity_id,
+                Opportunity.customer_id == customer_id, Opportunity.institution_id == consent.institution_id)
+                .with_for_update()).scalar_one_or_none()
+            if opp:
+                opp_svc.close_open_info_requests(db, opp, "Consent withdrawn")
+                if opp.state not in (*opp_svc.TERMINAL, "REPORTED_DISBURSED"):
+                    opp_svc.customer_withdraw(db, actor, opp)
+    return [{"type": "text", "text": "Your consent has been withdrawn. Institutions can no longer access "
+             "your shared details through WEZA." if records else "You have no active sharing consent to withdraw."}]
+
+
+def fulfil_info(db, customer_id: uuid.UUID, *, text: str | None = None,
+                document_id: uuid.UUID | None = None, doc_type: str | None = None) -> list[dict] | None:
+    """Route a reply to the customer's oldest active request; checked documents use the same mutation service."""
+    from weza.domains.consent.models import Consent
+    from weza.domains.opportunity.models import InfoRequest
+    query = select(InfoRequest).join(Opportunity, Opportunity.id == InfoRequest.opportunity_id).join(
+        Consent, Consent.id == Opportunity.consent_id).where(InfoRequest.customer_id == customer_id,
+        Opportunity.customer_id == customer_id, InfoRequest.institution_id == Opportunity.institution_id,
+        Consent.customer_id == customer_id, Consent.institution_id == Opportunity.institution_id,
+        Consent.status == "GRANTED", InfoRequest.status == "OPEN", Opportunity.state.in_(opp_svc.OPEN_STATES))
+    if document_id:
+        query = query.where(InfoRequest.kind == "DOCUMENT", InfoRequest.doc_type == doc_type)
+    request = db.execute(query.order_by(InfoRequest.created_at, InfoRequest.id).limit(1)
+                         .with_for_update(of=InfoRequest)).scalar_one_or_none()
+    if request is None:
+        return None
+    if request.kind == "DOCUMENT" and not document_id:
+        return [{"type": "text", "text": "Please send the requested document as a PDF, JPG or PNG in this chat: "
+                 + request.message}]
+    try:
+        opp_svc.fulfil_info_request(db, Actor(kind="CUSTOMER", id=customer_id), request,
+                                    response_text=text, document_id=document_id)
+    except ValidationFailed as exc:
+        return [{"type": "text", "text": exc.message}]
+    return [{"type": "text", "text": "Thank you. Your response has been sent to the institution."}]
 
 
 def status_label(state: str) -> str:
@@ -901,6 +968,8 @@ def format_for_channel(outputs: list[dict]) -> list[dict]:
     """Strip ephemeral/secret content before persisting outbound messages (session tokens, dev OTP codes)."""
     safe = []
     for o in outputs:
+        if o.get("ephemeral"):
+            continue
         if o.get("type") == "card" and o.get("card") == "session":
             continue
         if o.get("type") == "card" and o.get("card") == "otp_input":

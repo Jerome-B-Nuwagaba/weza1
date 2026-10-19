@@ -328,7 +328,7 @@ def _can_receive_work(db: Session, institution_id, user_id) -> bool:
         return False
     from weza.domains.identity.models import Membership, User
     row = db.execute(select(Membership, User).join(User, User.id == Membership.user_id).where(
-        Membership.user_id == user_id)).first()
+        Membership.user_id == user_id, Membership.institution_id == institution_id)).first()
     return bool(row and row[0].institution_id == institution_id and row[1].status == "ACTIVE"
                 and set(row[0].roles) & {"OFFICER", "MANAGER"})
 
@@ -342,7 +342,8 @@ def _least_loaded_officer(db: Session, institution_id, team_id) -> uuid.UUID | N
         return None
     loads = dict(db.execute(select(Assignment.user_id, func.count()).join(
         Opportunity, Opportunity.id == Assignment.opportunity_id).where(
-        Assignment.user_id.in_(officers), Opportunity.state.in_(OPEN_STATES)).group_by(Assignment.user_id)).all())
+        Assignment.user_id.in_(officers), Assignment.institution_id == institution_id,
+        Opportunity.institution_id == institution_id, Opportunity.state.in_(OPEN_STATES)).group_by(Assignment.user_id)).all())
     return min(officers, key=lambda u: (loads.get(u, 0), str(u)))
 
 
@@ -350,9 +351,10 @@ def assign_manual(db: Session, actor: Actor, opp: Opportunity, user_id: uuid.UUI
     from weza.domains.identity.models import Membership
     policy.require(actor, "opportunity.assign")
     policy.require_tenant(actor, opp.institution_id)
-    m = db.execute(select(Membership).where(Membership.user_id == user_id)).scalar_one_or_none()
+    m = db.execute(select(Membership).where(Membership.user_id == user_id,
+                                                  Membership.institution_id == actor.institution_id)).scalar_one_or_none()
     if m is None or m.institution_id != opp.institution_id:
-        raise ValidationFailed("That person is not in your institution.")
+        raise NotFound("Not found.")
     a = db.get(Assignment, opp.id)
     st = db.get(ServiceTarget, opp.institution_id) or ServiceTarget(institution_id=opp.institution_id)
     before = str(a.user_id) if a and a.user_id else None
@@ -602,14 +604,25 @@ def fulfil_info_request(db: Session, actor: Actor, r: InfoRequest, *, response_t
                         document_id: uuid.UUID | None = None) -> InfoRequest:
     """The customer answers. Answers are only accepted while the consent behind the opportunity is still granted.
     An answer to a question tied to a profile field is saved as a self-reported fact sourced to this request."""
-    if r.customer_id != actor.id:
+    r = db.execute(select(InfoRequest).where(InfoRequest.id == r.id, InfoRequest.customer_id == actor.id)
+                   .with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
+    if r is None:
         raise NotFound("Not found.")
     if r.status != "OPEN":
         raise ValidationFailed("This request is already closed.", code="NOT_OPEN")
-    opp = db.get(Opportunity, r.opportunity_id)
-    consent = db.get(Consent, opp.consent_id)
-    if consent is None or consent.status != "GRANTED" or opp.state not in OPEN_STATES:
+    if r.due_at and r.due_at <= utcnow():
+        raise ValidationFailed("This request has expired.", code="NOT_OPEN")
+    opp = db.execute(select(Opportunity).where(Opportunity.id == r.opportunity_id,
+                                               Opportunity.customer_id == actor.id,
+                                               Opportunity.institution_id == r.institution_id)).scalar_one_or_none()
+    consent = db.execute(select(Consent).where(Consent.id == opp.consent_id,
+                                               Consent.customer_id == actor.id,
+                                               Consent.institution_id == r.institution_id)).scalar_one_or_none() if opp else None
+    if consent is None or consent.status != "GRANTED" or consent.withdrawn_at or opp.state not in OPEN_STATES:
         raise ValidationFailed("This request is no longer active.", code="NOT_OPEN")
+    required = "DOCUMENTS" if r.kind == "DOCUMENT" else policy.fact_category(r.fact_key) if r.fact_key else None
+    if required and required not in consent.data_categories:
+        raise Forbidden("This information is outside the consented categories.", code="PRIVACY_VIOLATION")
     fact_saved = False
     if r.kind == "QUESTION":
         response_text = (response_text or "").strip()
@@ -627,11 +640,14 @@ def fulfil_info_request(db: Session, actor: Actor, r: InfoRequest, *, response_t
             fact_saved = conflict is None
         r.response_text = response_text
     else:
-        d = db.get(Document, document_id) if document_id else None
+        d = db.execute(select(Document).where(Document.id == document_id,
+                                              Document.customer_id == actor.id)).scalar_one_or_none() if document_id else None
         if d is None or d.customer_id != actor.id:
             raise ValidationFailed("Choose one of your documents.", code="DOCUMENT_REQUIRED")
         if d.pipeline_state not in ("STORED", "CONFIRMED"):
             raise ValidationFailed("That document is still being checked or was rejected.", code="DOCUMENT_NOT_READY")
+        if r.doc_type and d.doc_type != r.doc_type:
+            raise ValidationFailed("Choose a document of the requested type.", code="DOCUMENT_TYPE_MISMATCH")
         r.document_id = d.id
     _move_request(r, "FULFILLED")
     _log(db, opp, "INFO_PROVIDED", actor, data={"request_id": str(r.id), "kind": r.kind, "fact_key": r.fact_key})
@@ -704,7 +720,10 @@ def info_requests(db: Session, opp_id: uuid.UUID, *, include_responses: bool) ->
 
 
 def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
-    opp = db.get(Opportunity, opp_id)
+    query = select(Opportunity).where(Opportunity.id == opp_id)
+    if not actor.is_weza:
+        query = query.where(Opportunity.institution_id == actor.institution_id)
+    opp = db.execute(query).scalar_one_or_none()
     if opp is None:
         raise NotFound("Not found.")
     policy.require(actor, "opportunity.read_meta")

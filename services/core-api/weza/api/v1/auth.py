@@ -82,9 +82,13 @@ def me(actor: Actor = Depends(staff_actor), db: Session = DB):
     return s
 
 
+class MfaEnrolBeginIn(BaseModel):
+    existing_mfa_code: str | None = Field(None, min_length=6, max_length=8)
+
+
 @router.post("/mfa/enrol")
-def mfa_enrol(actor: Actor = Depends(staff_actor), db: Session = DB):
-    return identity.mfa_begin_enrolment(db, db.get(User, actor.id))
+def mfa_enrol(body: MfaEnrolBeginIn | None = None, actor: Actor = Depends(staff_actor), db: Session = DB):
+    return identity.mfa_begin_enrolment(db, db.get(User, actor.id), body.existing_mfa_code if body else None)
 
 
 class MfaEnrolIn(BaseModel):
@@ -99,13 +103,14 @@ def mfa_enrol_confirm(body: MfaEnrolIn, actor: Actor = Depends(staff_actor), db:
 
 class MfaEnrolWithToken(BaseModel):
     mfa_token: str
+    existing_mfa_code: str | None = Field(None, min_length=6, max_length=8)
 
 
 @router.post("/mfa/enrol-pending")
 def mfa_enrol_pending(body: MfaEnrolWithToken, db: Session = DB):
     """First-time enrolment during login when MFA is enforced."""
     user = identity._user_from_mfa_token(db, body.mfa_token)
-    return identity.mfa_begin_enrolment(db, user)
+    return identity.mfa_begin_enrolment(db, user, body.existing_mfa_code)
 
 
 class MfaEnrolPendingConfirm(BaseModel):

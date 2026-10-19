@@ -147,7 +147,10 @@ def set_status(db: Session, actor: Actor, prod: Product, to: str, reason: str) -
 
 
 def get_owned(db: Session, actor: Actor, product_id: uuid.UUID) -> Product:
-    prod = db.get(Product, product_id)
+    query = select(Product).where(Product.id == product_id)
+    if not actor.is_weza:
+        query = query.where(Product.institution_id == actor.institution_id)
+    prod = db.execute(query).scalar_one_or_none()
     if prod is None:
         raise NotFound("Not found.")
     policy.require_tenant(actor, prod.institution_id)

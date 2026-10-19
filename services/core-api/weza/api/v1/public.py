@@ -235,11 +235,30 @@ def inbound(db: Session, phone: str, *, text: str | None, button_id: str | None 
                                                 GraphInstance.status.in_(["WAITING", "RUNNING"]),
                                                 GraphInstance.state["wa_index"].astext == idx)
                     .order_by(GraphInstance.updated_at.desc()).limit(1)).scalar_one_or_none()
+    from weza.domains.customer.models import Customer
+    from weza.domains.identity.service import vault_find_by_phone
+    from weza.domains.need.journey import fulfil_info, handle_consent_withdrawal
+    rec = vault_find_by_phone(db, phone_e164)
+    cust = db.execute(select(Customer).where(Customer.vault_token == rec.id)).scalar_one_or_none() if rec else None
+    if message_id and db.execute(select(ConversationMessage.id).where(
+            ConversationMessage.message_id == message_id)).first():
+        return []
+    if cust:
+        command = (text or button_title or "").strip().upper()
+        outputs = handle_consent_withdrawal(db, cust.id) if command in ("WITHDRAW", "CANCEL CONSENT") else None
+        # OTP replies belong to the lender consent gate, even if an older lender has an open question.
+        if outputs is None and not (gi and gi.current_node == "CRB_CHECK"):
+            outputs = fulfil_info(db, cust.id, text=text or button_title)
+        if outputs is not None:
+            if gi:
+                journeys._persist(db, gi, "IN", {"type": "text", "text": "[Customer action received]"},
+                                  "whatsapp", message_id)
+                journeys._persist_outputs(db, gi, outputs, "whatsapp")
+            else:
+                for output in outputs:
+                    notify.send_customer_message(db, phone_e164, output["text"], channel="whatsapp", kind="action")
+            return outputs
     if gi is None or (text or "").strip().lower() in ("restart", "new request", "start over"):
-        from weza.domains.customer.models import Customer
-        from weza.domains.identity.service import vault_find_by_phone
-        rec = vault_find_by_phone(db, phone_e164)
-        cust = db.execute(select(Customer).where(Customer.vault_token == rec.id)).scalar_one_or_none() if rec else None
         inst, outputs = journeys.start_journey(db, channel="whatsapp", attribution={"src": "whatsapp", **(attribution or {})},
                                                customer_id=cust.id if cust else None,
                                                first_text=text if text and text.strip().lower() not in

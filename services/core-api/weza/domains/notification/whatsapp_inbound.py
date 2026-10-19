@@ -292,9 +292,17 @@ def _active_journey(db: Session, phone_index: str):
 def _outstanding_doc_types(db: Session, need_id: uuid.UUID, customer_id: uuid.UUID) -> list[str]:
     from weza.domains.customer.models import Document
     from weza.domains.matching.models import Match
+    from weza.domains.consent.models import Consent
+    from weza.domains.opportunity.models import InfoRequest, Opportunity
     have = set(db.execute(select(Document.doc_type).where(Document.customer_id == customer_id,
                                                           Document.pipeline_state == "STORED")).scalars())
-    out: list[str] = []
+    out: list[str] = list(db.execute(select(InfoRequest.doc_type).join(
+        Opportunity, Opportunity.id == InfoRequest.opportunity_id).join(Consent, Consent.id == Opportunity.consent_id)
+        .where(InfoRequest.customer_id == customer_id, Opportunity.customer_id == customer_id,
+               InfoRequest.institution_id == Opportunity.institution_id, Consent.customer_id == customer_id,
+               Consent.institution_id == Opportunity.institution_id, Consent.status == "GRANTED",
+               InfoRequest.kind == "DOCUMENT", InfoRequest.status == "OPEN")
+        .order_by(InfoRequest.created_at)).scalars())
     for m in db.execute(select(Match).where(Match.need_id == need_id, Match.state.in_(["RANKED", "PRESENTED"]),
                                             Match.readiness == "ALMOST")).scalars():
         for o in (m.explanation or {}).get("outstanding", []):
@@ -337,6 +345,11 @@ def _process_media(db: Session, row: WhatsappInbox, data: dict) -> None:
     label = docs.DOC_TYPES[doc_type]
     journeys._persist(db, gi, "IN", {"type": "text", "text": f"[Document sent: {label}]"}, "whatsapp",
                       row.provider_message_id)
+    from weza.domains.need.journey import fulfil_info
+    outputs = fulfil_info(db, customer_id, document_id=d.id, doc_type=doc_type)
+    if outputs:
+        journeys._persist_outputs(db, gi, outputs, "whatsapp")
+        return _finish(row, "DONE", "INFO_FULFILLED")
     send_customer_message(db, phone, f"Got it. I've saved your {label.lower()} securely. "
                           "If it's the wrong type, just tell me which document it was.",
                           channel="whatsapp", kind="document")

@@ -237,7 +237,10 @@ def set_capacity_override(db: Session, actor: Actor, ap: Appetite, override: str
 
 
 def get_owned(db: Session, actor: Actor, appetite_id: uuid.UUID) -> Appetite:
-    ap = db.get(Appetite, appetite_id)
+    query = select(Appetite).where(Appetite.id == appetite_id)
+    if not actor.is_weza:
+        query = query.where(Appetite.institution_id == actor.institution_id)
+    ap = db.execute(query).scalar_one_or_none()
     if ap is None:
         raise NotFound("Not found.")
     policy.require_tenant(actor, ap.institution_id)

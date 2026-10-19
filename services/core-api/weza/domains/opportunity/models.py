@@ -4,7 +4,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, Float, Index, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Enum, Float, Index, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -121,7 +121,10 @@ class InfoRequest(IdMixin, TimestampMixin, Base):
     doc_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     fact_key: Mapped[str | None] = mapped_column(String(60), nullable=True)  # QUESTION answers saved to profile
     message: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(12), default="OPEN")  # OPEN | FULFILLED | CANCELLED | EXPIRED
+    status: Mapped[str] = mapped_column(
+        Enum("OPEN", "FULFILLED", "CANCELLED", "EXPIRED", name="info_request_status", schema="opportunity"),
+        default="OPEN",
+    )
     requested_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     response_text: Mapped[str | None] = mapped_column(Text, nullable=True)

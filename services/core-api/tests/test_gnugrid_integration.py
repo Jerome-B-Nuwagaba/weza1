@@ -29,7 +29,7 @@ from weza.platform.events import drain
 from weza.schemas.crb import CrbEnquiry, CrbProfile
 
 BASE = "https://crb-test.gnugrid.example/api"
-REAL = dict(gngrid_use_mock=False, gnugrid_base_url=BASE, gnugrid_client_id="FAKE_client",
+REAL = dict(env="production", gngrid_use_mock=False, gnugrid_base_url=BASE, gnugrid_client_id="FAKE_client",
             gnugrid_client_secret="FAKE_secret", gnugrid_enquiry_reason="For loan application")
 
 
@@ -116,7 +116,8 @@ def fake(monkeypatch):
     for k, v in REAL.items():
         monkeypatch.setattr(s, k, v)
     bureau = FakeGnuGrid()
-    monkeypatch.setattr(httpx, "post", bureau)
+    monkeypatch.setattr(gnugrid.GNUGridHTTPClient, "_post",
+                        lambda self, url, body, headers: bureau(url, body, headers, self.timeout))
     return bureau
 
 
@@ -125,7 +126,9 @@ def fake(monkeypatch):
 
 def test_factory_uses_the_mock_by_default_and_the_real_client_only_when_fully_configured(monkeypatch):
     assert isinstance(gnugrid.get_crb_client(), gnugrid.MockGNUGridClient)
-    monkeypatch.setattr(gnugrid, "get_settings", lambda: Settings(gngrid_use_mock=False))
+    monkeypatch.setattr(gnugrid, "get_settings", lambda: Settings(env="test", gngrid_use_mock=False))
+    assert isinstance(gnugrid.get_crb_client(), gnugrid.MockGNUGridClient)
+    monkeypatch.setattr(gnugrid, "get_settings", lambda: Settings(env="production", gngrid_use_mock=False))
     with pytest.raises(gnugrid.CRBConfigError) as exc:  # not configured -> fails closed, names what's missing
         gnugrid.get_crb_client()
     assert "GNUGRID_CLIENT_ID" in str(exc.value) and "GNUGRID_CLIENT_SECRET" in str(exc.value)
@@ -133,7 +136,7 @@ def test_factory_uses_the_mock_by_default_and_the_real_client_only_when_fully_co
     with pytest.raises(gnugrid.CRBConfigError, match="https"):
         gnugrid.get_crb_client()
     monkeypatch.setattr(gnugrid, "get_settings", lambda: Settings(**REAL))
-    assert type(gnugrid.get_crb_client()) is gnugrid.GNUGridClient
+    assert type(gnugrid.get_crb_client()) is gnugrid.GNUGridHTTPClient
 
 
 def test_real_client_sends_exactly_the_documented_requests(fake, monkeypatch):
@@ -260,6 +263,8 @@ def _agree(j, crb: str | None = "yes"):
     if crb:
         assert any("credit reference bureau" in t for t in j.texts()), j.texts()
         j.send(action="crb_consent", value=crb)
+        if crb == "yes" and j.cards("otp_input") and j.cards("otp_input")[-1].get("purpose") == "crb":
+            j.send(j.cards("otp_input")[-1]["dev_code"])
     return j
 
 
@@ -275,6 +280,14 @@ def _checks(cid) -> list[CrbCheck]:
         out = list(rows)
         db.expunge_all()
         return out
+
+
+def _check_body(client, j):
+    body = {"selected_institution_id": str(_lakeside()), "consent": True}
+    result = client.post("/api/v1/me/crb/challenge", headers=j.customer_headers, json=body)
+    assert result.status_code == 200, result.text
+    challenge = result.json()
+    return {**body, "challenge_id": challenge["challenge_id"], "otp": challenge["dev_code"]}
 
 
 def test_journey_has_no_bureau_step_while_it_is_disabled(journey):
@@ -384,7 +397,7 @@ def test_no_float_alerts_operations_and_the_request_continues(journey, crb_on):
 def test_a_lender_is_never_billed_twice_for_the_same_customer(client, journey, crb_on):
     j = _selected(journey, "0772480007")
     j.send(action="agree", value=j.cards("consent")[0]["template_id"])
-    body = {"selected_institution_id": str(_lakeside()), "consent": True}
+    body = _check_body(client, j)
     results = [client.post("/api/v1/me/crb/check", headers=j.customer_headers, json=body).json() for _ in range(3)]
     assert [r["status"] for r in results] == ["VERIFIED"] * 3 and results[1]["reused"] and results[2]["reused"]
     assert len(gnugrid.MOCK_BUREAU.enquiries) == 1  # replayed three times, charged once
@@ -400,7 +413,7 @@ def test_a_failed_report_resumes_with_the_paid_enquiry(client, journey, crb_on, 
     monkeypatch.setattr(gnugrid.GNUGridClient, "credit_report", down)
     j = _selected(journey, "0772480016")
     j.send(action="agree", value=j.cards("consent")[0]["template_id"])
-    body = {"selected_institution_id": str(_lakeside()), "consent": True}
+    body = _check_body(client, j)
     first = client.post("/api/v1/me/crb/check", headers=j.customer_headers, json=body).json()
     assert first["status"] == "ENQUIRED" and first["report"] is None
     monkeypatch.setattr(gnugrid.GNUGridClient, "credit_report", real)
@@ -437,13 +450,15 @@ def _advisory_locks() -> int:
 def test_no_lock_is_left_behind_whatever_the_outcome(client, journey, crb_on, monkeypatch):
     j = _selected(journey, "0772480018")
     j.send(action="agree", value=j.cards("consent")[0]["template_id"])
-    body = {"selected_institution_id": str(_lakeside()), "consent": True}
+    body = _check_body(client, j)
     for _ in range(4):  # same customer and lender again and again: never waits on a stranded lock
         assert client.post("/api/v1/me/crb/check", headers=j.customer_headers, json=body).status_code == 200
         assert _advisory_locks() == 0
-    monkeypatch.setattr(get_settings(), "gngrid_use_mock", False)  # early return: real bureau not configured
     with session_scope() as db:
         db.execute(CrbCheck.__table__.delete().where(CrbCheck.customer_id == _cid(j)))
+    body = _check_body(client, j)
+    monkeypatch.setattr(get_settings(), "gngrid_use_mock", False)  # early return: real bureau not configured
+    monkeypatch.setattr(get_settings(), "env", "production")
     r = client.post("/api/v1/me/crb/check", headers=j.customer_headers, json=body).json()
     assert r["reason"] == "NOT_CONFIGURED" and _advisory_locks() == 0
 

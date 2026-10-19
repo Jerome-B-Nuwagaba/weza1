@@ -149,7 +149,9 @@ def _decide(actor: Actor, opp, assignment, consent) -> DisclosureDecision:
     )
     if not relationship:
         return DisclosureDecision("PERMIT_WITH_RESTRICTED_FIELDS", [], "not_assigned")
-    if consent is None or consent.status != "GRANTED" or consent.institution_id != opp.institution_id:
+    if (consent is None or consent.status != "GRANTED" or consent.withdrawn_at is not None
+            or consent.institution_id != opp.institution_id or consent.customer_id != opp.customer_id
+            or consent.match_id != opp.match_id or consent.need_id != opp.need_id):
         return DisclosureDecision("PERMIT_WITH_RESTRICTED_FIELDS", [], "consent_not_valid")
     fields = [f for c in consent.data_categories for f in CATEGORY_FIELDS.get(c, [])]
     return DisclosureDecision("PERMIT", fields, "consented")

@@ -2,12 +2,16 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
-import { api } from "@/lib/api";
+import type { ApiError } from "@/lib/api";
+import { downloadFile } from "@/lib/download";
+import { useMe } from "@/components/StaffShell";
 import { useApi } from "@/lib/hooks";
 import { OpportunityRow } from "@/components/opportunity";
-import { Button, EmptyState, ErrorState, Input, Loading, PageHeader, Select, Tabs } from "@/components/ui";
+import { Button, EmptyState, ErrorState, Input, Loading, PageHeader, Select, Tabs, useToast } from "@/components/ui";
 
 function Feed() {
+  const { can } = useMe();
+  const { toast, node } = useToast();
   const params = useSearchParams();
   const router = useRouter();
   const [view, setView] = useState(params.get("view") || "open");
@@ -19,17 +23,17 @@ function Feed() {
   const feed = useApi<any>(`/inst/opportunities?${qs}`, [qs.toString()]);
 
   async function exportCsv() {
-    const r: Response = await api("/inst/reports/export", { raw: true });
-    const blob = await r.blob();
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "weza-opportunities.csv";
-    a.click();
+    try {
+      await downloadFile("/inst/reports/export", "weza-opportunities.csv");
+    } catch (e) {
+      toast((e as ApiError).message || "Export failed. Please try again.");
+    }
   }
 
   return (
     <>
-      <PageHeader title="Opportunity Feed" subtitle={feed.data ? `Ranked by: ${feed.data.ranking}.` : "Qualified, consented opportunities routed to your institution."} actions={<Button variant="secondary" onClick={exportCsv}>Export CSV</Button>} />
+      {node}
+      <PageHeader title="Opportunity Feed" subtitle={feed.data ? `Ranked by: ${feed.data.ranking}.` : "Qualified, consented opportunities routed to your institution."} actions={can("analytics.read") ? <Button variant="secondary" onClick={exportCsv}>Export CSV</Button> : undefined} />
       <Tabs tabs={[["open", "Open"], ["mine", "Mine"], ["unassigned", "Unassigned"], ["closed", "Closed"], ["all", "All"]]} value={view} onChange={(v) => { setView(v); router.replace(`/institution/feed?view=${v}`); }} />
       <div className="mb-4 grid grid-cols-2 gap-2 md:grid-cols-4">
         <Select value={sort} onChange={(e) => setSort(e.target.value)} options={[["priority", "Sort: priority"], ["match", "Sort: match"], ["amount", "Sort: amount"], ["age", "Sort: waiting longest"]]} aria-label="Sort" />

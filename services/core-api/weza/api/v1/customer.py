@@ -3,19 +3,23 @@ documents, consents and withdrawal (FSD §8, §13, BRD §33)."""
 
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from weza.api.deps import DB, customer_actor
+from weza.api.deps import DB, client_ip, customer_actor, require_customer_csrf
 from weza.domains.consent import service as consent_svc
 from weza.domains.consent.models import Consent
+from weza.domains.customer import auth as customer_auth
 from weza.domains.customer import documents as docs
 from weza.domains.customer import service as customer_svc
 from weza.domains.customer.models import Customer, Document, Preference
+from weza.domains.identity import service as identity
+from weza.domains.identity.models import OtpChallenge
 from weza.domains.identity.service import mask_phone, vault_read
 from weza.domains.institution.models import Institution
+from weza.domains.intelligence.parsing import parse_phone
 from weza.domains.matching import engine
 from weza.domains.matching.models import Match, WaitingEntry
 from weza.domains.misc_models import Notification
@@ -25,14 +29,85 @@ from weza.domains.need.service import journey_token, need_summary
 from weza.domains.opportunity import service as opp_svc
 from weza.domains.opportunity.models import Opportunity, Outcome
 from weza.domains.verification import service as verification
+from weza.platform import crypto
 from weza.platform.context import Actor
 from weza.platform.db import utcnow
-from weza.platform.errors import NotFound, ValidationFailed
+from weza.platform.errors import NotFound, Unauthorized, ValidationFailed
 from weza.platform.models import GraphInstance
 
 router = APIRouter(prefix="/me", tags=["customer"])
 FIELD_LABELS = customer_svc.FIELD_LABELS
 EDITABLE = customer_svc.EDITABLE
+
+
+@router.get("/auth/magic-verify")
+def magic_verify(request: Request, response: Response, token: str = Query(..., min_length=16, max_length=256),
+                 db: Session = DB):
+    require_customer_csrf(request)
+    session = customer_auth.exchange_magic_token(db, token)
+    customer_auth.set_session_cookie(response, session)
+    return {"ok": True}
+
+
+class PhoneLoginRequest(BaseModel):
+    phone: str = Field(..., min_length=9, max_length=32)
+
+
+class PhoneLoginVerify(PhoneLoginRequest):
+    challenge_id: uuid.UUID
+    code: str = Field(..., pattern=r"^\d{6}$")
+
+
+@router.post("/auth/otp/request")
+def request_phone_login(body: PhoneLoginRequest, request: Request, response: Response, db: Session = DB):
+    require_customer_csrf(request)
+    phone = parse_phone(body.phone)
+    if not phone:
+        raise ValidationFailed("Please enter a valid Ugandan mobile number.")
+    result = identity.issue_otp(db, phone, ip=client_ip(request), channel="customer_login")
+    if not result.ok:
+        db.commit()  # Persist delivery failures and resend/rate-limit counters before the error rollback.
+        raise ValidationFailed(result.message, code=result.code)
+    response.headers["Cache-Control"] = "no-store"
+    out = {"challenge_id": str(result.challenge.id), "message": result.message}
+    if result.dev_code:
+        out["dev_code"] = result.dev_code
+    return out
+
+
+@router.post("/auth/otp/verify")
+def verify_phone_login(body: PhoneLoginVerify, request: Request, response: Response, db: Session = DB):
+    require_customer_csrf(request)
+    phone = parse_phone(body.phone)
+    challenge = db.get(OtpChallenge, body.challenge_id)
+    if (not phone or challenge is None or challenge.channel != "customer_login" or challenge.journey_id is not None
+            or challenge.phone_index != crypto.blind_index("phone", phone)):
+        raise Unauthorized("Please request a new phone verification code.", code="OTP_NOT_FOUND")
+    result = identity.verify_otp(db, challenge.id, body.code)
+    if not result.ok:
+        db.commit()  # Wrong attempts and lockout must survive the request dependency's rollback.
+        raise Unauthorized(result.message, code=result.code)
+    customer, _ = customer_svc.get_or_create_by_phone(db, phone)
+    if customer.status != "ACTIVE":
+        db.commit()
+        raise Unauthorized("Account not active.")
+    customer_auth.set_session_cookie(response, identity.create_customer_session(db, customer.id))
+    return {"ok": True}
+
+
+@router.get("/auth/session")
+def customer_session(response: Response, actor: Actor = Depends(customer_actor)):
+    response.headers["Cache-Control"] = "no-store"
+    return {"authenticated": True}
+
+
+@router.post("/auth/logout")
+def customer_logout(request: Request, response: Response, db: Session = DB):
+    require_customer_csrf(request)
+    customer_auth.revoke_browser_session(db, request.cookies.get(customer_auth.COOKIE))
+    response.delete_cookie(customer_auth.COOKIE, path=customer_auth.COOKIE_PATH)
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True}
 
 
 def _need_owned(db: Session, actor: Actor, need_id: uuid.UUID) -> FinancialNeed:

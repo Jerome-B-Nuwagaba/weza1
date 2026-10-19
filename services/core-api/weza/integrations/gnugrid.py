@@ -26,6 +26,8 @@ secrets, and the raw credit report (photo, contacts, addresses) is reduced to a 
 """
 
 import logging
+import asyncio
+from abc import ABC, abstractmethod
 import re
 import threading
 import time
@@ -185,7 +187,17 @@ _tokens = _TokenCache()
 # ------------------------------------------------------------------ client
 
 
-class GNUGridClient:
+class AbstractGNUGridClient(ABC):
+    @abstractmethod
+    def credit_enquiry(self, identifier: str, **kwargs) -> CrbEnquiry:
+        """Create a chargeable enquiry after the service has verified lender-bound consent."""
+
+    @abstractmethod
+    def credit_report(self, enquiry_id: str, individual_id: str, *, reference: str) -> CRBSummaryReport:
+        """Reduce an existing enquiry to a non-identifying credit summary."""
+
+
+class GNUGridClient(AbstractGNUGridClient):
     name = "gnugrid"
 
     def __init__(self, post=None):
@@ -199,6 +211,8 @@ class GNUGridClient:
         self._post_fn = post
 
     def _post(self, url: str, body: dict, headers: dict) -> httpx.Response:
+        if not self._post_fn and not get_settings().is_production:
+            raise CRBConfigError("CONFIG", "Live gnuGRID calls are permitted only in production")
         return (self._post_fn or httpx.post)(url, json=body, headers=headers, timeout=self.timeout)
 
     @staticmethod
@@ -367,6 +381,21 @@ class MockBureau:
 MOCK_BUREAU = MockBureau()
 
 
+class GNUGridHTTPClient(GNUGridClient):
+    """Async HTTP transport adapted to the synchronous database service worker thread."""
+
+    async def _post_async(self, url: str, body: dict, headers: dict) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
+            return await client.post(url, json=body, headers=headers)
+
+    def _post(self, url: str, body: dict, headers: dict) -> httpx.Response:
+        if self._post_fn:
+            return self._post_fn(url, json=body, headers=headers, timeout=self.timeout)
+        if not get_settings().is_production:
+            raise CRBConfigError("CONFIG", "Live gnuGRID calls are permitted only in production")
+        return asyncio.run(self._post_async(url, body, headers))
+
+
 class MockGNUGridClient(GNUGridClient):
     """The real client and parser over the offline bureau. Free; makes no network calls."""
 
@@ -375,6 +404,9 @@ class MockGNUGridClient(GNUGridClient):
 
     def __init__(self, bureau: MockBureau | None = None):
         super().__init__(post=bureau or MOCK_BUREAU)
+        # Never share bearer token cache entries with a configured production endpoint.
+        self.base, self.client_id, self.secret = "https://mock.gnugrid.invalid", "mock", ""
+        self.simulate_defaults = False
 
     def credit_enquiry(self, identifier: str, *, identification_type: str = NIN, pi_code: str | None = None,
                        claimed_name: str | None = None) -> CrbEnquiry:
@@ -389,9 +421,17 @@ class MockGNUGridClient(GNUGridClient):
         finally:
             self._post_fn = real
 
+    def credit_report(self, enquiry_id: str, individual_id: str, *, reference: str) -> CRBSummaryReport:
+        report = super().credit_report(enquiry_id, individual_id, reference=reference)
+        if self.simulate_defaults:
+            return report.model_copy(update={"credit_score_band": "POOR", "numeric_score": 410,
+                                              "has_active_defaults": True, "adverse_accounts": 1})
+        return report
 
-def get_crb_client() -> GNUGridClient:
-    return MockGNUGridClient() if get_settings().gngrid_use_mock else GNUGridClient()
+
+def get_crb_client() -> AbstractGNUGridClient:
+    s = get_settings()
+    return MockGNUGridClient() if s.gngrid_use_mock or not s.is_production else GNUGridHTTPClient()
 
 
 def normalise_name(s: str | None) -> list[str]:

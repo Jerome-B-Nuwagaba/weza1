@@ -12,3 +12,5 @@ apps/mobile/build/
 apps/mobile/.dart_tool/
 apps/web/test-results/
 apps/web/playwright-report/
+
+.test-artifacts/

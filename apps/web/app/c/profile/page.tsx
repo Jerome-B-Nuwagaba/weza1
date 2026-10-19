@@ -1,23 +1,22 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, ApiError, tokens } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { date } from "@/lib/format";
 import { PublicShell } from "@/components/PublicShell";
-import { Badge, Banner, Button, Card, EmptyState, ErrorState, Input, Loading, PageHeader, Select } from "@/components/ui";
+import { CustomerSessionExpired } from "@/components/CustomerSessionExpired";
+import { Badge, Banner, Button, Card, ErrorState, Input, Loading, PageHeader, Select } from "@/components/ui";
 
 const SOURCE: Record<string, string> = { CUSTOMER: "You told us", AI_EXTRACTED: "Understood by WEZA", DOCUMENT: "From a document", OPS: "WEZA support", REGISTRY: "Checked with the national register" };
 const ID_TONE: Record<string, "success" | "danger" | "warning" | "muted"> = { VERIFIED: "success", MISMATCH: "danger", NOT_FOUND: "danger", PENDING: "warning", NOT_CHECKED: "muted" };
 const PREFS: Record<string, string> = { LOWER_MONTHLY_PAYMENT: "Lower monthly payment", LOW_COLLATERAL: "Little or no collateral", FAST_RESPONSE: "Fast response", DIGITAL: "Digital process", NEAR_ME: "Near me", SHORTER_TENOR: "Shorter repayment" };
 
 export default function ProfilePage() {
-  const [authed, setAuthed] = useState<boolean | null>(null);
-  useEffect(() => setAuthed(!!tokens.customer()), []);
   return (
     <PublicShell>
       <div className="mx-auto w-full max-w-3xl px-4 py-8">
-        {authed === false ? <EmptyState title="Verify your phone first" action={<Button href="/start">Start</Button>} /> : authed && <Inner />}
+        <Inner />
       </div>
     </PublicShell>
   );
@@ -49,6 +48,7 @@ function Inner() {
   }
 
   if (p.loading) return <Loading />;
+  if (p.error?.status === 401) return <CustomerSessionExpired />;
   if (p.error) return <ErrorState error={p.error} onRetry={p.reload} />;
   const c = p.data.customer;
   return (
@@ -109,14 +109,14 @@ function IdentityCard({ identity, onSaved }: { identity: any; onSaved: (r: any, 
       setOpen(false);
       setNin("");
       setName("");
-      onSaved(r, "Thanks — we're checking your National ID now. This usually takes a moment.");
+      onSaved(r, "ID Profile Saved. Verification will be performed upon final lender selection.");
     } catch (e) {
       setErr((e as ApiError).message);
     }
   }
   if (!identity) return null;
   return (
-    <Card title="National ID" className="mt-4" subtitle="WEZA checks your National ID number with the national register so institutions know you are who you say you are.">
+    <Card title="National ID" className="mt-4" subtitle="Save your National ID details here. Verification will be performed upon final lender selection.">
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={ID_TONE[identity.status] || "muted"}>{identity.label}</Badge>
         {identity.checked_at && <span className="text-[12px] text-muted">{date(identity.checked_at)}</span>}
