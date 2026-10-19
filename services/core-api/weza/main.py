@@ -7,12 +7,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 import weza.consumers  # noqa: F401 — registers event consumers
 import weza.domains.need.journey  # noqa: F401 — registers the customer journey graph
 from weza.api.v1 import admin, auth, crb, customer, institution, public
 from weza.config import get_settings
 from weza.platform.context import correlation_id_var
+from weza.platform.db import session_scope
 from weza.platform.errors import install_error_handlers
 from weza.platform.logging import configure_logging
 
@@ -25,7 +28,7 @@ async def _lifespan(app: FastAPI):
     if getattr(app.state, "start_worker", False):
         from weza.worker import Worker
         worker = Worker()
-        worker.start_thread()
+        app.state.worker_thread = worker.start_thread()
     yield
     if worker:
         worker.stop()
@@ -37,6 +40,8 @@ def create_app(start_worker: bool | None = None) -> FastAPI:
     if s.is_production and (problems := s.production_problems()):
         raise RuntimeError("Refusing to start in production: " + "; ".join(problems))
     log.info("channel_config", extra={"data": s.channel_config_summary()})  # names only, never values
+    if s.whatsapp_required and (missing := s.whatsapp_missing):
+        raise RuntimeError("WhatsApp is required but not configured: " + ", ".join(missing))
     app = FastAPI(title="WEZA Core API", version="1.0.0", lifespan=_lifespan,
                   description="Intelligent financial marketplace — zero core-system integration.",
                   docs_url=None if s.is_production else "/docs", openapi_url="/api/v1/openapi.json")
@@ -76,6 +81,23 @@ def create_app(start_worker: bool | None = None) -> FastAPI:
 
     @app.get("/healthz")
     def healthz():
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    def readyz():
+        # Render must check the database and the consumer that actually answers WhatsApp,
+        # rather than marking an HTTP-only process healthy while messages accumulate.
+        try:
+            with session_scope() as db:
+                db.execute(text("SELECT 1"))
+        except Exception:  # noqa: BLE001 — never expose database connection details
+            return JSONResponse({"status": "unavailable", "component": "database"}, status_code=503)
+        if app.state.start_worker:
+            thread = getattr(app.state, "worker_thread", None)
+            if thread is None or not thread.is_alive():
+                return JSONResponse({"status": "unavailable", "component": "worker"}, status_code=503)
+        if s.whatsapp_required and s.whatsapp_missing:
+            return JSONResponse({"status": "unavailable", "component": "whatsapp"}, status_code=503)
         return {"status": "ok"}
 
     app.state.start_worker = s.run_worker_inprocess if start_worker is None else start_worker

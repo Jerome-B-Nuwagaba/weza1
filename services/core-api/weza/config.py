@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     # >>> USER INPUT REQUIRED: real WhatsApp Cloud API values (Meta developer dashboard → WhatsApp → API Setup,
     # and App settings → Basic for the app secret). Put them ONLY in services/core-api/.env (untracked).
     whatsapp_token: str | None = None  # permanent/system-user access token
+    whatsapp_required: bool = False  # hosted WhatsApp service: refuse silent simulator fallback
     whatsapp_phone_number_id: str | None = None  # "Phone number ID" (not the phone number itself)
     whatsapp_app_secret: str | None = None  # signs inbound webhooks (X-Hub-Signature-256)
     whatsapp_verify_token: str | None = None  # any string you choose; must match the Meta webhook form
@@ -170,6 +171,15 @@ class Settings(BaseSettings):
     @property
     def whatsapp_send_ready(self) -> bool:
         return is_configured(self.whatsapp_token) and is_configured(self.whatsapp_phone_number_id)
+
+    @property
+    def whatsapp_missing(self) -> list[str]:
+        return [name for name, value in {
+            "WHATSAPP_TOKEN": self.whatsapp_token,
+            "WHATSAPP_PHONE_NUMBER_ID": self.whatsapp_phone_number_id,
+            "WHATSAPP_APP_SECRET": self.whatsapp_app_secret,
+            "WHATSAPP_VERIFY_TOKEN": self.whatsapp_verify_token,
+        }.items() if not is_configured(value)]
 
     @property
     def whatsapp_webhook_ready(self) -> bool:

@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 os.environ.setdefault("RUN_WORKER_INPROCESS", "false")
 os.environ.setdefault("OTP_DELIVERY", "display")
 os.environ.setdefault("ENV", "test")
+os.environ["WHATSAPP_REQUIRED"] = "false"  # tests opt in without inheriting a hosted deployment's flag
 os.environ.pop("ANTHROPIC_API_KEY", None)  # tests exercise the deterministic (AI-unavailable) path by default
 # A developer's services/core-api/.env may hold REAL channel credentials. Environment variables win over .env, so
 # blank them: tests always start in simulator/console mode and opt in with fake values via monkeypatch.

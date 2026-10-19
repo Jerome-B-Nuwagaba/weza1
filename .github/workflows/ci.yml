@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, test/e2e-integration]
   pull_request:
 
 concurrency:
@@ -62,6 +62,7 @@ jobs:
           docker run -d --name api --network host -e PORT=8000 -e ENV=dev -e SEED_DEMO=true             -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/weza             -e SECRET_KEY=ci-secret -e VAULT_MASTER_KEY=ci-vault-key -e BLIND_INDEX_KEY=ci-index weza-api
           for i in $(seq 1 60); do curl -sf localhost:8000/healthz && break; sleep 3; done
           curl -sf localhost:8000/api/v1/health
+          curl -sf localhost:8000/readyz
           curl -sf localhost:8000/api/v1/public/stats | grep -q "Lakeside Bank"
           curl -sf -X POST localhost:8000/api/v1/journeys -H "Content-Type: application/json" -d "{\"channel\":\"web\",\"text\":\"I need UGX 30 million to expand my pharmacy\"}" | grep -q CONFIRM_INTENT
           docker logs api | tail -20
