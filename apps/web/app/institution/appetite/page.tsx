@@ -13,7 +13,7 @@ export default function Appetites() {
     <>
       <PageHeader title="Appetite Studio" subtitle="Products are what you can offer. Appetite is what customers you want WEZA to find right now." actions={can("appetite.edit") && <Button href="/institution/appetite/new">New appetite</Button>} />
       {a.loading ? <Loading /> : a.error ? <ErrorState error={a.error} onRetry={a.reload} /> : a.data.appetites.length === 0 ? (
-        <EmptyState title="No appetite configured" action={can("appetite.edit") && <Button href="/institution/appetite/new">Define your first mandate</Button>}>Tell WEZA what customers you want — then simulate against real anonymised demand.</EmptyState>
+        <EmptyState title="No appetite configured" action={can("appetite.edit") && <Button href="/institution/appetite/new">Define your first mandate</Button>}>Tell WEZA what customers you want — then simulate against real anonymised demand.{!can("appetite.edit") && " Appetite is defined by a Business/Product or Credit/Risk lead — add one under Users & roles if your institution has none yet."}</EmptyState>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           {a.data.appetites.map((x: any) => (

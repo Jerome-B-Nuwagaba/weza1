@@ -104,7 +104,10 @@ def on_opportunity_routed(db: Session, opp: Opportunity) -> CommercialEvent:
 
 
 def open_dispute(db: Session, actor: Actor, event_id: uuid.UUID, reason: str, description: str) -> Dispute:
-    ev = db.get(CommercialEvent, event_id)
+    query = select(CommercialEvent).where(CommercialEvent.id == event_id)
+    if not actor.is_weza:
+        query = query.where(CommercialEvent.institution_id == actor.institution_id)
+    ev = db.execute(query).scalar_one_or_none()
     if ev is None or (not actor.is_weza and ev.institution_id != actor.institution_id):
         raise NotFound("Not found.")
     if reason not in DISPUTE_REASONS:

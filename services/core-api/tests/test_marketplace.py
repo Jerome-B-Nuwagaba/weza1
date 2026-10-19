@@ -192,8 +192,8 @@ def test_whatsapp_simulator_runs_same_graph(client):
     assert any("Is this right" in (m.get("text") or "") for m in msgs if m["direction"] == "OUT")
     r = client.post("/api/v1/channels/simulator/messages",
                     json={"phone": "0772300005", "action": "confirm", "label": "Yes, that's right"}).json()
-    assert r["node"] == "VERIFY_PHONE"
-    otp = [m["text"] for m in r["messages"] if "verification code" in (m.get("text") or "")]
-    assert otp, "OTP SMS should reach the simulator inbox"
+    # WhatsApp verifies the sender's number itself: no code is sent into the same chat (web/app keep the OTP).
+    assert r["node"] == "ASK_PROFILE"
+    assert not [m for m in r["messages"] if "verification code" in (m.get("text") or "")]
     with session_scope() as db:
         assert db.execute(select(Institution)).first()

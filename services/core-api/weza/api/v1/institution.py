@@ -2,7 +2,7 @@
 every route re-checks permissions server-side (TSD §29, §48)."""
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, File, Form, Header, Query, UploadFile
 from fastapi.responses import Response
@@ -122,9 +122,10 @@ def _own_team(db: Session, actor: Actor, team_id: str | None) -> uuid.UUID | Non
         tid = uuid.UUID(team_id)
     except ValueError:
         raise ValidationFailed("Unknown team.", code="UNKNOWN_TEAM") from None
-    t = db.get(Team, tid)
-    if t is None or t.institution_id != actor.institution_id:
-        raise ValidationFailed("Unknown team.", code="UNKNOWN_TEAM")
+    t = db.execute(select(Team).where(Team.id == tid,
+                                     Team.institution_id == actor.institution_id)).scalar_one_or_none()
+    if t is None:
+        raise NotFound("Not found.")
     return tid
 
 
@@ -150,7 +151,8 @@ class UserPatch(BaseModel):
 @router.patch("/users/{user_id}")
 def update_user(user_id: uuid.UUID, body: UserPatch, actor: Actor = A, db: Session = DB):
     policy.require(actor, "users.manage")
-    m = db.execute(select(Membership).where(Membership.user_id == user_id)).scalar_one_or_none()
+    m = db.execute(select(Membership).where(Membership.user_id == user_id,
+                                                  Membership.institution_id == actor.institution_id)).scalar_one_or_none()
     if m is None or m.institution_id != actor.institution_id:
         raise NotFound("Not found.")
     before = {"roles": list(m.roles), "team": str(m.team_id) if m.team_id else None}
@@ -180,7 +182,8 @@ def reset_user_password(user_id: uuid.UUID, body: PasswordResetIn, actor: Actor 
     """Institution administrator sets a new password for a colleague (e.g. forgotten password). Their sessions end;
     share the new password with them securely."""
     policy.require(actor, "users.manage")
-    m = db.execute(select(Membership).where(Membership.user_id == user_id)).scalar_one_or_none()
+    m = db.execute(select(Membership).where(Membership.user_id == user_id,
+                                                  Membership.institution_id == actor.institution_id)).scalar_one_or_none()
     if m is None or m.institution_id != actor.institution_id:
         raise NotFound("Not found.")
     if user_id == actor.id:
@@ -623,7 +626,7 @@ def _feed_query(db: Session, actor: Actor, view: str | None, state: str | None, 
 
 @router.get("/opportunities")
 def feed(view: str | None = None, state: str | None = None, freshness: str | None = None, min_match: int | None = None,
-         sector: str | None = None, q: str | None = None, sort: str = "priority", limit: int = Query(100, le=200),
+         sector: str | None = None, q: str | None = None, sort: str = "priority", limit: int = Query(100, ge=1, le=200),
          actor: Actor = A, db: Session = DB):
     """Intelligent Opportunity Feed (FSD §23). Ranking factors are explicit (FSD-FED-001)."""
     policy.require(actor, "opportunity.read_meta")
@@ -685,16 +688,18 @@ def opportunity(opp_id: uuid.UUID, actor: Actor = A, db: Session = DB):
 
 
 class AssignIn(BaseModel):
-    user_id: str
+    user_id: uuid.UUID
     reason: str | None = Field(None, max_length=500)
 
 
 @router.post("/opportunities/{opp_id}/assign")
 def assign(opp_id: uuid.UUID, body: AssignIn, actor: Actor = A, db: Session = DB):
-    o = db.get(Opportunity, opp_id)
+    o = db.execute(select(Opportunity).where(Opportunity.id == opp_id,
+                                             Opportunity.institution_id == actor.institution_id)).scalar_one_or_none()
     if o is None:
         raise NotFound("Not found.")
-    opp_svc.assign_manual(db, actor, o, uuid.UUID(body.user_id), body.reason)
+    policy.require_tenant(actor, o.institution_id)  # before any permission check: never reveal another tenant's ids
+    opp_svc.assign_manual(db, actor, o, body.user_id, body.reason)
     return opportunity(opp_id, actor, db)
 
 
@@ -706,7 +711,8 @@ class StatusUpdateIn(BaseModel):
 @router.post("/opportunities/{opp_id}/status")
 def update_status(opp_id: uuid.UUID, body: StatusUpdateIn, idempotency_key: str | None = Header(None),
                   actor: Actor = A, db: Session = DB):
-    o = db.get(Opportunity, opp_id)
+    o = db.execute(select(Opportunity).where(Opportunity.id == opp_id,
+                                             Opportunity.institution_id == actor.institution_id)).scalar_one_or_none()
     if o is None:
         raise NotFound("Not found.")
     policy.require_tenant(actor, o.institution_id)
@@ -738,7 +744,8 @@ class OutcomeIn(BaseModel):
 @router.post("/opportunities/{opp_id}/outcome")
 def outcome(opp_id: uuid.UUID, body: OutcomeIn, idempotency_key: str | None = Header(None), actor: Actor = A,
             db: Session = DB):
-    o = db.get(Opportunity, opp_id)
+    o = db.execute(select(Opportunity).where(Opportunity.id == opp_id,
+                                             Opportunity.institution_id == actor.institution_id)).scalar_one_or_none()
     if o is None:
         raise NotFound("Not found.")
     policy.require_tenant(actor, o.institution_id)
@@ -761,7 +768,8 @@ class InfoRequestIn(BaseModel):
 @router.post("/opportunities/{opp_id}/info-requests", status_code=201)
 def create_info_request(opp_id: uuid.UUID, body: InfoRequestIn, idempotency_key: str | None = Header(None),
                         actor: Actor = A, db: Session = DB):
-    o = db.get(Opportunity, opp_id)
+    o = db.execute(select(Opportunity).where(Opportunity.id == opp_id,
+                                             Opportunity.institution_id == actor.institution_id)).scalar_one_or_none()
     if o is None:
         raise NotFound("Not found.")
     policy.require_tenant(actor, o.institution_id)
@@ -780,8 +788,11 @@ class CancelInfoIn(BaseModel):
 @router.post("/opportunities/{opp_id}/info-requests/{request_id}/cancel")
 def cancel_info_request(opp_id: uuid.UUID, request_id: uuid.UUID, body: CancelInfoIn, actor: Actor = A,
                         db: Session = DB):
-    o = db.get(Opportunity, opp_id)
-    r = db.get(InfoRequest, request_id)
+    o = db.execute(select(Opportunity).where(Opportunity.id == opp_id,
+                                             Opportunity.institution_id == actor.institution_id)).scalar_one_or_none()
+    r = db.execute(select(InfoRequest).where(InfoRequest.id == request_id,
+                                             InfoRequest.opportunity_id == opp_id,
+                                             InfoRequest.institution_id == actor.institution_id)).scalar_one_or_none()
     if o is None or r is None:
         raise NotFound("Not found.")
     opp_svc.cancel_info_request(db, actor, o, r, body.reason)
@@ -798,12 +809,15 @@ def delete_info_request(opp_id: uuid.UUID, request_id: uuid.UUID, reason: str | 
 @router.get("/opportunities/{opp_id}/documents/{doc_id}")
 def opportunity_document(opp_id: uuid.UUID, doc_id: uuid.UUID, actor: Actor = A, db: Session = DB):
     """Documents stream only through the Disclosure Gateway; never public URLs (TSD §51)."""
-    o = db.get(Opportunity, opp_id)
+    o = db.execute(select(Opportunity).where(Opportunity.id == opp_id,
+                                             Opportunity.institution_id == actor.institution_id)).scalar_one_or_none()
     if o is None:
         raise NotFound("Not found.")
     policy.require_tenant(actor, o.institution_id)
     decision = policy.decide_opportunity_access(db, actor, o, db.get(Assignment, o.id), db.get(Consent, o.consent_id))
-    d = db.get(Document, doc_id)
+    d = db.execute(select(Document).where(Document.id == doc_id,
+                                          Document.customer_id == o.customer_id,
+                                          Document.pipeline_state.in_(("STORED", "CONFIRMED")))).scalar_one_or_none()
     if decision.result != "PERMIT" or "documents" not in decision.fields or d is None or d.customer_id != o.customer_id:
         raise NotFound("Not found.")
     data = docs.read_bytes(db, d.id)
@@ -842,7 +856,8 @@ class InterestIn(BaseModel):
 @router.post("/previews/{preview_id}/interest")
 def interest(preview_id: uuid.UUID, body: InterestIn, actor: Actor = A, db: Session = DB):
     policy.require(actor, "preview.interest")
-    p = db.get(Preview, preview_id)
+    p = db.execute(select(Preview).where(Preview.id == preview_id,
+                                         Preview.institution_id == actor.institution_id)).scalar_one_or_none()
     if p is None or p.institution_id != actor.institution_id:
         raise NotFound("Not found.")
     if body.state == "NOT_INTERESTED" and body.reason not in opp_svc.REASON_SIGNALS:
@@ -891,6 +906,7 @@ def team(actor: Actor = A, db: Session = DB):
                    for m in members}
     unassigned_high = []
     now = utcnow()
+    cutoff = now - timedelta(days=30)
     for o, a in rows:
         if a is None or a.user_id is None:
             if o.state in opp_svc.OPEN_STATES and o.match_score >= 85:
@@ -903,11 +919,11 @@ def team(actor: Actor = A, db: Session = DB):
             s["open"] += 1
             age = (now - o.qualified_at).days
             s["aging"]["<1d" if age < 1 else "1-3d" if age < 3 else "3-7d" if age < 7 else ">7d"] += 1
-        if a.first_contact_at:
+        if a.first_contact_at and cutoff <= a.first_contact_at <= now:
             s["contacted"] += 1
         if a.breach_count:
             s["breached"] += 1
-        if a.assigned_at and (now - a.assigned_at).days <= 30:
+        if a.assigned_at and cutoff <= a.assigned_at <= now:
             s["assigned_30d"] += 1
     return {"members": [{**m, **stats[m["id"]], "contact_rate": round(100 * stats[m["id"]]["contacted"] /
                                                                       stats[m["id"]]["assigned_30d"])
@@ -922,13 +938,13 @@ def radius(actor: Actor = A, db: Session = DB):
 
 
 @router.get("/intelligence/demand")
-def demand(days: int = Query(90, le=365), actor: Actor = A, db: Session = DB):
+def demand(days: int = Query(90, ge=1, le=365), actor: Actor = A, db: Session = DB):
     policy.require(actor, "analytics.read")
     return insights.demand_intelligence(db, actor.institution_id, days)
 
 
 @router.get("/intelligence/reason-signals")
-def reason_signals(days: int = Query(90, le=365), actor: Actor = A, db: Session = DB):
+def reason_signals(days: int = Query(90, ge=1, le=365), actor: Actor = A, db: Session = DB):
     policy.require(actor, "analytics.read")
     return insights.reason_signals(db, actor.institution_id, days)
 
@@ -959,7 +975,8 @@ class InsightDecision(BaseModel):
 @router.post("/intelligence/insights/{insight_id}")
 def decide_insight(insight_id: uuid.UUID, body: InsightDecision, actor: Actor = A, db: Session = DB):
     policy.require(actor, "appetite.edit")
-    i = db.get(Insight, insight_id)
+    i = db.execute(select(Insight).where(Insight.id == insight_id,
+                                         Insight.institution_id == actor.institution_id)).scalar_one_or_none()
     if i is None or i.institution_id != actor.institution_id:
         raise NotFound("Not found.")
     i.status, i.decision_note, i.decided_by = body.status, body.note, actor.id
@@ -1071,7 +1088,7 @@ def dispute(event_id: uuid.UUID, body: DisputeIn, idempotency_key: str | None = 
 
 
 @router.get("/audit")
-def audit_log(actor: Actor = A, db: Session = DB, limit: int = Query(200, le=500)):
+def audit_log(actor: Actor = A, db: Session = DB, limit: int = Query(200, ge=1, le=500)):
     policy.require(actor, "consent.audit")
     events = db.execute(select(AuditEvent).where(AuditEvent.institution_id == actor.institution_id)
                         .order_by(AuditEvent.at.desc()).limit(limit)).scalars()
@@ -1103,7 +1120,9 @@ def notifications(actor: Actor = A, db: Session = DB):
 
 @router.post("/notifications/{notification_id}/ack")
 def ack(notification_id: uuid.UUID, actor: Actor = A, db: Session = DB):
-    n = db.get(Notification, notification_id)
+    n = db.execute(select(Notification).where(Notification.id == notification_id,
+                                              Notification.recipient_id == actor.id,
+                                              Notification.institution_id == actor.institution_id)).scalar_one_or_none()
     if n is None or n.recipient_id != actor.id:
         raise NotFound("Not found.")
     n.read_at = n.read_at or utcnow()

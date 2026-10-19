@@ -50,3 +50,25 @@ services:
         sync: false
       - key: WHATSAPP_VERIFY_TOKEN
         sync: false
+      - key: WHATSAPP_BUSINESS_NUMBER   # digits with country code; powers the website's "Continue on WhatsApp" link
+        sync: false
+      # gnuGRID CRB (Just-In-Time credit bureau check at lender selection; see docs/CRB_VERIFICATION.md).
+      # Demo: offline mock bureau. Go live: set the four GNUGRID_* values below, then GNGRID_USE_MOCK=false.
+      - key: GNGRID_USE_MOCK
+        value: "true"
+      - key: CRB_JIT_ENABLED            # show the bureau-check step in the demo journey (mock bureau, free)
+        value: "true"
+      - key: GNUGRID_BASE_URL           # https URL from GnuGrid CRB, without /v1 (test URL first, live at go-live)
+        sync: false
+      - key: GNUGRID_CLIENT_ID
+        sync: false
+      - key: GNUGRID_CLIENT_SECRET
+        sync: false
+      - key: GNUGRID_ENQUIRY_REASON     # mandatory `reason` on every enquiry; default "For loan application"
+        sync: false
+      - key: GNUGRID_PI_CODE            # aggregators only
+        sync: false
+      - key: BOOTSTRAP_ADMIN_EMAIL      # real (non-demo) environments: first WEZA administrator, created once on start
+        sync: false
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false

@@ -8,10 +8,10 @@ import {
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createContext, useContext, useEffect, useState } from "react";
-import { api, staffLogout, tokens } from "@/lib/api";
+import { api, ApiError, staffLogout, tokens } from "@/lib/api";
 import { ago } from "@/lib/format";
 import { Logo } from "./Logo";
-import { Badge, cx, Loading } from "./ui";
+import { Badge, Button, Card, cx, Loading } from "./ui";
 
 export type Me = {
   id: string; email: string; full_name: string; kind: "INSTITUTION" | "WEZA"; roles: string[]; permissions: string[];
@@ -74,6 +74,7 @@ const ADMIN_NAV: [string, Item[]][] = [
     { href: "/admin/audit", label: "Audit", icon: BookOpen },
     { href: "/admin/deliveries", label: "Events & delivery", icon: Wrench },
     { href: "/admin/config", label: "Configuration", icon: Sliders },
+    { href: "/admin/whatsapp", label: "WhatsApp connection", icon: MessageSquareText, perm: "admin.config" },
   ]],
 ];
 
@@ -81,28 +82,53 @@ export function StaffShell({ area, children }: { area: "institution" | "admin"; 
   const [me, setMe] = useState<Me | null>(null);
   const [open, setOpen] = useState(false);
   const [bell, setBell] = useState(false);
+  const [connectionError, setConnectionError] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const pathname = usePathname();
 
-  const load = () =>
-    api<Me>("/auth/me")
+  const load = () => {
+    setConnectionError(false);
+    return api<Me>("/auth/me")
       .then((m) => {
         if (area === "admin" && m.kind !== "WEZA") window.location.href = "/institution";
         else if (area === "institution" && m.kind === "WEZA") window.location.href = "/admin";
         else setMe(m);
       })
-      .catch(() => undefined);
+      .catch(() => setConnectionError(true));
+  };
 
-  useEffect(() => {
+  const connect = async () => {
+    setConnecting(true);
+    setConnectionError(false);
+    try {
     if (!tokens.staff()) {
       // Try the refresh cookie before sending to login.
-      api("/auth/refresh", { body: {}, auth: "none" })
-        .then((r: any) => { tokens.setStaff(r.access_token); load(); })
-        .catch(() => (window.location.href = `/login?next=${encodeURIComponent(pathname)}`));
-    } else load();
+      const result = await api("/auth/refresh", { body: {}, auth: "none" });
+      tokens.setStaff(result.access_token);
+    }
+    await load();
+    } catch (error) {
+      if ((error as ApiError).status === 401) window.location.href = `/login?next=${encodeURIComponent(pathname)}`;
+      else setConnectionError(true);
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  useEffect(() => {
+    void connect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => setOpen(false), [pathname]);
 
+  if (connectionError) return (
+    <div className="mx-auto max-w-xl p-8">
+      <Card title="We couldn't connect to your workspace">
+        <p className="mb-4 text-sm text-muted">Check your connection and try loading your workspace again.</p>
+        <Button pending={connecting} onClick={connect}>Retry Connection</Button>
+      </Card>
+    </div>
+  );
   if (!me) return <div className="mx-auto max-w-5xl p-8"><Loading /></div>;
   const can = (p?: string) => !p || me.permissions.includes(p);
   const nav = area === "admin" ? ADMIN_NAV : INST_NAV;

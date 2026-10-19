@@ -22,7 +22,7 @@ export default function Config() {
   const [weights, setWeights] = useState<Record<string, number>>({});
   const [err, setErr] = useState<ApiError | null>(null);
   const { toast, node } = useToast();
-  useEffect(() => c.data && setWeights(c.data.match_weights.data), [c.data]);
+  useEffect(() => { if (c.data) setWeights(c.data.match_weights.data); }, [c.data]);
   async function run(fn: () => Promise<any>, msg: string) {
     setErr(null);
     try {

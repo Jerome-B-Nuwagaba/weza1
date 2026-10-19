@@ -1,20 +1,19 @@
 "use client";
 
 import { FileUp } from "lucide-react";
-import { useEffect, useState } from "react";
-import { api, ApiError, tokens } from "@/lib/api";
+import { useState } from "react";
+import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { dateTime } from "@/lib/format";
 import { PublicShell } from "@/components/PublicShell";
-import { Banner, Button, Card, EmptyState, Loading, PageHeader, Select, StateBadge } from "@/components/ui";
+import { CustomerSessionExpired } from "@/components/CustomerSessionExpired";
+import { Banner, Card, ErrorState, Loading, PageHeader, Select, StateBadge } from "@/components/ui";
 
 export default function DocumentsPage() {
-  const [authed, setAuthed] = useState<boolean | null>(null);
-  useEffect(() => setAuthed(!!tokens.customer()), []);
   return (
     <PublicShell>
       <div className="mx-auto w-full max-w-3xl px-4 py-8">
-        {authed === false ? <EmptyState title="Verify your phone first" action={<Button href="/start">Start</Button>} /> : authed && <Inner />}
+        <Inner />
       </div>
     </PublicShell>
   );
@@ -25,6 +24,7 @@ function Inner() {
   const [type, setType] = useState("business_registration");
   const [msg, setMsg] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [expired, setExpired] = useState(false);
 
   async function upload(f: File) {
     setBusy(true);
@@ -36,11 +36,15 @@ function Inner() {
       setMsg(r.state === "STORED" ? { tone: "success", text: `${r.label} uploaded and stored securely.` } : { tone: "danger", text: r.reason });
       docs.reload();
     } catch (e) {
+      if ((e as ApiError).status === 401) setExpired(true);
       setMsg({ tone: "danger", text: (e as ApiError).message });
     } finally {
       setBusy(false);
     }
   }
+  if (expired || docs.error?.status === 401) return <CustomerSessionExpired />;
+  if (docs.loading) return <Loading />;
+  if (docs.error) return <ErrorState error={docs.error} onRetry={docs.reload} />;
   return (
     <>
       <PageHeader title="My documents" subtitle="Documents are security-checked, encrypted, and only shared with an institution you consent to." />

@@ -2,30 +2,19 @@
 
 import { FileUp } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api, ApiError, tokens } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { date, dateTime, money } from "@/lib/format";
 import { TermsLine } from "@/components/opportunity";
 import { PublicShell } from "@/components/PublicShell";
+import { CustomerSessionExpired } from "@/components/CustomerSessionExpired";
 import { Badge, Banner, Button, Card, EmptyState, ErrorState, Loading, PageHeader, StateBadge, Tabs, Textarea } from "@/components/ui";
 
 export default function StatusPage() {
-  const [authed, setAuthed] = useState<boolean | null>(null);
-  useEffect(() => setAuthed(!!tokens.customer()), []);
-  if (authed === false)
-    return (
-      <PublicShell>
-        <div className="mx-auto w-full max-w-xl px-4 py-16">
-          <EmptyState title="Verify your phone to see your requests" action={<Button href="/start">Start or continue a request</Button>}>
-            Your requests are linked to your verified phone number.
-          </EmptyState>
-        </div>
-      </PublicShell>
-    );
   return (
     <PublicShell>
-      <div className="mx-auto w-full max-w-4xl px-4 py-8">{authed && <Inner />}</div>
+      <div className="mx-auto w-full max-w-4xl px-4 py-8"><Inner /></div>
     </PublicShell>
   );
 }
@@ -56,6 +45,9 @@ function Inner() {
     await api(`/me/consents/${id}/withdraw`, { method: "POST" }).catch((e) => setMsg(e.message));
     consents.reload();
   }
+
+  if (needs.error?.status === 401 || consents.error?.status === 401 || notes.error?.status === 401)
+    return <CustomerSessionExpired />;
 
   return (
     <>

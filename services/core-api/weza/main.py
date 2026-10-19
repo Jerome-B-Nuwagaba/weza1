@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import weza.consumers  # noqa: F401 — registers event consumers
 import weza.domains.need.journey  # noqa: F401 — registers the customer journey graph
-from weza.api.v1 import admin, auth, customer, institution, public
+from weza.api.v1 import admin, auth, crb, customer, institution, public
 from weza.config import get_settings
 from weza.platform.context import correlation_id_var
 from weza.platform.errors import install_error_handlers
@@ -36,6 +36,7 @@ def create_app(start_worker: bool | None = None) -> FastAPI:
     configure_logging()
     if s.is_production and (problems := s.production_problems()):
         raise RuntimeError("Refusing to start in production: " + "; ".join(problems))
+    log.info("channel_config", extra={"data": s.channel_config_summary()})  # names only, never values
     app = FastAPI(title="WEZA Core API", version="1.0.0", lifespan=_lifespan,
                   description="Intelligent financial marketplace — zero core-system integration.",
                   docs_url=None if s.is_production else "/docs", openapi_url="/api/v1/openapi.json")
@@ -70,7 +71,7 @@ def create_app(start_worker: bool | None = None) -> FastAPI:
         return response
 
     install_error_handlers(app)
-    for r in (public.router, auth.router, customer.router, institution.router, admin.router):
+    for r in (public.router, auth.router, customer.router, crb.router, institution.router, admin.router):
         app.include_router(r, prefix="/api/v1")
 
     @app.get("/healthz")

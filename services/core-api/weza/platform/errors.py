@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DataError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from weza.platform.context import correlation_id
@@ -89,6 +90,13 @@ def install_error_handlers(app: FastAPI) -> None:
         code = {404: "NOT_FOUND", 405: "METHOD_NOT_ALLOWED", 401: "UNAUTHENTICATED", 403: "FORBIDDEN"}.get(
             exc.status_code, "HTTP_ERROR")
         return JSONResponse(_body(code, str(exc.detail), False), status_code=exc.status_code)
+
+    @app.exception_handler(DataError)
+    async def _bad_data(_: Request, exc: DataError):
+        # The database refused a value the caller sent (e.g. a NUL character, a number out of range): a client
+        # error, not a server fault. The request's transaction is rolled back by the session dependency.
+        log.warning("invalid_input_rejected_by_database", extra={"data": {"error": type(exc.orig).__name__}})
+        return JSONResponse(_body("VALIDATION_FAILED", "Some fields are invalid.", False), status_code=422)
 
     @app.exception_handler(Exception)
     async def _unhandled(_: Request, exc: Exception):

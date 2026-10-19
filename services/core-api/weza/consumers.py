@@ -33,6 +33,18 @@ def _money(v) -> str:
     return fmt_money(v)
 
 
+# ------------------------------------------------------------------ WhatsApp inbound (ack fast, process here)
+
+
+@consumer("whatsapp_inbound", ["WhatsAppInboundReceived"])
+def on_whatsapp_inbound(db: Session, ev: OutboxEvent) -> None:
+    from weza.domains.misc_models import WhatsappInbox
+    from weza.domains.notification import whatsapp_inbound
+    row = db.get(WhatsappInbox, uuid.UUID(ev.aggregate_id))
+    if row is not None and row.status == "PENDING":
+        whatsapp_inbound.process_phone(db, row.phone_index)
+
+
 # ------------------------------------------------------------------ routing → assignment → billing → notifications
 
 

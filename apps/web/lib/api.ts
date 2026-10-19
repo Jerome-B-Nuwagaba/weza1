@@ -76,7 +76,10 @@ export async function api<T = any>(path: string, opts: Opts = {}): Promise<T> {
   const run = async (): Promise<Response> => {
     const headers: Record<string, string> = { ...(opts.headers || {}) };
     if (!opts.form) headers["Content-Type"] = "application/json";
-    const token = auth === "staff" ? tokens.staff() : auth === "customer" ? tokens.customer() : null;
+    // Customer credentials live only in an HTTP-only cookie. The custom header and server-side
+    // origin check protect cookie-authenticated mutations, including multipart document uploads.
+    headers["X-WEZA-CSRF"] = "1";
+    const token = auth === "staff" ? tokens.staff() : null;
     if (token) headers.Authorization = `Bearer ${token}`;
     if (opts.idempotencyKey) headers["Idempotency-Key"] = opts.idempotencyKey === true ? crypto.randomUUID() : opts.idempotencyKey;
     return fetch(`/api/v1${path}`, {

@@ -12,7 +12,8 @@ import pgserver
 
 ROOT = Path(__file__).resolve().parents[1]
 srv = pgserver.get_server(str(ROOT / ".pgdata"), cleanup_mode=None)
-if "weza" not in srv.psql("SELECT datname FROM pg_database;"):
+# Exact match: a substring check would treat the test database "weza_test" as "weza" and skip creating it.
+if "weza" not in srv.psql("SELECT datname FROM pg_database;").split():
     srv.psql("CREATE DATABASE weza;")
 url = srv.get_uri().rsplit("/", 1)[0] + "/weza"
 env = {**os.environ, "DATABASE_URL": url, "RUN_WORKER_INPROCESS": "true", "CORS_ORIGINS": "*", "SEED_DEMO": "true"}

@@ -148,9 +148,11 @@ def create_customer_session(db: Session, customer_id: uuid.UUID, channel: str = 
 
 
 def resolve_customer_session(db: Session, token: str) -> uuid.UUID | None:
+    if not token.startswith("cs_"):
+        return None
     row = db.execute(select(CustomerSession).where(CustomerSession.token_hash == crypto.hash_token(token))
                      ).scalar_one_or_none()
-    if row is None or row.revoked or row.expires_at <= utcnow():
+    if row is None or row.channel == "magic" or row.revoked or row.expires_at <= utcnow():
         return None
     return row.customer_id
 
@@ -219,15 +221,17 @@ def login(db: Session, email: str, password: str, ip: str = "") -> dict:
         raise Unauthorized("Email or password is incorrect.", code="INVALID_CREDENTIALS")
     user.failed_logins = 0
     if mfa_required(user):
+        mfa_token = crypto.sign_jwt({"sub": str(user.id), "typ": "mfa", "token_version": user.token_version}, 10)
         if not user.mfa_enrolled:
-            return {"mfa_enrolment_required": True, "mfa_token": crypto.sign_jwt({"sub": str(user.id), "typ": "mfa"}, 10)}
-        return {"mfa_required": True, "mfa_token": crypto.sign_jwt({"sub": str(user.id), "typ": "mfa"}, 10)}
+            return {"mfa_enrolment_required": True, "mfa_token": mfa_token}
+        return {"mfa_required": True, "mfa_token": mfa_token}
     return _issue_tokens(db, user, mfa=False)
 
 
 def _issue_tokens(db: Session, user: User, mfa: bool, family: uuid.UUID | None = None) -> dict:
     actor = actor_for_user(db, user, mfa)
-    claims = {"sub": str(user.id), "typ": "access", "kind": user.kind, "mfa": mfa}
+    claims = {"sub": str(user.id), "typ": "access", "kind": user.kind, "mfa": mfa,
+              "token_version": user.token_version}
     access = crypto.sign_jwt(claims, get_settings().access_token_minutes)
     refresh = "rt_" + crypto.new_token()
     db.add(RefreshToken(user_id=user.id, token_hash=crypto.hash_token(refresh), family=family or uuid.uuid4(),
@@ -254,9 +258,13 @@ def _user_from_mfa_token(db: Session, token: str) -> User:
         raise Unauthorized("Your sign-in session expired. Please sign in again.") from exc
     if claims.get("typ") != "mfa":
         raise Unauthorized("Invalid MFA token.")
-    user = db.get(User, uuid.UUID(claims["sub"]))
-    if user is None:
+    try:
+        user = db.get(User, uuid.UUID(claims["sub"]))
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        raise Unauthorized("Invalid MFA token.") from exc
+    if user is None or user.status != "ACTIVE":
         raise Unauthorized("Invalid MFA token.")
+    _check_token_version(user, claims)
     return user
 
 
@@ -269,7 +277,13 @@ def mfa_verify(db: Session, mfa_token: str, code: str) -> dict:
     return _issue_tokens(db, user, mfa=True)
 
 
-def mfa_begin_enrolment(db: Session, user: User) -> dict:
+def mfa_begin_enrolment(db: Session, user: User, existing_mfa_code: str | None = None) -> dict:
+    # Password-only login challenges must never replace an already configured second factor.
+    if user.mfa_secret_ct:
+        rate_limit(db, f"mfa:{user.id}", 10, 900)
+        secret = crypto.decrypt_bytes(user.mfa_secret_ct, user.mfa_secret_key).decode()
+        if not existing_mfa_code or not crypto.totp_verify(secret, existing_mfa_code):
+            raise Unauthorized("Verify your current authenticator code before replacing it.", code="MFA_REQUIRED")
     secret = crypto.totp_new_secret()
     user.mfa_secret_ct, user.mfa_secret_key = crypto.encrypt_bytes(secret.encode())
     user.mfa_enrolled = False
@@ -293,6 +307,7 @@ def refresh(db: Session, token: str) -> dict:
         # Reuse detection: revoke the whole family.
         for r in db.execute(select(RefreshToken).where(RefreshToken.family == row.family)).scalars():
             r.revoked = True
+        db.commit()  # Persist revocation before the request dependency rolls back the error response.
         raise Unauthorized("Session expired. Please sign in again.", code="REFRESH_REUSED")
     row.used = True
     user = db.get(User, row.user_id)
@@ -302,12 +317,13 @@ def refresh(db: Session, token: str) -> dict:
 
 
 def set_password(db: Session, user: User, new_password: str) -> None:
-    """Replace a staff password and end every existing session for that user (refresh tokens revoked)."""
+    """Replace a staff password and invalidate access, pending MFA and refresh tokens."""
     if len(new_password) < 12:
         raise ValidationFailed("Password must be at least 12 characters.", code="WEAK_PASSWORD")
     if crypto.verify_password(new_password, user.password_hash):
         raise ValidationFailed("Choose a password you haven't used here.", code="PASSWORD_REUSED")
     user.password_hash = crypto.hash_password(new_password)
+    user.token_version += 1
     user.failed_logins, user.locked_until = 0, None
     for r in db.execute(select(RefreshToken).where(RefreshToken.user_id == user.id,
                                                    RefreshToken.revoked.is_(False))).scalars():
@@ -321,6 +337,13 @@ def logout(db: Session, token: str) -> None:
             r.revoked = True
 
 
+def _check_token_version(user: User, claims: dict) -> None:
+    # Tokens minted before this migration belong to the initial version only.
+    version = claims.get("token_version", 1)
+    if type(version) is not int or version != user.token_version:
+        raise Unauthorized("Your session has expired. Please sign in again.", code="TOKEN_EXPIRED")
+
+
 def actor_from_access_token(db: Session, token: str) -> Actor:
     try:
         claims = crypto.verify_jwt(token)
@@ -328,7 +351,11 @@ def actor_from_access_token(db: Session, token: str) -> Actor:
         raise Unauthorized("Your session has expired. Please sign in again.", code="TOKEN_EXPIRED") from exc
     if claims.get("typ") != "access":
         raise Unauthorized("Invalid token.")
-    user = db.get(User, uuid.UUID(claims["sub"]))
+    try:
+        user = db.get(User, uuid.UUID(claims["sub"]))
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        raise Unauthorized("Invalid token.") from exc
     if user is None or user.status != "ACTIVE":
         raise Unauthorized("Account not active.")
+    _check_token_version(user, claims)
     return actor_for_user(db, user, bool(claims.get("mfa")))

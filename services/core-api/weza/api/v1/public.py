@@ -3,6 +3,8 @@ institution applications."""
 
 import hashlib
 import hmac
+import json
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -10,9 +12,10 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from weza.api.deps import DB, client_ip, optional_customer
-from weza.config import get_settings
+from weza.config import get_settings, is_configured
 from weza.domains.admin_config import UGANDA, country
 from weza.domains.consent import service as consent_svc
 from weza.domains.institution import service as inst_svc
@@ -20,13 +23,17 @@ from weza.domains.institution.models import Institution
 from weza.domains.misc_models import ChannelMessage
 from weza.domains.need import service as journeys
 from weza.domains.need.models import ConversationMessage
+from weza.domains.notification import service as notify
+from weza.domains.notification import whatsapp_inbound as wa_inbound
 from weza.domains.product.models import Product
 from weza.platform import crypto
 from weza.platform.controls import ai_mode, flag, rate_limit
+from weza.platform.db import session_scope
 from weza.platform.errors import Forbidden, NotFound, ValidationFailed
 from weza.platform.models import GraphInstance
 
 router = APIRouter(tags=["public"])
+log = logging.getLogger("weza.whatsapp")
 
 
 @router.get("/health")
@@ -49,7 +56,7 @@ def public_config(db: Session = DB):
             "regions": cfg["regions"], "sectors": cfg["sectors"], "purpose_categories": cfg["purpose_categories"],
             "institution_types": cfg["institution_types"], "regulators": cfg["regulators"],
             "demo_mode": s.demo_mode and not s.is_production, "ai_mode": ai_mode(db),
-            "whatsapp_live": bool(s.whatsapp_token), "features": {
+            "whatsapp_live": s.whatsapp_send_ready, "whatsapp_number": s.whatsapp_public_number, "features": {
                 "whatsapp_simulator": flag(db, "channel.whatsapp_simulator", True),
                 "preview": flag(db, "marketplace.preview", False)}}
 
@@ -138,34 +145,87 @@ def post_message(journey_id: uuid.UUID, body: JourneyInput, x_journey_token: str
 def whatsapp_verify(hub_mode: str = Query(None, alias="hub.mode"), hub_token: str = Query(None, alias="hub.verify_token"),
                     hub_challenge: str = Query("", alias="hub.challenge")):
     s = get_settings()
-    if hub_mode == "subscribe" and s.whatsapp_verify_token and hmac.compare_digest(hub_token or "", s.whatsapp_verify_token):
+    if hub_mode == "subscribe" and s.whatsapp_verify_ready and hmac.compare_digest(hub_token or "", s.whatsapp_verify_token):
         return hub_challenge
     raise Forbidden("Verification failed.")
 
 
 @router.post("/channels/whatsapp/webhook")
-async def whatsapp_webhook(request: Request, x_hub_signature_256: str | None = Header(None), db: Session = DB):
+async def whatsapp_webhook(request: Request, x_hub_signature_256: str | None = Header(None)):
     s = get_settings()
     raw = await request.body()
-    if not s.whatsapp_app_secret:
+    if not s.whatsapp_webhook_ready:
         raise Forbidden("WhatsApp is not configured.")
     expected = "sha256=" + hmac.new(s.whatsapp_app_secret.encode(), raw, hashlib.sha256).hexdigest()
     if not x_hub_signature_256 or not hmac.compare_digest(expected, x_hub_signature_256):
         raise Forbidden("Invalid signature.")
-    payload = await request.json()
-    for entry in payload.get("entry", []):
-        for change in entry.get("changes", []):
-            for msg in (change.get("value") or {}).get("messages", []):
-                phone = "+" + msg.get("from", "").lstrip("+")
-                text_ = (msg.get("text") or {}).get("body")
-                reply = ((msg.get("interactive") or {}).get("button_reply") or {})
-                inbound(db, phone, text=text_, button_id=reply.get("id"), button_title=reply.get("title"),
-                        message_id=msg.get("id"))
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        raise ValidationFailed("Malformed payload.") from None
+    if not isinstance(payload, dict):
+        raise ValidationFailed("Malformed payload.")
+    # Database work runs in a worker thread with its own transaction, committed before we answer. On the event loop
+    # it froze the whole API: two receipts for the same message arrive together, the second waits for the first's
+    # row lock while blocking the loop, and the first can then never commit.
+    return await run_in_threadpool(_ingest_webhook, s, payload)
+
+
+def _ingest_webhook(s, payload: dict) -> dict:
+    with session_scope() as db:
+        return _ingest(db, s, payload)
+
+
+def _ingest(db: Session, s, payload: dict) -> dict:
+    # Signed but structurally unexpected parts are skipped, not rejected: Meta would retry a non-200 for 7 days.
+    n_status = n_new = n_dup = n_other = n_foreign = 0
+    for entry in _dicts(payload.get("entry")):
+        for change in _dicts(entry.get("changes")):
+            value = change.get("value") if isinstance(change.get("value"), dict) else {}
+            if change.get("field") == "account_update":  # e.g. the number was disconnected from Cloud API
+                wa_inbound.account_update(db, str(entry.get("id") or ""), entry.get("time"), value)
+                n_other += 1
+                continue
+            if change.get("field", "messages") != "messages":
+                # e.g. smb_message_echoes / history / smb_app_state_sync (WhatsApp Business app coexistence),
+                # template or account updates: not customer messages, never routed to the agent.
+                n_other += 1
+                continue
+            if not _for_our_number(s, value):  # another number on the same Meta app/WABA: not ours to answer
+                n_foreign += 1
+                continue
+            for st in _dicts(value.get("statuses")):  # delivery receipts: update the message, never touch a journey
+                errs = st.get("errors") if isinstance(st.get("errors"), list) and st["errors"] else [{}]
+                code = errs[0].get("code") if isinstance(errs[0], dict) else None
+                n_status += notify.apply_delivery_status(
+                    db, str(st.get("id") or ""), str(st.get("status") or ""),
+                    notify.parse_status_time(st.get("timestamp")), str(code) if code is not None else None)
+            for msg in value.get("messages") if isinstance(value.get("messages"), list) else []:
+                # Acknowledge fast: store + queue, the worker processes. Storage errors propagate on purpose
+                # (500 → Meta retries; the unique provider message id makes that safe).
+                if isinstance(msg, dict) and wa_inbound.receive(db, msg):
+                    n_new += 1
+                else:
+                    n_dup += 1
+    log.info("whatsapp_webhook", extra={"data": {"received": n_new, "skipped": n_dup, "statuses": n_status,
+                                                 "other_fields": n_other, "other_number": n_foreign}})
     return {"ok": True}
 
 
+def _dicts(v) -> list[dict]:
+    return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
+
+
+def _for_our_number(s, value: dict) -> bool:
+    """True if this change is addressed to the configured business number (or no number is configured yet)."""
+    if not is_configured(s.whatsapp_phone_number_id):
+        return True
+    meta = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+    return str(meta.get("phone_number_id") or "") == s.whatsapp_phone_number_id.strip()
+
+
 def inbound(db: Session, phone: str, *, text: str | None, button_id: str | None = None, button_title: str | None = None,
-            message_id: str | None = None) -> list[dict]:
+            message_id: str | None = None, attribution: dict | None = None) -> list[dict]:
     """Canonical inbound handling for WhatsApp (real or simulated): find the active journey for this number or start one."""
     from weza.domains.intelligence.parsing import parse_phone
     phone_e164 = parse_phone(phone) or phone
@@ -175,16 +235,36 @@ def inbound(db: Session, phone: str, *, text: str | None, button_id: str | None 
                                                 GraphInstance.status.in_(["WAITING", "RUNNING"]),
                                                 GraphInstance.state["wa_index"].astext == idx)
                     .order_by(GraphInstance.updated_at.desc()).limit(1)).scalar_one_or_none()
+    from weza.domains.customer.models import Customer
+    from weza.domains.identity.service import vault_find_by_phone
+    from weza.domains.need.journey import fulfil_info, handle_consent_withdrawal
+    rec = vault_find_by_phone(db, phone_e164)
+    cust = db.execute(select(Customer).where(Customer.vault_token == rec.id)).scalar_one_or_none() if rec else None
+    if message_id and db.execute(select(ConversationMessage.id).where(
+            ConversationMessage.message_id == message_id)).first():
+        return []
+    if cust:
+        command = (text or button_title or "").strip().upper()
+        outputs = handle_consent_withdrawal(db, cust.id) if command in ("WITHDRAW", "CANCEL CONSENT") else None
+        # OTP replies belong to the lender consent gate, even if an older lender has an open question.
+        if outputs is None and not (gi and gi.current_node == "CRB_CHECK"):
+            outputs = fulfil_info(db, cust.id, text=text or button_title)
+        if outputs is not None:
+            if gi:
+                journeys._persist(db, gi, "IN", {"type": "text", "text": "[Customer action received]"},
+                                  "whatsapp", message_id)
+                journeys._persist_outputs(db, gi, outputs, "whatsapp")
+            else:
+                for output in outputs:
+                    notify.send_customer_message(db, phone_e164, output["text"], channel="whatsapp", kind="action")
+            return outputs
     if gi is None or (text or "").strip().lower() in ("restart", "new request", "start over"):
-        from weza.domains.customer.models import Customer
-        from weza.domains.identity.service import vault_find_by_phone
-        rec = vault_find_by_phone(db, phone_e164)
-        cust = db.execute(select(Customer).where(Customer.vault_token == rec.id)).scalar_one_or_none() if rec else None
-        inst, outputs = journeys.start_journey(db, channel="whatsapp", attribution={"src": "whatsapp"},
+        inst, outputs = journeys.start_journey(db, channel="whatsapp", attribution={"src": "whatsapp", **(attribution or {})},
                                                customer_id=cust.id if cust else None,
                                                first_text=text if text and text.strip().lower() not in
                                                ("hi", "hello", "hey", "restart", "start", "new request", "start over")
-                                               else None, channel_phone=phone_e164)
+                                               else None, channel_phone=phone_e164,
+                                               message_id=message_id)
         inst.state = {**inst.state, "wa_index": idx}
         return outputs
     payload: dict = {"text": text or button_title or ""}

@@ -257,6 +257,11 @@ def verify_phone(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if st.get("customer_id"):
         return Step(to="BUILD_PROFILE")
     if t.kind == "ENTER":
+        if st.get("channel") == "whatsapp" and st.get("channel_phone_enc") and not st.get("otp_challenge_id"):
+            # The customer is writing from this number and Meta authenticated the sender (signed webhook). A code
+            # sent back into the same chat proves nothing new, so the channel itself verifies the number.
+            # Web/app keep the OTP: a browser proves nothing about a phone, and the OTP issues their session.
+            return _phone_verified(ctx, st, _dec(st["channel_phone_enc"]), method="whatsapp_channel")
         if st.get("channel_phone_enc") and not st.get("otp_challenge_id"):
             return _send_otp(ctx, st, _dec(st["channel_phone_enc"]))
         if st.get("otp_challenge_id"):
@@ -291,20 +296,32 @@ def verify_phone(ctx: Ctx, st: dict, t: Trigger) -> Step:
         emit(ctx.db, "PhoneVerificationFailed", topic="customer", aggregate_type="need", aggregate_id=st["need_id"],
              data={"code": res.code})
         return Step(wait=Wait(REPLY, DAY), patch=patch)
-    phone = _dec(st["phone_enc"])
+    return _phone_verified(ctx, st, _dec(st["phone_enc"]), method="otp")
+
+
+def _phone_verified(ctx: Ctx, st: dict, phone: str, *, method: str) -> Step:
+    """The phone is proven (OTP, or the WhatsApp channel itself): link or create the customer and continue."""
     need = _need(ctx, st)
     customer, is_new = customer_svc.get_or_create_by_phone(ctx.db, phone, attribution_id=need.attribution_id,
                                                            device_hash=st.get("device_hash"))
     need.customer_id = customer.id
     need.status = "PHONE_VERIFIED"
     ctx.instance.customer_id = customer.id
-    token = identity.create_customer_session(ctx.db, customer.id, st.get("channel", "web"))
-    ctx.card("session", {"token": token, "customer_id": str(customer.id), "returning": not is_new})
+    if method == "otp":  # web/app need a session; WhatsApp is identified by the chat itself
+        token = identity.create_customer_session(ctx.db, customer.id, st.get("channel", "web"))
+        ctx.card("session", {"token": token, "customer_id": str(customer.id), "returning": not is_new})
     audit(ctx.db, Actor(kind="CUSTOMER", id=customer.id, display="customer"), "customer.phone_verified", "customer",
-          customer.id)
+          customer.id, after={"method": method})
     emit(ctx.db, "PhoneVerified", topic="customer", aggregate_type="need", aggregate_id=need.id,
-         data={"returning": not is_new})
-    ctx.say("Thank you — your number is verified." + (" Welcome back!" if not is_new else ""))
+         data={"returning": not is_new, "method": method})
+    if method == "otp":
+        ctx.say("Thank you — your number is verified." + (" Welcome back!" if not is_new else ""))
+    elif not is_new:
+        ctx.say("Welcome back!")
+    if st.get("channel") == "whatsapp":
+        from weza.domains.customer.auth import issue_magic_link
+        ctx.say("Open your requests, profile and documents securely: " + issue_magic_link(ctx.db, customer.id),
+                ephemeral=True)
     st2 = {**st, "customer_id": str(customer.id)}
     _sync_customer_from_intent(ctx, st2)
     return Step(to="BUILD_PROFILE", patch={"customer_id": str(customer.id), "otp_challenge_id": None,
@@ -669,10 +686,12 @@ def consent_node(ctx: Ctx, st: dict, t: Trigger) -> Step:
                               need_id=need.id, match_id=m.id,
                               template_id=uuid.UUID(t.payload.get("value") or st["consent_template_id"]),
                               categories=t.payload.get("categories"), channel=st.get("channel", "web"),
-                              contact_channel=t.payload.get("contact_channel") or (pref.contact_channel if pref else "phone"),
+                              contact_channel=t.payload.get("contact_channel") or ("whatsapp" if st.get("channel") == "whatsapp" else (
+                                  pref.contact_channel if pref else "phone")),
                               contact_window=t.payload.get("contact_window") or (pref.contact_window if pref else "ANY"))
         need.status = "CONSENTED"
-        return Step(to="CREATE_OPPORTUNITY", patch={"consent_id": str(c.id)})
+        nxt = "CRB_CHECK" if _crb_check_due(ctx, st, inst.id) else "CREATE_OPPORTUNITY"
+        return Step(to=nxt, patch={"consent_id": str(c.id)})
     if a == "decline":
         m.state = "PRESENTED"
         _need(ctx, st).status = "MATCHED"
@@ -682,6 +701,66 @@ def consent_node(ctx: Ctx, st: dict, t: Trigger) -> Step:
         return Step(to="PRESENT_OPTIONS")
     ctx.say("Please choose 'I agree' to share, or 'Not now'.")
     return Step(wait=Wait(REPLY, DAY))
+
+
+def _crb_check_due(ctx: Ctx, st: dict, institution_id: uuid.UUID) -> bool:
+    """Ask for the Just-In-Time bureau check only when it's enabled, the customer gave a NIN, and no result for this
+    lender can be reused (so nobody is asked, or charged, twice)."""
+    from weza.config import get_settings
+    from weza.domains.consent import crb_service
+    if not get_settings().crb_enabled:
+        return False
+    cust_id = uuid.UUID(st["customer_id"])
+    customer = ctx.db.get(Customer, cust_id)
+    if not identity.vault_read(ctx.db, customer.vault_token).get("nin"):
+        return False
+    return crb_service.reusable(ctx.db, cust_id, institution_id) is None
+
+
+def crb_check(ctx: Ctx, st: dict, t: Trigger) -> Step:
+    """Credit bureau check for the lender the customer just agreed to share with (explicit, separate consent).
+    Outcomes come only from crb_service (deterministic); a bureau problem never stops the request."""
+    from weza.domains.consent import crb_service
+    m = ctx.db.get(Match, uuid.UUID(st["selected_match_id"]))
+    inst = ctx.db.get(Institution, m.institution_id)
+    if t.kind == "ENTER":
+        ctx.say(crb_service.consent_text(inst.display_name),
+                quick_replies=[qr("Yes, check", "crb_consent", "yes"), qr("No, skip", "crb_consent", "no")])
+        return Step(wait=Wait(REPLY, DAY))
+    value, low = str(t.payload.get("value") or ""), _text(t).lower()
+    yes = value == "yes" or low in ("yes", "y", "ok", "okay", "agree", "i agree", "yes, check")
+    no = value == "no" or low in ("no", "n", "skip", "no thanks", "no, skip")
+    if not (yes or no) and not st.get("crb_challenge_id"):
+        ctx.say("Please reply Yes to run the credit bureau check, or No to skip it.",
+                quick_replies=[qr("Yes, check", "crb_consent", "yes"), qr("No, skip", "crb_consent", "no")])
+        return Step(wait=Wait(REPLY, DAY))
+    if no:
+        audit(ctx.db, _customer_actor(st), "GNGRID_CRB_CHECK_DECLINED", "match", m.id, institution_id=inst.id)
+        return Step(to="CREATE_OPPORTUNITY")
+    if not st.get("crb_challenge_id") and crb_service.reusable(ctx.db, _customer_actor(st).id, inst.id) is None:
+        challenge = crb_service.issue_consent_otp(ctx.db, _customer_actor(st), inst.id,
+                                                  channel=st.get("channel", "web"))
+        ctx.say(f"Enter the 10-digit WEZA consent code sent to {challenge['masked']} to authorise "
+                f"the credit bureau check for {inst.display_name}.")
+        ctx.card("otp_input", {**challenge, "challenge_id": str(challenge["challenge_id"]),
+                               "selected_institution_id": str(inst.id),
+                               "expires_at": challenge["expires_at"].isoformat(), "purpose": "crb"})
+        return Step(wait=Wait(REPLY, DAY), patch={"crb_challenge_id": str(challenge["challenge_id"])})
+    try:
+        res = crb_service.run_check(ctx.db, _customer_actor(st), inst.id, channel=st.get("channel", "web"),
+            challenge_id=uuid.UUID(st["crb_challenge_id"]) if st.get("crb_challenge_id") else None,
+            otp=_text(t).replace(" ", ""))
+    except ValidationFailed as exc:
+        ctx.say(exc.message)
+        patch = {"crb_challenge_id": None} if exc.code in ("OTP_LOCKED", "OTP_EXPIRED") else {}
+        return Step(wait=Wait(REPLY, DAY), patch=patch)
+    if res["status"] == "VERIFIED":
+        ctx.say(f"Thank you — your National ID details match the credit bureau record. {inst.display_name} will see "
+                "a summary of your credit history.")
+    elif res["status"] not in crb_service.FAILED:  # identity failures are explained when sharing is refused
+        ctx.say(f"The credit bureau check couldn't be completed right now. Your request continues — "
+                f"{inst.display_name} will do its own checks.")
+    return Step(to="CREATE_OPPORTUNITY", patch={"crb_challenge_id": None})
 
 
 def create_opportunity(ctx: Ctx, st: dict, t: Trigger) -> Step:
@@ -739,6 +818,53 @@ def tracking(ctx: Ctx, st: dict, t: Trigger) -> Step:
     ctx.say("Here's where things stand:\n" + ("\n".join(lines) if lines else "• Nothing submitted yet."),
             quick_replies=[qr("Refresh status", "status")])
     return Step(wait=Wait(REPLY, 90 * DAY))
+
+
+def handle_consent_withdrawal(db, customer_id: uuid.UUID) -> list[dict]:
+    """An explicit stop command takes precedence over an outstanding information request."""
+    from weza.domains.consent.models import Consent
+    actor = Actor(kind="CUSTOMER", id=customer_id)
+    records = db.execute(select(Consent).where(Consent.customer_id == customer_id,
+                                               Consent.status == "GRANTED").with_for_update()).scalars().all()
+    for consent in records:
+        consent_svc.withdraw(db, actor, consent.id, customer_id, "Customer withdrew through WhatsApp")
+        if consent.opportunity_id:
+            opp = db.execute(select(Opportunity).where(Opportunity.id == consent.opportunity_id,
+                Opportunity.customer_id == customer_id, Opportunity.institution_id == consent.institution_id)
+                .with_for_update()).scalar_one_or_none()
+            if opp:
+                opp_svc.close_open_info_requests(db, opp, "Consent withdrawn")
+                if opp.state not in (*opp_svc.TERMINAL, "REPORTED_DISBURSED"):
+                    opp_svc.customer_withdraw(db, actor, opp)
+    return [{"type": "text", "text": "Your consent has been withdrawn. Institutions can no longer access "
+             "your shared details through WEZA." if records else "You have no active sharing consent to withdraw."}]
+
+
+def fulfil_info(db, customer_id: uuid.UUID, *, text: str | None = None,
+                document_id: uuid.UUID | None = None, doc_type: str | None = None) -> list[dict] | None:
+    """Route a reply to the customer's oldest active request; checked documents use the same mutation service."""
+    from weza.domains.consent.models import Consent
+    from weza.domains.opportunity.models import InfoRequest
+    query = select(InfoRequest).join(Opportunity, Opportunity.id == InfoRequest.opportunity_id).join(
+        Consent, Consent.id == Opportunity.consent_id).where(InfoRequest.customer_id == customer_id,
+        Opportunity.customer_id == customer_id, InfoRequest.institution_id == Opportunity.institution_id,
+        Consent.customer_id == customer_id, Consent.institution_id == Opportunity.institution_id,
+        Consent.status == "GRANTED", InfoRequest.status == "OPEN", Opportunity.state.in_(opp_svc.OPEN_STATES))
+    if document_id:
+        query = query.where(InfoRequest.kind == "DOCUMENT", InfoRequest.doc_type == doc_type)
+    request = db.execute(query.order_by(InfoRequest.created_at, InfoRequest.id).limit(1)
+                         .with_for_update(of=InfoRequest)).scalar_one_or_none()
+    if request is None:
+        return None
+    if request.kind == "DOCUMENT" and not document_id:
+        return [{"type": "text", "text": "Please send the requested document as a PDF, JPG or PNG in this chat: "
+                 + request.message}]
+    try:
+        opp_svc.fulfil_info_request(db, Actor(kind="CUSTOMER", id=customer_id), request,
+                                    response_text=text, document_id=document_id)
+    except ValidationFailed as exc:
+        return [{"type": "text", "text": exc.message}]
+    return [{"type": "text", "text": "Thank you. Your response has been sent to the institution."}]
 
 
 def status_label(state: str) -> str:
@@ -830,6 +956,7 @@ GRAPH = register(GraphDef(type="customer_journey", version=1, start="GREET", nod
     "READINESS_CHECK": Node(readiness_check, 2), "REQUEST_MISSING_ITEM": Node(request_missing_item, 2, R),
     "OFFER_WAITING_ROOM": Node(offer_waiting_room, 0, "SAVE_EXIT"), "WAITING_ROOM": Node(waiting_room, 3, "EXPIRE"),
     "PRESENT_OPTIONS": Node(present_options, 0, R), "RERANK": Node(rerank, 2), "CONSENT": Node(consent_node, 0, R),
+    "CRB_CHECK": Node(crb_check, 1, R),
     "CREATE_OPPORTUNITY": Node(create_opportunity, 2), "CONFIRM": Node(confirm, 2),
     "TRACKING": Node(tracking, 2, "COMPLETE"), "RESCUE_ASK": Node(rescue_ask, 0, "CLOSE_NEED"),
     "CLOSE_NEED": Node(close_need, 2), "SAVE_EXIT": Node(save_exit, 2, "EXPIRE"), "REMIND": Node(remind, 2),
@@ -841,6 +968,8 @@ def format_for_channel(outputs: list[dict]) -> list[dict]:
     """Strip ephemeral/secret content before persisting outbound messages (session tokens, dev OTP codes)."""
     safe = []
     for o in outputs:
+        if o.get("ephemeral"):
+            continue
         if o.get("type") == "card" and o.get("card") == "session":
             continue
         if o.get("type") == "card" and o.get("card") == "otp_input":
@@ -875,7 +1004,7 @@ def whatsapp_text(o: dict) -> str | None:
     if card == "otp_input" and d.get("dev_code"):
         return f"(Test mode) Your code is {d['dev_code']}"
     if card == "documents_needed":
-        return "Upload documents securely here: {web}/c/documents"
+        return "Please send each document right here in this chat as a clear photo or PDF (up to 10 MB)."
     return None
 
 

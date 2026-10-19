@@ -2,10 +2,12 @@
 
 import uuid
 from dataclasses import replace
+from urllib.parse import urlsplit
 
 from fastapi import Depends, Header, Request
 from sqlalchemy.orm import Session
 
+from weza.config import get_settings
 from weza.domains.customer.models import Customer
 from weza.domains.identity import service as identity
 from weza.platform.context import Actor
@@ -46,8 +48,40 @@ def weza_actor(actor: Actor = Depends(staff_actor)) -> Actor:
     return actor
 
 
-def customer_actor(request: Request, authorization: str | None = Header(None), db: Session = DB) -> Actor:
+def require_customer_csrf(request: Request) -> None:
+    """Only the configured web clients may establish or mutate cookie-backed customer sessions."""
+    settings = get_settings()
+
+    def origin(value: str) -> str:
+        try:
+            parsed = urlsplit(value)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username:
+                return ""
+            return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+        except ValueError:
+            return ""
+
+    allowed = {origin(value.strip()) for value in [settings.public_web_url, *settings.cors_origins.split(",")]}
+    allowed.discard("")
+    # Browsers omit Origin for same-origin GETs (the magic-link exchange), but send Referer.
+    supplied = request.headers.get("origin")
+    request_origin = origin(supplied if supplied is not None else request.headers.get("referer", ""))
+    if request.headers.get("x-weza-csrf") != "1" or request_origin not in allowed:
+        raise Forbidden("Please return to WEZA and try again.", code="CUSTOMER_CSRF_INVALID")
+
+
+def _customer_token(request: Request, authorization: str | None) -> str | None:
     token = _bearer(authorization)
+    if token or authorization:
+        return token
+    token = request.cookies.get("weza_cs")
+    if token and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        require_customer_csrf(request)
+    return token
+
+
+def customer_actor(request: Request, authorization: str | None = Header(None), db: Session = DB) -> Actor:
+    token = _customer_token(request, authorization)
     if not token or not token.startswith("cs_"):
         raise Unauthorized("Please verify your phone number to continue.", code="CUSTOMER_AUTH_REQUIRED")
     cid = identity.resolve_customer_session(db, token)
@@ -59,8 +93,8 @@ def customer_actor(request: Request, authorization: str | None = Header(None), d
     return Actor(kind="CUSTOMER", id=cid, display="customer", ip=client_ip(request)[:64])
 
 
-def optional_customer(authorization: str | None = Header(None), db: Session = DB) -> uuid.UUID | None:
-    token = _bearer(authorization)
+def optional_customer(request: Request, authorization: str | None = Header(None), db: Session = DB) -> uuid.UUID | None:
+    token = _customer_token(request, authorization)
     if token and token.startswith("cs_"):
         return identity.resolve_customer_session(db, token)
     return None

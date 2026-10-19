@@ -1,0 +1,49 @@
+# WEZA SYSTEM ARCHITECTURAL RULES & CODEX INSTRUCTIONS
+
+## 1. Core Architecture & Engineering Levels
+- **Level 1 (Deterministic Rules - Pure Python/SQL):**
+  - ALL eligibility logic, product criteria matching, state machine transitions, database queries, and authorization checks MUST be implemented in pure, deterministic Python or SQL code.
+  - **NEVER** use LLM calls, prompts, or AI agents to evaluate loan eligibility, check user permissions, make credit decisions, or execute state transitions.
+- **Level 2 (Matching & Scoring):**
+  - Compute Suitability/Match Scores and WEZA Quality Scores deterministically based on structured customer facts and institutional appetite rules.
+- **Level 3 (Agentic AI - `services/ai-service`):**
+  - Restrict generative AI strictly to natural language intent extraction (e.g. WhatsApp/web chat) and bank policy document parsing in Product Studio.
+  - All LLM outputs MUST be strictly validated using Pydantic v2 schemas (`FinancialIntent`, `ProductRuleExtraction`).
+
+## 2. Multi-Tenant Isolation & Privacy Boundaries
+- **Tenant Isolation:**
+  - ALL database queries in `domains/` and `api/v1/institution.py` MUST filter strictly by `tenant_id` derived directly from the authenticated JWT session context.
+  - NEVER accept `tenant_id` from unverified client URL path parameters or body payloads.
+  - Attempting to access another tenant's resource must return `404 Not Found` (never `403`, to avoid leaking resource existence).
+- **Privacy & Disclosure Gateway (`trust/policy.py`):**
+  - Identifiable customer details (Name, Phone, NIN/FCN, exact address, raw documents) are strictly Level 3 data.
+  - Before serving Level 3 data to an institution workspace, verify active consent via `PolicyDecisionPoint.evaluate()`.
+  - Opportunity Previews (Level 2) shown in institutional feeds prior to consent MUST redact all personal identifiers.
+
+## 3. Integration Provider Pattern & Cost Protection
+- **gnuGRID CRB & External Adapters:**
+  - All external APIs MUST inherit from an abstract base class (e.g., `AbstractGNUGridClient` in `weza/integrations/gnugrid.py`).
+  - System MUST default to `MockGNUGridClient` when `GNGRID_USE_MOCK=True` (default for dev, staging, and CI/CD).
+  - Production CRB calls MUST follow Just-In-Time (JIT) execution: trigger gnuGRID ONLY after an applicant selects a specific bank and submits their final 10-digit OTP consent.
+  - NEVER make live external API calls during intake or pre-screening.
+
+## 4. Transactional Outbox & Event Idempotency
+- **Database Consistency:**
+  - Any operation mutating a domain entity and emitting an event MUST write both the entity record and an `OutboxEvent` row within a **single database transaction (`db.commit()`)**.
+- **Idempotency:**
+  - Event consumers in `weza/consumers.py` MUST enforce idempotency using event/action keys (e.g., `info_req:{id}:fulfil`).
+
+## 5. Fact Provenance & Market Clearing
+- All customer profile facts stored in `domains/customer` MUST record `source` (e.g., `CUSTOMER`, `GNGRID_CRB`), `verification_state` (`SELF_REPORTED`, `VERIFIED_THIRD_PARTY`), and `captured_at`.
+- Updates to customer facts MUST trigger WEZA Quality Score recalculation and dispatch a market re-clearing event.
+
+## 6. Monorepo Structure & Conventions
+- `apps/`: Frontend User Surfaces (Next.js)
+  - `customer-web/`, `institution-web/`, `admin-web/`
+- `services/`: Backend Deployable Container Services
+  - `core-api/`: Enterprise REST APIs & Workflow Engine (FastAPI)
+  - `ai-service/`: Intent Engine & Policy Parser (FastAPI)
+  - `worker/`: Background Event Consumers & Outbox Processors
+- `domains/`: Pure Business Logic (Modular Monolith)
+- `schemas/`: Shared Pydantic / OpenAPI Schemas
+- `tests/`: Pytest & Playwright E2E Suites

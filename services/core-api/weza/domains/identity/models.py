@@ -61,6 +61,7 @@ class User(IdMixin, TimestampMixin, Base):
     email: Mapped[str] = mapped_column(String(200), unique=True, index=True)
     full_name: Mapped[str] = mapped_column(String(160))
     password_hash: Mapped[str] = mapped_column(String(200))
+    token_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     kind: Mapped[str] = mapped_column(String(16))  # INSTITUTION | WEZA
     weza_roles: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
     mfa_secret_ct: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)

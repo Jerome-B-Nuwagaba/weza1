@@ -35,7 +35,7 @@ def journey_id_from_token(token: str) -> uuid.UUID:
 
 def start_journey(db: Session, *, channel: str, attribution: dict | None = None, customer_id: uuid.UUID | None = None,
                   first_text: str | None = None, channel_phone: str | None = None, ip: str = "",
-                  device_hash: str | None = None) -> tuple[GraphInstance, list[dict]]:
+                  device_hash: str | None = None, message_id: str | None = None) -> tuple[GraphInstance, list[dict]]:
     if channel_disabled(db, channel):
         raise ValidationFailed("This channel is temporarily unavailable. Please try another.", code="CHANNEL_DISABLED")
     if ip:
@@ -57,7 +57,7 @@ def start_journey(db: Session, *, channel: str, attribution: dict | None = None,
     emit(db, "NeedCreated", topic="customer", aggregate_type="need", aggregate_id=need.id,
          data={"channel": channel, "source": a.get("src") or "direct"})
     if first_text:
-        _persist(db, inst, "IN", {"type": "text", "text": first_text}, channel, None)
+        _persist(db, inst, "IN", {"type": "text", "text": first_text}, channel, message_id)
     _persist_outputs(db, inst, outputs, channel)
     return inst, outputs
 
@@ -77,7 +77,7 @@ def handle_input(db: Session, journey_id: uuid.UUID, payload: dict, *, channel: 
                                                          "label": payload.get("label")}
     if inst.state.get("pending_q", {}).get("type") in ("nin", "name") and inst.current_node == "ASK_PROFILE":
         shown = {"type": "text", "text": "•••• (hidden)"}  # never keep identity values in conversation history
-    if inst.current_node == "VERIFY_PHONE":
+    if inst.current_node == "VERIFY_PHONE" or (inst.current_node == "CRB_CHECK" and inst.state.get("crb_challenge_id")):
         shown = {"type": "text", "text": "•••• (hidden)"}
     _persist(db, inst, "IN", shown, channel, message_id)
     if inst.status in ("COMPLETED", "EXPIRED", "CANCELLED", "FAILED"):
