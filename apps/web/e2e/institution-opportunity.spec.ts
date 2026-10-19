@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { assignTo, customerSharesWithLakeside, signIn } from "./helpers";
+import { assignTo, customerSharesWithLakeside, signIn, signInCustomer } from "./helpers";
 
 /**
  * E2E-01 (blueprint 12), institution side: a customer shares a pharmacy request with Lakeside Bank; the assigned
@@ -8,7 +8,7 @@ import { assignTo, customerSharesWithLakeside, signIn } from "./helpers";
  */
 test("officer works an opportunity from first contact to disbursement", async ({ page, request }) => {
   const officer = "officer@lakeside.demo";
-  const { reference, oppId, session, customer } = await customerSharesWithLakeside(request);
+  const { reference, oppId, phone, customer } = await customerSharesWithLakeside(request);
   await assignTo(request, oppId, officer);
 
   await signIn(page, officer);
@@ -58,7 +58,7 @@ test("officer works an opportunity from first contact to disbursement", async ({
   await expect(page.getByRole("button", { name: "Reported disbursed…" })).toHaveCount(0);
 
   // The customer sees the institution-reported terms on My requests
-  await page.addInitScript((t) => window.localStorage.setItem("weza.customer.session", t), session);
+  await signInCustomer(page, phone);
   await page.goto("/c/status");
   await expect(page.getByText(reference)).toBeVisible();
   await expect(page.getByText(/Indicative terms: 24 months/)).toBeVisible();
@@ -67,7 +67,7 @@ test("officer works an opportunity from first contact to disbursement", async ({
 
 test("customer answers an information request on My requests", async ({ page, request }) => {
   const officer = "officer@lakeside.demo";
-  const { oppId, session } = await customerSharesWithLakeside(request, "I need UGX 15 million to restock my pharmacy");
+  const { oppId, phone } = await customerSharesWithLakeside(request, "I need UGX 15 million to restock my pharmacy");
   await assignTo(request, oppId, officer);
 
   await signIn(page, officer);
@@ -81,7 +81,7 @@ test("customer answers an information request on My requests", async ({ page, re
 
   // Switch to the customer in a fresh context so staff and customer sessions don't mix
   const customerPage = await page.context().browser()!.newPage();
-  await customerPage.addInitScript((t) => window.localStorage.setItem("weza.customer.session", t), session);
+  await signInCustomer(customerPage, phone);
   await customerPage.goto("/c/status");
   await expect(customerPage.getByText("Do you own or rent the premises?")).toBeVisible();
   await customerPage.getByPlaceholder("Your answer").fill("We rent on a 3-year lease");
