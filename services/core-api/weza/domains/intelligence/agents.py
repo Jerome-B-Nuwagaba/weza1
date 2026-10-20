@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, TypeVar
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -19,7 +20,6 @@ from weza.domains.misc_models import AgentStep, LoopMetric
 from weza.platform import crypto
 from weza.platform.context import correlation_id
 
-T = TypeVar("T")
 
 
 class AgentPolicyError(RuntimeError):
@@ -99,11 +99,11 @@ def run_step(
     spec: AgentSpec,
     tool: str,
     args: dict[str, Any] | None,
-    fn: Callable[[], T],
+    fn: Callable[[], Any],
     *,
     subject: str | None = None,
     step_no: int = 1,
-) -> T:
+) -> Any:
     """Run one approved agent step and persist safe telemetry whether it succeeds or fails."""
     _check(spec, tool, step_no)
     started = time.monotonic()
