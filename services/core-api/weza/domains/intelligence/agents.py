@@ -21,7 +21,6 @@ from weza.platform import crypto
 from weza.platform.context import correlation_id
 
 
-
 class AgentPolicyError(RuntimeError):
     pass
 
@@ -164,11 +163,11 @@ def institution_tool(
     db: Session,
     tool: str,
     args: dict[str, Any] | None,
-    fn: Callable[[], T],
+    fn: Callable[[], Any],
     *,
     subject: str | None,
     step_no: int,
-) -> T:
+) -> Any:
     return run_step(
         db, INSTITUTION_ASSISTANT, tool, args, fn, subject=subject, step_no=step_no
     )
