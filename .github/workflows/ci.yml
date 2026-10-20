@@ -38,6 +38,12 @@ jobs:
       - run: pip install -r requirements.txt pytest ruff bandit pip-audit
       - run: ruff check weza tests
       - run: bandit -q -r weza -x weza/seed.py -s B101,B105,B106,B311,B608
+      - name: Require a single Alembic migration head
+        run: |
+          set -euo pipefail
+          heads="$(alembic heads | grep -c '(head)')"
+          echo "Alembic heads: $heads"
+          test "$heads" -eq 1
       - run: pip-audit -r requirements.txt --progress-spinner off || true
       - run: pytest -q -p no:cacheprovider
 
