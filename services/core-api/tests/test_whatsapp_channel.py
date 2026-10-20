@@ -25,7 +25,7 @@ from weza.config import DEFAULT_GRAPH_API_VERSION, get_settings, is_configured
 from weza.domains.customer import documents as docs
 from weza.domains.customer.models import Document
 from weza.domains.intelligence.parsing import parse_phone
-from weza.domains.misc_models import ChannelMessage, WhatsappInbox
+from weza.domains.misc_models import ChannelMessage, WhatsappInbox, WhatsappStatusReceipt
 from weza.domains.need.models import ConversationMessage
 from weza.domains.notification import service as notify
 from weza.domains.notification import whatsapp_inbound as wa_in
@@ -555,6 +555,20 @@ def test_provider_success_is_recorded_as_sent(client, wa_live, http):
     assert http.calls, "configured outbound should call the (mocked) Graph API"
 
 
+def test_logical_send_key_prevents_duplicate_committed_whatsapp_send(wa_live, http):
+    phone = fake_phone()
+    key = f"test:logical-send:{phone}"
+    with session_scope() as db:
+        assert notify.send_customer_message(db, "+" + phone, "one logical reply", channel="whatsapp",
+                                            idempotency_key=key)
+    with session_scope() as db:
+        assert notify.send_customer_message(db, "+" + phone, "one logical reply", channel="whatsapp",
+                                            idempotency_key=key)
+    rows = out_messages(phone)
+    assert len(rows) == 1 and rows[0].idempotency_key == key
+    assert len(http.calls) == 1
+
+
 # ------------------------------------------------------------------ delivery status callbacks (step b)
 
 
@@ -604,8 +618,22 @@ def test_failed_status_does_not_override_delivered(client, wa_live):
     assert got.provider_status == "delivered" and got.error_code is None
 
 
-def test_status_for_unknown_message_is_ignored(client, wa_inbound):
-    assert send(client, rw.status_payload("wamid.FAKE_UNKNOWN", "delivered")).status_code == 200
+def test_status_for_unknown_message_is_retained_then_reconciled(client, wa_inbound):
+    wamid = "wamid.FAKE_EARLY_RECEIPT"
+    assert send(client, rw.status_payload(wamid, "delivered")).status_code == 200
+    with session_scope() as db:
+        receipt = db.get(WhatsappStatusReceipt, wamid)
+        assert receipt is not None and receipt.provider_status == "delivered"
+        msg = ChannelMessage(channel="whatsapp", to_index="blind", body="already sent",
+                             payload={"kind": "test"}, provider="whatsapp_cloud", status="SENT",
+                             provider_message_id=wamid)
+        db.add(msg)
+    with session_scope() as db:
+        assert notify.reconcile_whatsapp_status_receipts(db) >= 1
+    with session_scope() as db:
+        msg = db.execute(select(ChannelMessage).where(ChannelMessage.provider_message_id == wamid)).scalar_one()
+        assert msg.provider_status == "delivered" and msg.status_at is not None
+        assert db.get(WhatsappStatusReceipt, wamid) is None
 
 
 def test_unknown_status_value_is_ignored(client, wa_live):
