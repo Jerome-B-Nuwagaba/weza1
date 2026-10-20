@@ -90,8 +90,15 @@ def create_app(start_worker: bool | None = None) -> FastAPI:
         try:
             with session_scope() as db:
                 db.execute(text("SELECT 1"))
+                stale_whatsapp = db.execute(text(
+                    "SELECT count(*) FROM notification.whatsapp_inbox "
+                    "WHERE status='PENDING' AND received_at < now() - interval '5 minutes'"
+                )).scalar_one()
         except Exception:  # noqa: BLE001 — never expose database connection details
             return JSONResponse({"status": "unavailable", "component": "database"}, status_code=503)
+        if stale_whatsapp:
+            return JSONResponse({"status": "unavailable", "component": "whatsapp_inbox",
+                                 "stale_messages": int(stale_whatsapp)}, status_code=503)
         if app.state.start_worker:
             thread = getattr(app.state, "worker_thread", None)
             if thread is None or not thread.is_alive():
