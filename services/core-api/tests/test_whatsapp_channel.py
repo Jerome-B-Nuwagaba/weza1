@@ -236,6 +236,20 @@ def test_readiness_checks_database(client, monkeypatch):
     assert "secret-database-url" not in r.text
 
 
+def test_readiness_detects_stale_whatsapp_backlog(client):
+    with session_scope() as db:
+        db.add(WhatsappInbox(provider_message_id=f"wamid.STALE_{uuid.uuid4()}", msg_type="text",
+                             phone_index="stale-test", payload_enc="encrypted",
+                             received_at=utcnow() - timedelta(minutes=6), status="PENDING"))
+    r = client.get("/readyz")
+    assert r.status_code == 503
+    assert r.json()["component"] == "whatsapp_inbox" and r.json()["stale_messages"] >= 1
+    with session_scope() as db:
+        for row in db.execute(select(WhatsappInbox).where(WhatsappInbox.phone_index == "stale-test")).scalars():
+            db.delete(row)
+    assert client.get("/readyz").status_code == 200
+
+
 def test_hosted_worker_answers_without_manual_event_drain(wa_live, monkeypatch, http):
     from fastapi.testclient import TestClient
 
