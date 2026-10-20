@@ -112,7 +112,8 @@ def _persist(db: Session, inst: GraphInstance, direction: str, content: dict, ch
         pass
 
 
-def _persist_outputs(db: Session, inst: GraphInstance, outputs: list[dict], channel: str,\n                     delivery_key_prefix: str | None = None) -> None:
+def _persist_outputs(db: Session, inst: GraphInstance, outputs: list[dict], channel: str,
+                     delivery_key_prefix: str | None = None) -> None:
     from datetime import timedelta
 
     from weza.platform.db import utcnow
@@ -124,7 +125,8 @@ def _persist_outputs(db: Session, inst: GraphInstance, outputs: list[dict], chan
         _send_whatsapp(db, inst, outputs, delivery_key_prefix=delivery_key_prefix)
 
 
-def _send_whatsapp(db: Session, inst: GraphInstance, outputs: list[dict], *,\n                   delivery_key_prefix: str | None = None) -> None:
+def _send_whatsapp(db: Session, inst: GraphInstance, outputs: list[dict], *,
+                   delivery_key_prefix: str | None = None) -> None:
     from weza.config import get_settings
     from weza.domains.customer.models import Customer
     from weza.domains.identity.service import vault_read
