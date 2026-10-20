@@ -1,0 +1,49 @@
+name: Live gnuGRID token smoke test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  token-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: services/core-api
+    env:
+      ENV: production
+      GNGRID_USE_MOCK: "false"
+      GNUGRID_BASE_URL: ${{ secrets.GNUGRID_BASE_URL }}
+      GNUGRID_CLIENT_ID: ${{ secrets.GNUGRID_CLIENT_ID }}
+      GNUGRID_CLIENT_SECRET: ${{ secrets.GNUGRID_CLIENT_SECRET }}
+      GNUGRID_ENQUIRY_REASON: ${{ secrets.GNUGRID_ENQUIRY_REASON }}
+      GNUGRID_PI_CODE: ${{ secrets.GNUGRID_PI_CODE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse to run without required gnuGRID secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in GNUGRID_BASE_URL GNUGRID_CLIENT_ID GNUGRID_CLIENT_SECRET; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing GitHub Actions secret: $name"
+              exit 2
+            fi
+          done
+          case "$GNUGRID_BASE_URL" in
+            https://*) ;;
+            *) echo "::error::GNUGRID_BASE_URL must use HTTPS"; exit 2 ;;
+          esac
+
+      - name: Install minimal dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Request OAuth token only
+        run: python scripts/crb_connection_check.py
+
+      - name: Confirm no chargeable enquiry was made
+        run: echo "Token-only check completed. This workflow never calls /v1/credit-enquiries/request/new."
