@@ -106,6 +106,7 @@ JOBS: list[tuple[str, float, Callable[[], object]]] = [
     ("info_request_expiry", 900, _sweep(opp_svc.info_request_expiry_sweep)),
     ("notify_retry", 60, _sweep(notify.retry_sweep)),
     ("whatsapp_retry", 60, _sweep(notify.retry_failed_channel_messages)),
+    ("whatsapp_receipts", 30, _sweep(notify.reconcile_whatsapp_status_receipts)),
     ("whatsapp_inbox_retry", 30, _sweep(whatsapp_inbound.retry_pending)),
     ("notify_escalation", 60, _sweep(notify.escalation_sweep)),
     ("waiting_room", 600, waiting_room_sweep),
