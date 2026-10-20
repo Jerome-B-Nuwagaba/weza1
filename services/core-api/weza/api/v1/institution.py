@@ -22,7 +22,7 @@ from weza.domains.identity import service as identity
 from weza.domains.identity.models import Membership, User
 from weza.domains.institution import service as inst_svc
 from weza.domains.institution.models import Institution, NotificationPref, RoutingRule, ServiceTarget, Team
-from weza.domains.intelligence import ai, assistant, insights
+from weza.domains.intelligence import agents, assistant, insights
 from weza.domains.matching import engine
 from weza.domains.misc_models import Notification
 from weza.domains.opportunity import service as opp_svc
@@ -388,7 +388,7 @@ async def extract_product(file: UploadFile = File(...), actor: Actor = A, db: Se
             raise ValidationFailed("Upload a PDF or a plain-text document.") from exc
     if len(text.strip()) < 40:
         raise ValidationFailed("The document has too little readable text.")
-    proposal = ai.extract_product_rules(db, text, subject=f"extract:{actor.institution_id}")
+    proposal = agents.product_rules(db, text, subject=f"extract:{actor.institution_id}")
     audit(db, actor, "product.ai_extraction", "institution", actor.institution_id,
           after={"source": proposal.get("source"), "rules": len(proposal.get("rules") or [])})
     return {"proposal": proposal, "filename": file.filename,
