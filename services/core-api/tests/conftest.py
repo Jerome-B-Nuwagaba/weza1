@@ -72,13 +72,23 @@ def database():
 
 
 @pytest.fixture(autouse=True)
-def _reset_ip_rate_limits(database):
-    """Every test client shares one IP and the same demo logins, so journey/OTP/login limits would accumulate across
-    the suite. Reset them per test; tests that exercise rate limiting trip them within a single test."""
+def _reset_shared_test_limits(database):
+    """Reset mutable cross-test counters.
+
+    The database is intentionally session-scoped for speed, but rate counters and lender-capacity counters are
+    runtime state. If they leak between tests, later customer journeys can lose an otherwise valid lender because an
+    earlier test consumed its daily/monthly capacity. Each test still exercises those limits normally within its own
+    transaction history; only cross-test accumulation is removed here.
+    """
     from weza.platform.db import session_scope
     with session_scope() as db:
         db.execute(sa.text("DELETE FROM platform.rate_counter WHERE bucket LIKE 'otp:ip:%' "
                            "OR bucket LIKE 'journey:ip:%' OR bucket LIKE 'login:%' OR bucket LIKE 'apply:%'"))
+        db.execute(sa.text("DELETE FROM appetite.capacity_usage"))
+        db.execute(sa.text(
+            "UPDATE appetite.appetite SET capacity_state='ACTIVE', capacity_override=NULL, "
+            "fulfilled_count=0, fulfilled_value=0 WHERE lifecycle_status='ACTIVE'"
+        ))
     yield
 
 
