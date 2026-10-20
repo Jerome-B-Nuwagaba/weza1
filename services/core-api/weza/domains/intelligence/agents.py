@@ -172,3 +172,21 @@ def institution_tool(
     return run_step(
         db, INSTITUTION_ASSISTANT, tool, args, fn, subject=subject, step_no=step_no
     )
+
+
+def marketplace_narrative(
+    db: Session,
+    capability: str,
+    evidence: dict[str, Any],
+    fallback: str,
+    *,
+    subject: str | None = None,
+) -> str:
+    return run_step(
+        db,
+        MARKETPLACE_INTELLIGENCE,
+        capability,
+        {"evidence_keys": sorted(evidence.keys())},
+        lambda: ai.narrate_aggregate(db, capability, evidence, fallback, subject=subject),
+        subject=subject,
+    )
