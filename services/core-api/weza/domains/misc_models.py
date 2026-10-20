@@ -57,6 +57,25 @@ class ChannelMessage(IdMixin, Base):
     provider_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Stable logical-send key. Used by journey/channel retries to avoid creating duplicate sends after a committed attempt.
+    idempotency_key: Mapped[str | None] = mapped_column(String(180), nullable=True, unique=True)
+
+
+class WhatsappStatusReceipt(Base):
+    """Delivery status that arrived before its outbound ChannelMessage became visible.
+
+    Meta can deliver sent/delivered/read callbacks extremely quickly. Keeping the latest early receipt lets a worker
+    reconcile it later instead of silently losing delivery truth.
+    """
+
+    __tablename__ = "whatsapp_status_receipt"
+    __table_args__ = ({"schema": "notification"},)
+
+    provider_message_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    provider_status: Mapped[str] = mapped_column(String(16))
+    error_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
 class WhatsappInbox(IdMixin, Base):
