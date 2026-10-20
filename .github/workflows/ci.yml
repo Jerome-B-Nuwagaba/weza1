@@ -159,8 +159,8 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
-      - run: flutter build apk --release --dart-define=WEZA_API_URL=${{ vars.WEZA_API_URL || 'https://weza-api.onrender.com' }}
-      - run: flutter build web --release --dart-define=WEZA_API_URL=${{ vars.WEZA_API_URL || 'https://weza-api.onrender.com' }}
+      - run: flutter build apk --release --dart-define=WEZA_API_URL=${{ vars.WEZA_API_URL || 'https://weza-api-go6e.onrender.com' }}
+      - run: flutter build web --release --dart-define=WEZA_API_URL=${{ vars.WEZA_API_URL || 'https://weza-api-go6e.onrender.com' }}
       - uses: actions/upload-artifact@v4
         with:
           name: weza-android-apk
