@@ -19,7 +19,7 @@ def test_agent_supervisor_blocks_business_authority():
                     agents.INSTITUTION_ASSISTANT,
                     tool,
                     {},
-                    lambda: called.append(tool),
+                    lambda tool=tool: called.append(tool),
                     subject="policy-test",
                 )
     assert called == []
