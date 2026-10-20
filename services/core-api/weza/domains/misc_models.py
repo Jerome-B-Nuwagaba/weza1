@@ -191,6 +191,22 @@ class MarketSnapshot(IdMixin, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class AgentStep(IdMixin, Base):
+    """Auditable agent/tool step without raw prompts, PII or tool results."""
+
+    __tablename__ = "agent_step"
+    __table_args__ = ({"schema": "analytics"},)
+
+    agent: Mapped[str] = mapped_column(String(60), index=True)
+    tool: Mapped[str] = mapped_column(String(80))
+    args_hash: Mapped[str] = mapped_column(String(64))
+    result_status: Mapped[str] = mapped_column(String(20))
+    subject: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    correlation_id: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class LoopMetric(IdMixin, Base):
     """Per-loop/per-agent budget and outcome telemetry (Skill §61)."""
 
