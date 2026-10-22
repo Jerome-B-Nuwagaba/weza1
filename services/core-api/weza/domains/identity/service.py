@@ -15,6 +15,8 @@ from weza.domains.identity.models import (
     User,
     VaultRecord,
 )
+from weza.domains.trust import policy
+from weza.domains.trust import roles as canon
 from weza.domains.trust.service import audit
 from weza.platform import crypto
 from weza.platform.context import SYSTEM, Actor
@@ -168,6 +170,8 @@ def create_user(db: Session, *, email: str, full_name: str, password: str, kind:
         raise Conflict("A user with this email already exists.", code="USER_EXISTS")
     if len(password) < 12:
         raise ValidationFailed("Password must be at least 12 characters.")
+    roles = _known_roles(roles, kind)
+    weza_roles = _known_roles(weza_roles, kind)
     u = User(email=email, full_name=full_name, password_hash=crypto.hash_password(password), kind=kind,
              weza_roles=weza_roles or [])
     db.add(u)
@@ -178,17 +182,30 @@ def create_user(db: Session, *, email: str, full_name: str, password: str, kind:
     return u
 
 
+def _known_roles(roles: list[str] | None, kind: str) -> list[str]:
+    """Reject roles outside the vocabulary for this kind of user, so a typo never silently grants nothing."""
+    if not roles:
+        return []
+    allowed = set(policy.INST_ROLES) if kind == "INSTITUTION" else set(policy.WEZA_ROLES)
+    unknown = [r for r in roles if r not in allowed]
+    if unknown:
+        raise ValidationFailed("Unknown role.", code="UNKNOWN_ROLE", details=[{"role": r} for r in unknown])
+    return list(dict.fromkeys(roles))
+
+
 def _membership(db: Session, user_id: uuid.UUID) -> Membership | None:
     return db.execute(select(Membership).where(Membership.user_id == user_id)).scalar_one_or_none()
 
 
 def actor_for_user(db: Session, user: User, mfa: bool) -> Actor:
+    # Roles are expanded to the canonical vocabulary here, once, so every downstream check reads the
+    # same set whatever spelling the institution's administrator chose.
     if user.kind == "WEZA":
-        return Actor(kind="WEZA_USER", id=user.id, roles=frozenset(user.weza_roles), mfa=mfa, display=user.full_name)
+        return Actor(kind="WEZA_USER", id=user.id, roles=canon.expand(user.weza_roles), mfa=mfa, display=user.full_name)
     m = _membership(db, user.id)
     if m is None:
         raise Forbidden("Your account is not linked to an institution.")
-    return Actor(kind="INSTITUTION_USER", id=user.id, institution_id=m.institution_id, roles=frozenset(m.roles),
+    return Actor(kind="INSTITUTION_USER", id=user.id, institution_id=m.institution_id, roles=canon.expand(m.roles),
                  team_id=m.team_id, mfa=mfa, display=user.full_name)
 
 

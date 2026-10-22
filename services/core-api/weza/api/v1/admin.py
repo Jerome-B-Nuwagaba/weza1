@@ -89,10 +89,7 @@ def overview(actor: Actor = W, db: Session = DB):
 def institutions(actor: Actor = W, db: Session = DB):
     policy.require(actor, "admin.read")
     rows = db.execute(select(Institution).order_by(Institution.created_at.desc())).scalars()
-    return {"institutions": [{"id": str(i.id), "legal_name": i.legal_name, "display_name": i.display_name,
-                              "type": i.institution_type, "status": i.status, "licence_no": i.licence_no,
-                              "regulator": i.regulator, "created_at": i.created_at.isoformat(),
-                              "activated_at": i.activated_at.isoformat() if i.activated_at else None} for i in rows]}
+    return {"institutions": [{**inst_svc.summary(i), "created_at": i.created_at.isoformat()} for i in rows]}
 
 
 @router.get("/institutions/{inst_id}")
@@ -101,11 +98,9 @@ def institution(inst_id: uuid.UUID, actor: Actor = W, db: Session = DB):
     i = db.get(Institution, inst_id)
     if i is None:
         raise NotFound("Not found.")
-    return {"id": str(i.id), "legal_name": i.legal_name, "display_name": i.display_name, "type": i.institution_type,
-            "status": i.status, "status_reason": i.status_reason, "licence_no": i.licence_no, "regulator": i.regulator,
-            "profile": i.profile, "terms_version": i.terms_version,
-            "verified_by": i.verified_by, "verified_at": i.verified_at.isoformat() if i.verified_at else None,
-            "contacts": [{"kind": c.kind, "name": c.name, "email": c.email, "phone": c.phone, "title": c.title}
+    return {**inst_svc.summary(i), "status_reason": i.status_reason, "profile": i.profile,
+            "primary_contact": inst_svc.primary_contact(db, i),
+            "contacts": [inst_svc.contact_summary(c)
                          for c in db.execute(select(Contact).where(Contact.institution_id == i.id)).scalars()],
             "checklist": inst_svc.checklist(db, i),
             "users": db.execute(select(func.count()).select_from(Membership).where(

@@ -126,4 +126,9 @@ const ROLE_HELP: Record<string, string> = {
   MANAGER: "queues, assignment, service targets, team identity access",
   OFFICER: "assigned opportunities, contact, outcomes",
   COMPLIANCE: "consent and access logs",
+  // The canonical WEZA V1 names. Each grants exactly the permissions of the working role above it.
+  INSTITUTION_ADMIN: "users, settings, activation; approves products/appetite",
+  INSTITUTION_MANAGER: "queues, assignment, service targets, team identity access",
+  INSTITUTION_OFFICER: "assigned opportunities, contact, outcomes",
+  COMPLIANCE_VIEWER: "consent and access logs",
 };

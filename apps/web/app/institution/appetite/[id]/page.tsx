@@ -72,7 +72,7 @@ export default function AppetiteDetail({ params }: { params: Promise<{ id: strin
       {latest.status === "DRAFT" && <Banner tone="info" className="mb-4">Version {latest.version} is a draft. Run a simulation before it can be approved.</Banner>}
 
       {editing ? (
-        <AppetiteEditor saving={busy} error={err} initial={{ name: latest.name, product_ids: latest.product_ids, criteria: latest.criteria, min_match_score: latest.min_match_score, target_count: latest.target_count, target_value: latest.target_value, capacity_limits: latest.capacity_limits, campaign_from: latest.campaign_from, campaign_to: latest.campaign_to }}
+        <AppetiteEditor saving={busy} error={err} initial={{ name: latest.name, product_ids: latest.product_ids, criteria: latest.criteria, min_match_score: latest.min_match_score, target_count: latest.target_count, target_value: latest.target_value, capacity_limits: latest.capacity_limits, campaign_from: latest.campaign_from, campaign_to: latest.campaign_to, customer_types: latest.mandate?.customer_types || [], sectors: latest.mandate?.sectors || [], regions: latest.mandate?.regions || [], min_amount: latest.mandate?.min_amount ?? null, max_amount: latest.mandate?.max_amount ?? null, min_business_age_months: latest.mandate?.min_business_age_months ?? null }}
           onSave={async (draft) => { if (await act(() => api(`/inst/appetites/${id}`, { method: "PUT", body: draft }), "Draft saved — simulate before approval")) setEditing(false); }} />
       ) : (
         <div className="space-y-4">
@@ -82,6 +82,19 @@ export default function AppetiteDetail({ params }: { params: Promise<{ id: strin
                 <ul className="space-y-1.5 text-[14px]">{latest.criteria.map((c: any, i: number) => <li key={i} className="flex flex-wrap items-center gap-2"><Badge tone={c.must ? "warning" : "muted"}>{c.must ? "must" : `×${c.weight}`}</Badge>{c.label || `${c.field} ${c.op} ${JSON.stringify(c.value)}`}</li>)}</ul>
               )}
               <div className="mt-4"><KV items={[["Target", latest.target_count ? `${latest.target_count} opportunities` : "—"], ["Target value", latest.target_value ? money(latest.target_value) : "—"], ["Campaign", latest.campaign_from ? `${latest.campaign_from} → ${latest.campaign_to}` : "Open-ended"], ["Daily capacity", latest.capacity_limits.daily_count ?? "—"]]} /></div>
+              {latest.mandate && (latest.mandate.customer_types?.length || latest.mandate.sectors?.length || latest.mandate.regions?.length || latest.mandate.min_amount != null || latest.mandate.max_amount != null || latest.mandate.min_business_age_months != null) && (
+                <div className="mt-4 border-t border-line pt-3">
+                  <div className="text-[12px] uppercase tracking-wide text-muted">Mandate limits</div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {latest.mandate.customer_types?.map((x: string) => <Badge key={`ct-${x}`} tone="muted">{x.replace("_", " ")}</Badge>)}
+                    {latest.mandate.sectors?.map((x: string) => <Badge key={`s-${x}`} tone="muted">{x.replace(/_/g, " ")}</Badge>)}
+                    {latest.mandate.regions?.map((x: string) => <Badge key={`r-${x}`} tone="muted">{x}</Badge>)}
+                    {latest.mandate.min_amount != null && <Badge tone="muted">from {money(latest.mandate.min_amount)}</Badge>}
+                    {latest.mandate.max_amount != null && <Badge tone="muted">to {money(latest.mandate.max_amount)}</Badge>}
+                    {latest.mandate.min_business_age_months != null && <Badge tone="muted">{latest.mandate.min_business_age_months} months trading</Badge>}
+                  </div>
+                </div>
+              )}
             </Card>
             <Card title="Fulfilment">
               <div className="num text-2xl font-semibold">{d.fulfilled_count}{current.target_count ? <span className="text-[15px] text-muted"> / {current.target_count}</span> : ""}</div>

@@ -15,6 +15,7 @@ from weza.domains.identity.models import Membership, User
 from weza.domains.institution.models import NotificationPref
 from weza.domains.misc_models import ChannelMessage, Notification
 from weza.domains.notification import retry_queue
+from weza.domains.trust import roles as canon
 from weza.platform import crypto
 from weza.platform.controls import channel_disabled
 from weza.platform.db import utcnow
@@ -381,7 +382,8 @@ def _recipients(db: Session, institution_id: uuid.UUID, roles: list[str] | None,
     for u, m in db.execute(q).all():
         if user_ids and u.id in user_ids:
             out.append(u)
-        elif roles and set(m.roles) & set(roles) and (team_id is None or m.team_id in (team_id, None)):
+        elif roles and set(canon.expand(m.roles)) & set(canon.expand(roles)) and \
+                (team_id is None or m.team_id in (team_id, None)):
             out.append(u)
     return out
 

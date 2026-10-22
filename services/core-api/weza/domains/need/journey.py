@@ -306,6 +306,9 @@ def _phone_verified(ctx: Ctx, st: dict, phone: str, *, method: str) -> Step:
                                                            device_hash=st.get("device_hash"))
     need.customer_id = customer.id
     need.status = "PHONE_VERIFIED"
+    need.phone_verified = True
+    need.phone_verified_at = utcnow()
+    need.phone_verification_method = "OTP" if method == "otp" else "WHATSAPP_CHANNEL"
     ctx.instance.customer_id = customer.id
     if method == "otp":  # web/app need a session; WhatsApp is identified by the chat itself
         token = identity.create_customer_session(ctx.db, customer.id, st.get("channel", "web"))

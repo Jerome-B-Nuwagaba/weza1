@@ -88,6 +88,32 @@ def app(database):
 
 
 @pytest.fixture()
+def clean_market_after():
+    """Leave the market the way this test found it.
+
+    The suite shares one seeded database, so a test that leaves live supply behind changes what later tests
+    see: a customer who is meant to wait for a match instead matches against the leftover institution. Tests
+    that create institutions ask for this fixture and get every institution they created taken back out of
+    the market (paused institution, paused product, archived mandate) once the test is done.
+    """
+    from weza.domains.appetite.models import Appetite
+    from weza.domains.institution.models import Institution
+    from weza.domains.product.models import Product
+    from weza.platform.db import session_scope
+
+    with session_scope() as db:
+        before = {str(i.id) for i in db.execute(sa.select(Institution)).scalars()}
+    yield
+    with session_scope() as db:
+        created = [i for i in db.execute(sa.select(Institution)).scalars() if str(i.id) not in before]
+        for inst in created:
+            db.execute(sa.update(Product).where(Product.institution_id == inst.id).values(status="PAUSED"))
+            db.execute(sa.update(Appetite).where(Appetite.institution_id == inst.id)
+                       .values(lifecycle_status="ARCHIVED"))
+            db.execute(sa.update(Institution).where(Institution.id == inst.id).values(status="PAUSED"))
+
+
+@pytest.fixture()
 def client(app):
     from fastapi.testclient import TestClient
     with TestClient(app) as c:

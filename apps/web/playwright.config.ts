@@ -21,10 +21,16 @@ export default defineConfig({
   webServer: process.env.E2E_BASE_URL
     ? undefined
     : {
-        command: process.env.CI ? "npm run start" : "npm run dev",
+        // A production build, locally as well as in CI. The dev server watches the whole workspace — Next
+        // infers the repo root here — so the embedded Postgres data directory and the test artefacts churn
+        // under it and it rebuilds the page mid-test. A Fast Refresh rebuild remounts the client tree and
+        // wipes the state of any form the test has filled in.
+        command: process.env.CI ? "npm run start" : "npm run build && npm run start",
         url: baseURL,
-        reuseExistingServer: !process.env.CI,
-        timeout: 180_000,
+        // Always the build Playwright starts itself: reusing a server someone else left running would put a
+        // dev server (and its rebuilds) back in front of the tests. Use E2E_BASE_URL to point at a real one.
+        reuseExistingServer: false,
+        timeout: 300_000,
         env: { API_URL: process.env.API_URL || "http://localhost:8000" },
       },
 });
