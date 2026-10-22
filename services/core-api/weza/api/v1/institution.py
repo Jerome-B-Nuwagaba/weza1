@@ -419,13 +419,30 @@ def appetites(actor: Actor = A, db: Session = DB):
         latest = db.execute(select(AppetiteVersion).where(AppetiteVersion.appetite_id == ap.id)
                             .order_by(AppetiteVersion.version.desc()).limit(1)).scalar_one()
         cur = db.get(AppetiteVersion, ap.active_version_id) if ap.active_version_id else None
+        version = cur or latest
+        crit = version.criteria or []
+
+        def pick(field, criteria=crit):
+            for c in criteria:
+                if c.get("field") == field:
+                    return c.get("value")
+            return None
+
+        products = []
+        if version.product_ids:
+            products = [{"id": str(x.id), "name": x.name} for x in db.execute(
+                select(Product).where(Product.id.in_(list(version.product_ids)))).scalars()]
         out.append({"id": str(ap.id), "name": ap.name, "lifecycle_status": ap.lifecycle_status,
                     "capacity_state": ap.capacity_state, "capacity_override": ap.capacity_override,
                     "fulfilled_count": ap.fulfilled_count, "fulfilled_value": float(ap.fulfilled_value or 0),
                     "active_version": cur.version if cur else None, "latest_version": latest.version,
                     "latest_status": latest.status, "target_count": (cur or latest).target_count,
                     "target_value": float((cur or latest).target_value) if (cur or latest).target_value else None,
-                    "min_match_score": (cur or latest).min_match_score, "criteria": len((cur or latest).criteria)})
+                    "min_match_score": (cur or latest).min_match_score, "criteria": len((cur or latest).criteria),
+                    "products": products, "customer_type": pick("customer_type"), "sector": pick("sector"),
+                    "region": pick("region"), "amount_range": pick("amount"),
+                    "business_age_months": pick("business_age_months"),
+                    "routing_team_id": (version.capacity_limits or {}).get("routing_team_id")})
     return {"appetites": out}
 
 
@@ -663,7 +680,7 @@ def my_day(actor: Actor = A, db: Session = DB):
     items = [opp_svc.summary(db, o, open_requests=pending, identity_statuses=ids) for o in rows]
     sections = {
         "new": [i for i in items if i["state"] in ("ROUTED", "RECEIVED", "ASSIGNED")],
-        "follow_up": [i for i in items if i["state"] in ("CONTACTED", "PROCEEDING")],
+        "follow_up": [i for i in items if i["state"] in ("CONTACTED", "INFORMATION_REQUESTED", "PROCEEDING")],
         "awaiting_outcome": [i for i in items if i["state"] in ("SUBMITTED_TO_INSTITUTION", "REPORTED_APPROVED")],
     }
     for k in sections:
@@ -721,6 +738,22 @@ def update_status(opp_id: uuid.UUID, body: StatusUpdateIn, idempotency_key: str 
         opp_svc.update_status(db, actor, o, body.state, body.note)
         return {"state": o.state}
     idempotent(db, idempotency_key, f"status:{opp_id}", body.model_dump(), run)
+    return opportunity(opp_id, actor, db)
+
+
+class NoteIn(BaseModel):
+    note: str = Field(..., min_length=1, max_length=1000)
+
+
+@router.post("/opportunities/{opp_id}/note")
+def add_note(opp_id: uuid.UUID, body: NoteIn, actor: Actor = A, db: Session = DB):
+    """An internal note on a routed opportunity — the institution's own record. It is never shown to the customer."""
+    o = db.execute(select(Opportunity).where(Opportunity.id == opp_id,
+                                             Opportunity.institution_id == actor.institution_id)).scalar_one_or_none()
+    if o is None:
+        raise NotFound("Not found.")
+    policy.require_tenant(actor, o.institution_id)
+    opp_svc.add_internal_note(db, actor, o, body.note)
     return opportunity(opp_id, actor, db)
 
 
@@ -999,8 +1032,8 @@ def report_outcomes(actor: Actor = A, db: Session = DB):
     opps = db.execute(select(Opportunity).where(Opportunity.institution_id == actor.institution_id)).scalars().all()
     outs = db.execute(select(Outcome).where(Outcome.institution_id == actor.institution_id)).scalars().all()
     from collections import Counter
-    stage_order = ["ROUTED", "RECEIVED", "ASSIGNED", "CONTACTED", "PROCEEDING", "SUBMITTED_TO_INSTITUTION",
-                   "REPORTED_APPROVED", "REPORTED_DISBURSED"]
+    stage_order = ["ROUTED", "RECEIVED", "ASSIGNED", "CONTACTED", "INFORMATION_REQUESTED", "PROCEEDING",
+                   "SUBMITTED_TO_INSTITUTION", "REPORTED_APPROVED", "REPORTED_DISBURSED"]
     reached = Counter()
     from weza.domains.opportunity.models import Activity
     acts = db.execute(select(Activity.opportunity_id, Activity.kind).where(

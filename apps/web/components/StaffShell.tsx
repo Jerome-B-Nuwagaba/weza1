@@ -32,8 +32,8 @@ const INST_NAV: [string, Item[]][] = [
     { href: "/institution/team", label: "Team", icon: Users, perm: "team.manage" },
   ]],
   ["Supply", [
-    { href: "/institution/products", label: "Product Studio", icon: Package, perm: "product.read" },
-    { href: "/institution/appetite", label: "Appetite Studio", icon: Target, perm: "appetite.read" },
+    { href: "/institution/products", label: "Products", icon: Package, perm: "product.read" },
+    { href: "/institution/appetite", label: "Mandates", icon: Target, perm: "appetite.read" },
     { href: "/institution/sandbox", label: "Sandbox", icon: FlaskConical, perm: "sandbox.run" },
   ]],
   ["Intelligence", [

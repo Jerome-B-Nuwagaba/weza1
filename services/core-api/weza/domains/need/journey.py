@@ -871,6 +871,7 @@ def status_label(state: str) -> str:
     return {"QUALIFIED": "Completing checks", "ROUTED": "Shared — waiting for the institution",
             "RECEIVED": "Opened by the institution", "ASSIGNED": "Assigned to an officer",
             "CONTACTED": "The institution has contacted you", "PROCEEDING": "In the institution's process",
+            "INFORMATION_REQUESTED": "The institution has asked you for more information",
             "SUBMITTED_TO_INSTITUTION": "Application submitted to the institution",
             "REPORTED_APPROVED": "Reported approved by the institution",
             "REPORTED_DISBURSED": "Reported disbursed by the institution",

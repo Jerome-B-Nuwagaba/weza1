@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from weza.domains.appetite.models import Appetite, AppetiteVersion
-from weza.domains.institution.models import Institution
+from weza.domains.institution.models import Institution, Team
 from weza.domains.matching import engine
 from weza.domains.matching.rules import OPS, ruleset_hash
 from weza.domains.product.models import Product, ProductVersion
@@ -41,6 +41,18 @@ def _validate(db: Session, actor: Actor, p: dict) -> dict:
         raise ValidationFailed("Minimum match must be between 0 and 100.")
     limits = {k: int(v) for k, v in (p.get("capacity_limits") or {}).items()
               if k in ("daily_count", "weekly_count", "monthly_count", "monthly_value") and v not in (None, "", 0)}
+    # Routing destination: the desk that receives opportunities matched by this mandate.
+    routing_team_id = (p.get("capacity_limits") or {}).get("routing_team_id") or None
+    if routing_team_id:
+        try:
+            team_id = uuid.UUID(str(routing_team_id))
+        except (ValueError, AttributeError) as exc:
+            raise ValidationFailed("Unknown routing destination.", details=[{"field": "routing_team_id"}]) from exc
+        owned = db.execute(select(func.count()).select_from(Team).where(
+            Team.id == team_id, Team.institution_id == actor.institution_id)).scalar_one()
+        if not owned:
+            raise ValidationFailed("Unknown routing destination.", details=[{"field": "routing_team_id"}])
+        limits["routing_team_id"] = str(team_id)
 
     def d(x):
         return date.fromisoformat(x) if x else None
