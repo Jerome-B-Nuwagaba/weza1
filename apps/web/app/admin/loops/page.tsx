@@ -10,7 +10,7 @@ export default function Loops() {
   const d = r.data;
   return (
     <>
-      <PageHeader title="Loops & AI observability" subtitle="Node-level flow, where customers wait, loop budgets and AI cost, latency and fallbacks (last 30 days)." />
+      <PageHeader title="Agents, loops & AI observability" subtitle="Agent tool use, node-level flow, loop budgets and AI cost, latency and fallbacks (last 30 days)." />
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Journey node entries"><BarList data={Object.fromEntries(Object.entries(d.node_entries).sort((a: any, b: any) => b[1] - a[1]).slice(0, 14)) as any} /></Card>
         <Card title="Currently waiting at node"><BarList data={d.waiting_at} empty="No waiting journeys." /></Card>
@@ -19,6 +19,9 @@ export default function Loops() {
         <Table head={["Graph", "Status", "Count"]} empty={d.instances.length === 0}>{d.instances.map((x: any, i: number) => <tr key={i}><Td>{x.graph}</Td><Td>{x.status}</Td><Td className="num">{x.count}</Td></tr>)}</Table>
       </Card>
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <Card title="Agent tool steps">
+          <Table head={["Agent", "Tool", "Status", "Count"]} empty={(d.agent_steps || []).length === 0}>{(d.agent_steps || []).map((x: any, i: number) => <tr key={i}><Td>{x.agent}</Td><Td>{x.tool}</Td><Td>{x.status}</Td><Td className="num">{x.count}</Td></tr>)}</Table>
+        </Card>
         <Card title="Agent loops">
           <Table head={["Loop", "Event", "Count"]} empty={d.loops.length === 0}>{d.loops.map((x: any, i: number) => <tr key={i}><Td>{x.loop}</Td><Td>{x.event}</Td><Td className="num">{x.count}</Td></tr>)}</Table>
         </Card>
