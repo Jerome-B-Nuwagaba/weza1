@@ -26,6 +26,7 @@ READY = dict(env="production", secret_key="s" * 40, vault_master_key="k" * 44, b
 
 def test_production_readiness_lists_every_blocker():
     assert Settings(**READY).production_problems() == []
+    assert any("LOGIN_IP_LIMIT" in p for p in Settings(**{**READY, "login_ip_limit": 101}).production_problems())
     problems = " | ".join(Settings(env="production").production_problems())
     for expected in ("development secrets", "MFA_ENFORCED", "OTP_DELIVERY", "SMS_PROVIDER", "MALWARE_SCANNER",
                      "SMTP_URL", "IDENTITY_PROVIDER", "GNGRID_USE_MOCK"):

@@ -2,6 +2,7 @@ import { expect, type APIRequestContext, type Page } from "@playwright/test";
 
 export const DEMO_PASSWORD = "WezaDemo!2026";
 const API = "/api/v1"; // same-origin: Next rewrites proxy to the core API
+const E2E_BASE_URL = process.env.E2E_BASE_URL || "http://localhost:3000";
 
 const SME_ANSWERS: Record<string, string> = {
   "identity.full_name": "Grace Nakato", "business.name": "Nakato Pharmacy", "business.sector": "health_pharmacy",
@@ -90,4 +91,8 @@ export async function signIn(page: Page, email: string, password = DEMO_PASSWORD
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL(/\/(institution|admin)/);
+}
+
+export async function setCustomerSession(page: Page, session: string) {
+  await page.context().addCookies([{ name: "weza_cs", value: session, url: `${E2E_BASE_URL}/api/v1` }]);
 }

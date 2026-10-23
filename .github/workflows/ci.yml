@@ -102,6 +102,7 @@ jobs:
     env:
       API_URL: http://localhost:8000
       CI: "1"
+      LOGIN_IP_LIMIT: "1000"
     steps:
       - uses: actions/checkout@v4
       - name: Boot API container with demo seed

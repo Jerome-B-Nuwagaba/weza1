@@ -12,6 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy import select
 
 from tests.helpers import opp_for
+from weza.config import Settings
 from weza.consumers import preview_payload
 from weza.domains.identity.models import User
 from weza.domains.matching.models import Match
@@ -125,6 +126,15 @@ def test_login_rate_limit_and_lockout(client):
     assert codes[:5] == [401] * 5
     r = client.post("/api/v1/auth/login", json={"email": "compliance@pearl.demo", "password": "WezaDemo!2026"})
     assert r.status_code == 401 and r.json()["error"]["code"] == "ACCOUNT_LOCKED"
+
+
+def test_login_ip_limit_is_configurable(client, monkeypatch):
+    from weza.domains.identity import service as identity
+
+    monkeypatch.setattr(identity, "get_settings", lambda: Settings(login_ip_limit=2))
+    codes = [client.post("/api/v1/auth/login", json={"email": "compliance@pearl.demo", "password": "wrong-password-x"}
+                         ).status_code for _ in range(3)]
+    assert codes == [401, 401, 429]
 
 
 def test_log_redaction():

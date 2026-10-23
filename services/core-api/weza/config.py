@@ -121,6 +121,7 @@ class Settings(BaseSettings):
     access_token_minutes: int = 15
     refresh_token_days: int = 7
     customer_session_days: int = 30
+    login_ip_limit: int = 50
 
     @property
     def is_production(self) -> bool:
@@ -136,6 +137,8 @@ class Settings(BaseSettings):
             problems.append("MFA_ENFORCED is not true")
         if self.otp_delivery != "sms":
             problems.append("OTP_DELIVERY must be sms")
+        if self.login_ip_limit > 100:
+            problems.append("LOGIN_IP_LIMIT must be <= 100")
         if self.sms_provider == "africastalking":
             if not (self.africastalking_username and self.africastalking_api_key):
                 problems.append("AFRICASTALKING_USERNAME / AFRICASTALKING_API_KEY missing")
