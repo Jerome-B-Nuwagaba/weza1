@@ -202,7 +202,7 @@ def login(db: Session, email: str, password: str, ip: str = "") -> dict:
     email = email.strip().lower()
     rate_limit(db, f"login:email:{crypto.sha256_hex(email)}", 10, 900, "Too many sign-in attempts. Try again later.")
     if ip:
-        rate_limit(db, f"login:ip:{crypto.sha256_hex(ip)}", 50, 900)
+        rate_limit(db, f"login:ip:{crypto.sha256_hex(ip)}", get_settings().login_ip_limit, 900)
     user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
     if user is None or user.status != "ACTIVE":
         crypto.verify_password(password, crypto.hash_password("timing-equaliser-xx"))
