@@ -1,5 +1,7 @@
 import httpx
+
 from weza.config import settings
+
 
 async def send_whatsapp_text(to_phone: str, message_text: str):
     url = f"https://graph.facebook.com/v18.0/{settings.WHATSAPP_PHONE_NUMBER_ID}/messages"

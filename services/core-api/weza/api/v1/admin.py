@@ -409,7 +409,9 @@ def commercial_overview(actor: Actor = W, db: Session = DB):
                                  "included_opportunities": c.included_opportunities,
                                  "opportunity_price": float(c.opportunity_price),
                                  "duplicate_window_days": c.duplicate_window_days,
-                                 "dispute_window_days": c.dispute_window_days} if c else None})
+                                 "dispute_window_days": c.dispute_window_days,
+                                 "min_match_score": commercial.qualified_definition(c)["min_match_score"]}
+                    if c else None})
     revenue = sum(x["statement"]["total_due"] for x in out)
     return {"period": period, "institutions": out, "unit_economics": {
         "revenue_month": revenue, "qualified_opportunities_total": total_opps,
@@ -434,13 +436,16 @@ def set_contract(inst_id: uuid.UUID, body: ContractIn, actor: Actor = W, db: Ses
     policy.require(actor, "admin.commercial")
     if db.get(Institution, inst_id) is None:
         raise NotFound("Not found.")
+    previous = commercial.active_contract(db, inst_id)
+    # Carry over every other qualification rule; only the match threshold is edited here.
+    definition = {**((previous.qualified_definition if previous else {}) or {}), "min_match_score": body.min_match_score}
     for c in db.execute(select(Contract).where(Contract.institution_id == inst_id, Contract.status == "ACTIVE")).scalars():
         c.status, c.effective_to = "ENDED", date.today()
     db.add(Contract(institution_id=inst_id, plan=body.plan, subscription_fee=Decimal(str(body.subscription_fee)),
                     included_opportunities=body.included_opportunities,
                     opportunity_price=Decimal(str(body.opportunity_price)),
                     duplicate_window_days=body.duplicate_window_days, dispute_window_days=body.dispute_window_days,
-                    qualified_definition={"min_match_score": body.min_match_score}, effective_from=date.today()))
+                    qualified_definition=definition, effective_from=date.today()))
     audit(db, actor, "contract.updated", "institution", inst_id, after=body.model_dump())
     return commercial_overview(actor, db)
 

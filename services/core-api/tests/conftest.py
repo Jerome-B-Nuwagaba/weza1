@@ -78,6 +78,9 @@ def _reset_ip_rate_limits(database):
     with session_scope() as db:
         db.execute(sa.text("DELETE FROM platform.rate_counter WHERE bucket LIKE 'otp:ip:%' "
                            "OR bucket LIKE 'journey:ip:%' OR bucket LIKE 'login:%' OR bucket LIKE 'apply:%'"))
+        # Likewise every routed opportunity spends the seeded mandates' daily capacity (Lakeside: 60 a day), so
+        # late tests would find the lender full. Capacity tests fill and check it within a single test.
+        db.execute(sa.text("DELETE FROM appetite.capacity_usage WHERE \"window\" = 'DAY'"))
     yield
 
 

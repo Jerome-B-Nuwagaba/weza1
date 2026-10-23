@@ -47,6 +47,11 @@ def active_contract(db: Session, institution_id: uuid.UUID) -> Contract | None:
                       .order_by(Contract.effective_from.desc()).limit(1)).scalar_one_or_none()
 
 
+def qualified_definition(contract) -> dict:
+    """What counts as a billable qualified opportunity under this contract (defaults for anything it doesn't set)."""
+    return {**DEFAULT_DEFINITION, **((contract.qualified_definition if contract else {}) or {})}
+
+
 def on_opportunity_routed(db: Session, opp: Opportunity) -> CommercialEvent:
     """Billing eligibility per contract definition (FSD-BIL-001, BR-009). Idempotent per opportunity."""
     key = f"{opp.id}:QUALIFIED_OPPORTUNITY"
@@ -54,7 +59,7 @@ def on_opportunity_routed(db: Session, opp: Opportunity) -> CommercialEvent:
     if existing:
         return existing
     contract = active_contract(db, opp.institution_id)
-    definition = {**DEFAULT_DEFINITION, **((contract.qualified_definition if contract else {}) or {})}
+    definition = qualified_definition(contract)
     customer = db.get(Customer, opp.customer_id)
     need = db.get(FinancialNeed, opp.need_id)
     checks = {

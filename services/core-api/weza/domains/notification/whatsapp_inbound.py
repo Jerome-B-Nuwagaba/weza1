@@ -291,9 +291,9 @@ def _active_journey(db: Session, phone_index: str):
 
 
 def _outstanding_doc_types(db: Session, need_id: uuid.UUID, customer_id: uuid.UUID) -> list[str]:
+    from weza.domains.consent.models import Consent
     from weza.domains.customer.models import Document
     from weza.domains.matching.models import Match
-    from weza.domains.consent.models import Consent
     from weza.domains.opportunity.models import InfoRequest, Opportunity
     have = set(db.execute(select(Document.doc_type).where(Document.customer_id == customer_id,
                                                           Document.pipeline_state == "STORED")).scalars())

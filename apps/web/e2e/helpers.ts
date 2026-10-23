@@ -1,4 +1,4 @@
-import { expect, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 export const DEMO_PASSWORD = "WezaDemo!2026";
 const API = "/api/v1"; // same-origin: Next rewrites proxy to the core API
@@ -64,6 +64,13 @@ export async function customerSharesWith(request: APIRequestContext, institution
     return o?.state;
   }, { timeout: 30_000 }).not.toMatch(/^(QUALIFIED)?$/);
   return { reference, oppId, session, customer };
+}
+
+/** Sign the customer in the way the web app does: the session lives only in the HTTP-only `weza_cs` cookie. */
+export async function signInCustomer(page: Page, session: string) {
+  const base = new URL(String(test.info().project.use.baseURL || "http://localhost:3000"));
+  await page.context().addCookies([{ name: "weza_cs", value: session, domain: base.hostname, path: "/api/v1",
+                                     httpOnly: true, sameSite: "Lax" }]);
 }
 
 export async function staffToken(request: APIRequestContext, email: string, password = DEMO_PASSWORD) {

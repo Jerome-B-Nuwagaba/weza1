@@ -16,8 +16,8 @@ Cost protection (every SUCCESSFUL enquiry is charged; the API has no idempotency
 Credit data never blocks a request — lending decisions stay with the institution. Only an identity failure
 (NOT_FOUND / MISMATCH) stops sharing; AMBIGUOUS, PENDING and bureau outages never do (they go to human review)."""
 
-import uuid
 import secrets
+import uuid
 from datetime import timedelta
 
 from sqlalchemy import or_, select, text
@@ -46,9 +46,9 @@ from weza.integrations.gnugrid import (
 )
 from weza.platform import crypto
 from weza.platform.context import Actor
+from weza.platform.controls import rate_limit
 from weza.platform.db import SessionLocal, get_engine, utcnow
 from weza.platform.errors import NotFound, ValidationFailed
-from weza.platform.controls import rate_limit
 from weza.schemas.crb import CrbEnquiry, CrbProfile, CRBSummaryReport
 
 SOURCE, STATE = "GNGRID_CRB", "VERIFIED_THIRD_PARTY"
@@ -266,7 +266,7 @@ def run_check(db: Session, actor: Actor, institution_id: uuid.UUID, *, channel: 
     """The customer chose this lender and said "Yes" to the bureau check. Returns the outcome; never raises for a
     bureau problem (the request continues without a report). `payout_phone`: compared with the numbers on the
     bureau record of the same National ID (only the yes/no answer is kept)."""
-    match_id = _require_selection(db, actor, institution_id)
+    _require_selection(db, actor, institution_id)  # raises unless the customer chose this lender
     customer = db.get(Customer, actor.id)
     vault = identity.vault_read(db, customer.vault_token)
     if not vault.get("nin"):

@@ -61,7 +61,9 @@ def create_app(start_worker: bool | None = None) -> FastAPI:
         response.headers["X-Correlation-ID"] = cid[:64]
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        # Defaults only: an endpoint may set a stricter value (the magic-link exchange uses no-referrer so its
+        # one-time token can't leak through the Referer header).
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.headers["Cache-Control"] = "no-store"
         if s.is_production:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"

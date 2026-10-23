@@ -172,6 +172,26 @@ def test_contract_replaces_previous_and_rejects_unknown_institution(client, as_u
     assert client.put(f"{API}/contracts/{uuid.uuid4()}", json=body, headers=comm).status_code == 404
 
 
+def test_editing_a_contract_keeps_its_billing_threshold_and_other_rules(client, as_user):
+    """Changing only the price must not reset what counts as billable (the editor used to send 60 every time)."""
+    from weza.domains.commercial import service as commercial
+    comm = as_user("commercial@weza.demo")
+    row = lambda r: next(x for x in r.json()["institutions"] if x["institution"] == "Kijani Microfinance")  # noqa: E731
+    kijani = row(client.get(f"{API}/commercial", headers=comm))
+    inst_id = uuid.UUID(kijani["institution_id"])
+    with session_scope() as db:
+        c = commercial.active_contract(db, inst_id)
+        original = dict(c.qualified_definition or {})
+        c.qualified_definition = {**original, "min_match_score": 71, "min_verification": "IDENTITY"}
+    shown = row(client.get(f"{API}/commercial", headers=comm))["contract"]
+    assert shown["min_match_score"] == 71  # the editor starts from the real value
+    r = client.put(f"{API}/contracts/{inst_id}", json={**shown, "opportunity_price": 31_000}, headers=comm)
+    assert r.status_code == 200 and row(r)["contract"]["min_match_score"] == 71
+    with session_scope() as db:
+        assert commercial.active_contract(db, inst_id).qualified_definition["min_verification"] == "IDENTITY"
+        commercial.active_contract(db, inst_id).qualified_definition = original  # leave the seed as it was
+
+
 # ------------------------------------------------------------------ customer support (A-05)
 
 
