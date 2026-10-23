@@ -77,7 +77,8 @@ def handle_input(db: Session, journey_id: uuid.UUID, payload: dict, *, channel: 
                                                          "label": payload.get("label")}
     if inst.state.get("pending_q", {}).get("type") in ("nin", "name") and inst.current_node == "ASK_PROFILE":
         shown = {"type": "text", "text": "•••• (hidden)"}  # never keep identity values in conversation history
-    if inst.current_node == "VERIFY_PHONE" or (inst.current_node == "CRB_CHECK" and inst.state.get("crb_challenge_id")):
+    if inst.current_node in ("VERIFY_PHONE", "PAYOUT_NUMBER") or (inst.current_node == "CRB_CHECK"
+                                                                   and inst.state.get("crb_challenge_id")):
         shown = {"type": "text", "text": "•••• (hidden)"}
     _persist(db, inst, "IN", shown, channel, message_id)
     if inst.status in ("COMPLETED", "EXPIRED", "CANCELLED", "FAILED"):
@@ -141,7 +142,8 @@ def _send_whatsapp(db: Session, inst: GraphInstance, outputs: list[dict]) -> Non
     for o in outputs:
         text = journey.whatsapp_text(o)
         if text:
-            send_customer_message(db, phone, text.replace("{web}", web), channel="whatsapp", kind="conversation",
+            send_customer_message(db, phone, text.replace("{web}", web), channel="whatsapp",
+                                  kind="sensitive" if o.get("ephemeral") else "conversation",
                                   payload={"quick_replies": o.get("quick_replies") or []})
 
 

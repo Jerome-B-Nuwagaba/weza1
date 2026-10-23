@@ -246,8 +246,9 @@ def inbound(db: Session, phone: str, *, text: str | None, button_id: str | None 
     if cust:
         command = (text or button_title or "").strip().upper()
         outputs = handle_consent_withdrawal(db, cust.id) if command in ("WITHDRAW", "CANCEL CONSENT") else None
-        # OTP replies belong to the lender consent gate, even if an older lender has an open question.
-        if outputs is None and not (gi and gi.current_node == "CRB_CHECK"):
+        # OTP replies and document steps belong to the conversation, even if an older lender has an open question.
+        from weza.domains.need.journey import DOCUMENT_OR_CODE_NODES
+        if outputs is None and not (gi and gi.current_node in DOCUMENT_OR_CODE_NODES):
             outputs = fulfil_info(db, cust.id, text=text or button_title)
         if outputs is not None:
             if gi:

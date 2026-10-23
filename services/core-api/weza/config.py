@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     ai_model: str = "claude-opus-5-5"
     ai_timeout_seconds: float = 20.0
     ai_server_fallbacks: bool = True
+    # Reading National ID and licence photos with the AI provider (only after the malware scan). Needs a privacy
+    # sign-off before production: set AI_DOCUMENT_EXTRACTION=false and customers type their details instead.
+    ai_document_extraction: bool = True
 
     # Channels. A value that is empty, unset or the template placeholder (REPLACE_ME) means NOT CONFIGURED:
     # the app then stays in simulator/console mode and never calls Meta or an SMS provider.

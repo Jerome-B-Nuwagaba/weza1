@@ -60,6 +60,23 @@ class ProfileAnswerV1(BaseModel):
     confidence: float = 0.0
 
 
+class NationalIdV1(BaseModel):
+    is_national_id: bool = Field(False, description="True only for a Ugandan National ID card (front side)")
+    surname: str | None = None
+    given_names: str | None = None
+    nin: str | None = Field(None, description="The 14-character NIN exactly as printed")
+    date_of_birth: str | None = Field(None, description="YYYY-MM-DD")
+    confidence: float = 0.0
+
+
+class BusinessDocumentV1(BaseModel):
+    kind: str | None = Field(None, description="business_registration, trading_licence or other")
+    business_name: str | None = None
+    registration_number: str | None = Field(None, description="URSB registration or licence number as printed")
+    expiry_date: str | None = Field(None, description="YYYY-MM-DD, for a licence")
+    confidence: float = 0.0
+
+
 class ProductRuleV1(BaseModel):
     field: str
     op: str
@@ -101,11 +118,20 @@ class AnthropicProvider:
         self.model = s.ai_model
         self.fallbacks = s.ai_server_fallbacks
 
-    def parse(self, system: str, user: str, schema: type[BaseModel], max_tokens: int = 2048):
+    def parse(self, system: str, user: str, schema: type[BaseModel], max_tokens: int = 2048,
+              attachment: tuple[str, bytes] | None = None):
         a = self._anthropic
+        content: str | list = user
+        if attachment:
+            import base64
+            mime, data = attachment
+            block = "document" if mime == "application/pdf" else "image"
+            content = [{"type": block, "source": {"type": "base64", "media_type": mime,
+                                                  "data": base64.b64encode(data).decode()}},
+                       {"type": "text", "text": user}]
         try:
             kwargs = dict(model=self.model, max_tokens=max_tokens, system=system,
-                          messages=[{"role": "user", "content": user}], output_format=schema,
+                          messages=[{"role": "user", "content": content}], output_format=schema,
                           output_config={"effort": "low"})
             if self.fallbacks:
                 resp = self.client.beta.messages.parse(**kwargs, betas=["server-side-fallback-2026-07-01"],
@@ -161,7 +187,8 @@ def _budget_ok(db: Session, subject: str | None) -> bool:
 
 
 def _call(db: Session, capability: str, schema: type[BaseModel], system: str, user: str, *, subject: str | None,
-          allowed_modes: tuple[str, ...] = ("AVAILABLE", "DEGRADED"), max_tokens: int = 2048):
+          allowed_modes: tuple[str, ...] = ("AVAILABLE", "DEGRADED"), max_tokens: int = 2048,
+          attachment: tuple[str, bytes] | None = None):
     """Returns validated model output or None (caller then uses its deterministic path)."""
     mode = effective_mode(db)
     entry = AiCallLog(capability=capability, prompt_version=PROMPT_VERSION, schema_version="v1",
@@ -179,7 +206,8 @@ def _call(db: Session, capability: str, schema: type[BaseModel], system: str, us
     result = None
     for attempt in range(2):  # one repair retry, then fallback (TSD §9)
         try:
-            parsed, tin, tout = p.parse(system, user, schema, max_tokens=max_tokens)
+            parsed, tin, tout = (p.parse(system, user, schema, max_tokens=max_tokens, attachment=attachment)
+                                 if attachment else p.parse(system, user, schema, max_tokens=max_tokens))
             entry.input_tokens += tin
             entry.output_tokens += tout
             result = schema.model_validate(parsed.model_dump() if hasattr(parsed, "model_dump") else parsed)
@@ -259,6 +287,49 @@ def interpret_answer(db: Session, question: dict, text: str, subject: str | None
     if ai is None or ai.value is None:
         return None, 0.0
     return ai.value, ai.confidence
+
+
+def can_read_documents(db: Session) -> bool:
+    """Whether ID and licence photos can be read for the customer (otherwise they type the details)."""
+    return get_settings().ai_document_extraction and effective_mode(db) == "AVAILABLE"
+
+
+def read_national_id(db: Session, mime: str, data: bytes, subject: str | None = None) -> dict | None:
+    """National ID v1: name and NIN from a scanned, stored ID image. Returns None unless both read cleanly — the
+    customer then confirms the values before they are saved."""
+    if not get_settings().ai_document_extraction:
+        return None
+    system = SYSTEM_BASE.format(country="Uganda") + (
+        " Read the attached Ugandan National ID card. Copy the surname, given names and NIN (14 characters, "
+        "starting CM or CF, e.g. CM12345678ABCD) exactly as printed. If it is not a National ID, or any of these is "
+        "unreadable, set is_national_id false or return null for that value. Confidence is 0..1.")
+    ai = _call(db, "read_national_id", NationalIdV1, system, "Read this document.", subject=subject,
+               allowed_modes=("AVAILABLE",), attachment=(mime, data))
+    if ai is None or not ai.is_national_id or ai.confidence < 0.85:
+        return None
+    nin = parsing.parse_nin(ai.nin or "")
+    name = parsing.parse_name(f"{ai.given_names or ''} {ai.surname or ''}".strip())
+    if not nin or not name:
+        return None
+    return {"full_name": name, "nin": nin, "date_of_birth": (ai.date_of_birth or "")[:10] or None}
+
+
+def read_business_document(db: Session, mime: str, data: bytes, subject: str | None = None) -> dict | None:
+    """Business document v1: type, business name, registration/licence number and expiry. Proposals only."""
+    if not get_settings().ai_document_extraction:
+        return None
+    system = SYSTEM_BASE.format(country="Uganda") + (
+        " The attached document should be a business registration certificate (URSB) or a trading licence. Set kind "
+        "to business_registration, trading_licence or other, and copy the business name, the registration or "
+        "licence number and (for a licence) the expiry date exactly as printed. Confidence is 0..1.")
+    ai = _call(db, "read_business_document", BusinessDocumentV1, system, "Read this document.", subject=subject,
+               allowed_modes=("AVAILABLE",), attachment=(mime, data))
+    if ai is None or ai.confidence < 0.7:
+        return None
+    return {"kind": ai.kind if ai.kind in ("business_registration", "trading_licence") else "other",
+            "business_name": (ai.business_name or "").strip()[:120] or None,
+            "registration_number": (ai.registration_number or "").strip()[:40] or None,
+            "expiry_date": (ai.expiry_date or "")[:10] or None}
 
 
 def extract_product_rules(db: Session, document_text: str, subject: str | None = None) -> dict:
