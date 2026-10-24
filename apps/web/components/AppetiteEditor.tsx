@@ -2,130 +2,44 @@
 
 import { useEffect, useState } from "react";
 import { api, ApiError } from "@/lib/api";
-import { FIELD_META, Rule, RuleBuilder } from "./RuleBuilder";
+import { RuleBuilder, Rule } from "./RuleBuilder";
 import { Banner, Button, Card, Field, Input, Select } from "./ui";
 
-export type AppetiteTarget = {
-  customer_type: string;
-  sector: string;
-  region: string;
-  min_amount: string;
-  max_amount: string;
-  business_age_months: string;
-};
+export type AppetiteDraft = { name: string; product_ids: string[]; criteria: Rule[]; min_match_score: number; target_count?: number | null; target_value?: number | null; capacity_limits: Record<string, any>; campaign_from?: string | null; campaign_to?: string | null; customer_types?: string[]; sectors?: string[]; regions?: string[]; min_amount?: number | null; max_amount?: number | null; min_business_age_months?: number | null };
 
-export type AppetiteDraft = {
-  name: string;
-  product_ids: string[];
-  criteria: Rule[];
-  min_match_score: number;
-  target_count?: number | null;
-  target_value?: number | null;
-  capacity_limits: Record<string, any>;
-  campaign_from?: string | null;
-  campaign_to?: string | null;
-  routing_team_id?: string | null;
-};
+export const EMPTY_APPETITE: AppetiteDraft = { name: "", product_ids: [], criteria: [], min_match_score: 60, capacity_limits: { daily_count: 20 }, target_count: null, target_value: null, campaign_from: null, campaign_to: null, customer_types: [], sectors: [], regions: [], min_amount: null, max_amount: null, min_business_age_months: null };
 
-type EditorState = AppetiteDraft & { target: AppetiteTarget; targetMeta: Record<string, RuleMeta> };
+const CUSTOMER_TYPES: [string, string][] = [["SME", "Business (SME)"], ["SALARIED", "Salaried"], ["AGRICULTURE", "Agriculture"]];
 
-type RuleMeta = { must?: boolean; weight?: number; label?: string };
-
-export const EMPTY_TARGET: AppetiteTarget = {
-  customer_type: "", sector: "", region: "", min_amount: "", max_amount: "", business_age_months: "",
-};
-
-export const EMPTY_APPETITE: AppetiteDraft = {
-  name: "", product_ids: [], criteria: [], min_match_score: 60, capacity_limits: { daily_count: 20 },
-  target_count: null, target_value: null, campaign_from: null, campaign_to: null, routing_team_id: null,
-};
-
-const one = (v: any) => (Array.isArray(v) && v.length === 1 ? String(v[0]) : "");
-const pair = (v: any) => (Array.isArray(v) && v.length === 2 ? [String(v[0]), String(v[1])] : null);
-
-/** The simple "who do you want" fields are stored as ordinary criteria, so the matching engine treats them
- * exactly like any other criterion. Anything the simple form cannot express stays in the advanced builder. */
-function splitCriteria(criteria: Rule[]): { target: AppetiteTarget; rest: Rule[]; meta: Record<string, RuleMeta> } {
-  const target: AppetiteTarget = { ...EMPTY_TARGET };
-  const rest: Rule[] = [];
-  const meta: Record<string, RuleMeta> = {};
-  for (const c of criteria || []) {
-    const keep = { must: c.must, weight: c.weight, label: c.label };
-    if (c.field === "customer_type" && c.op === "in" && one(c.value)) {
-      target.customer_type = one(c.value);
-      meta.customer_type = keep;
-      continue;
-    }
-    if (c.field === "sector" && c.op === "in" && one(c.value)) {
-      target.sector = one(c.value);
-      meta.sector = keep;
-      continue;
-    }
-    if (c.field === "region" && c.op === "in" && one(c.value)) {
-      target.region = one(c.value);
-      meta.region = keep;
-      continue;
-    }
-    if (c.field === "amount" && c.op === "between" && pair(c.value)) {
-      const p = pair(c.value)!;
-      target.min_amount = p[0];
-      target.max_amount = p[1];
-      meta.amount = keep;
-      continue;
-    }
-    if (c.field === "business_age_months" && c.op === "gte" && c.value !== "" && c.value != null) {
-      target.business_age_months = String(c.value);
-      meta.business_age_months = keep;
-      continue;
-    }
-    rest.push(c);
-  }
-  return { target, rest, meta };
-}
-
-function targetCriteria(t: AppetiteTarget, meta: Record<string, RuleMeta>): Rule[] {
-  const out: Rule[] = [];
-  const add = (field: string, op: string, value: any) =>
-    out.push({ field, op, value, weight: meta[field]?.weight ?? 1, must: meta[field]?.must ?? true, label: meta[field]?.label });
-  if (t.customer_type) add("customer_type", "in", [t.customer_type]);
-  if (t.sector) add("sector", "in", [t.sector]);
-  if (t.region) add("region", "in", [t.region]);
-  if (t.min_amount !== "" && t.max_amount !== "") add("amount", "between", [Number(t.min_amount), Number(t.max_amount)]);
-  if (t.business_age_months !== "") add("business_age_months", "gte", Number(t.business_age_months));
-  return out;
+function Chips({ options, value, onChange }: { options: [string, string][]; value: string[]; onChange: (v: string[]) => void }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {options.map(([k, label]) => (
+        <button key={k} type="button" onClick={() => onChange(value.includes(k) ? value.filter((x) => x !== k) : [...value, k])} className={`rounded-full border px-3 py-1 text-[13px] ${value.includes(k) ? "border-blue-600 bg-blue-600 text-white" : "border-line text-muted"}`}>{label}</button>
+      ))}
+    </div>
+  );
 }
 
 export function AppetiteEditor({ initial, onSave, saving, error }: { initial: AppetiteDraft; onSave: (d: AppetiteDraft) => void; saving: boolean; error?: ApiError | null }) {
-  const [d, setD] = useState<EditorState>(() => {
-    const { target, rest, meta } = splitCriteria(initial.criteria);
-    return { ...initial, criteria: rest, target, targetMeta: meta, routing_team_id: (initial.capacity_limits || {}).routing_team_id || null };
-  });
+  const [d, setD] = useState(initial);
   const [products, setProducts] = useState<any[]>([]);
-  const [teams, setTeams] = useState<any[]>([]);
   const [cfg, setCfg] = useState<any>(null);
+  const [teams, setTeams] = useState<any[]>([]);
   useEffect(() => {
     api("/inst/products").then((r) => setProducts(r.products)).catch(() => undefined);
-    api("/inst/routing").then((r) => setTeams(r.teams || [])).catch(() => undefined);
     api("/public/config").then(setCfg).catch(() => undefined);
+    api("/inst/routing").then((r) => setTeams(r.teams || [])).catch(() => undefined);
   }, []);
   const lim = d.capacity_limits || {};
   const setLim = (k: string, v: string) => setD({ ...d, capacity_limits: { ...lim, [k]: Number(v || 0) } });
-  const setT = (patch: Partial<AppetiteTarget>) => setD({ ...d, target: { ...d.target, ...patch } });
-  const sectors: [string, string][] = cfg ? (Object.entries(cfg.sectors) as [string, string][]) : [];
-  const regions: [string, string][] = FIELD_META.region.options || [];
-
-  function save() {
-    const criteria = [...d.criteria, ...targetCriteria(d.target, d.targetMeta)];
-    const capacity_limits: Record<string, any> = { ...lim };
-    if (d.routing_team_id) capacity_limits.routing_team_id = d.routing_team_id;
-    else delete capacity_limits.routing_team_id;
-    onSave({
-      name: d.name, product_ids: d.product_ids, criteria, min_match_score: d.min_match_score,
-      target_count: d.target_count, target_value: d.target_value, capacity_limits,
-      campaign_from: d.campaign_from, campaign_to: d.campaign_to, routing_team_id: d.routing_team_id,
-    });
-  }
-
+  const setRoutingTeam = (id: string) => {
+    const { routing_team_id: _drop, ...rest } = lim;
+    setD({ ...d, capacity_limits: id ? { ...rest, routing_team_id: id } : rest });
+  };
+  const customer_types = d.customer_types || [];
+  const sectors = d.sectors || [];
+  const regions = d.regions || [];
   return (
     <div className="space-y-4">
       <Card title="Mandate">
@@ -143,37 +57,27 @@ export function AppetiteEditor({ initial, onSave, saving, error }: { initial: Ap
           </div>
         </div>
       </Card>
-
-      <Card title="Who to serve" subtitle="Who this mandate is for. Each filled field must match — a customer outside it is not offered.">
-        <div className="grid gap-4 md:grid-cols-2">
-          <Field label="Customer type">
-            <Select value={d.target.customer_type} onChange={(e) => setT({ customer_type: e.target.value })} options={[["", "Any"], ...(FIELD_META.customer_type.options || [])]} />
-          </Field>
-          <Field label="Sector">
-            <Select value={d.target.sector} onChange={(e) => setT({ sector: e.target.value })} options={[["", "Any"], ...sectors]} />
-          </Field>
-          <Field label="Geography">
-            <Select value={d.target.region} onChange={(e) => setT({ region: e.target.value })} options={[["", "Anywhere"], ...regions]} />
-          </Field>
-          <Field label="Minimum business age (months)" hint="How long the business must have been trading.">
-            <Input inputMode="numeric" value={d.target.business_age_months} onChange={(e) => setT({ business_age_months: e.target.value })} placeholder="e.g. 12" />
-          </Field>
-          <Field label="Minimum amount (UGX)">
-            <Input inputMode="numeric" value={d.target.min_amount} onChange={(e) => setT({ min_amount: e.target.value })} />
-          </Field>
-          <Field label="Maximum amount (UGX)">
-            <Input inputMode="numeric" value={d.target.max_amount} onChange={(e) => setT({ max_amount: e.target.value })} />
-          </Field>
-          <Field label="Routing destination" hint="The desk that receives opportunities matched by this mandate.">
-            <Select value={d.routing_team_id || ""} onChange={(e) => setD({ ...d, routing_team_id: e.target.value || null })} options={[["", "Unassigned queue"], ...teams.map((t: any) => [t.id, t.name] as [string, string])]} />
-          </Field>
-        </div>
-      </Card>
-
-      <Card title="Additional criteria" subtitle="Anything else that shapes appetite fit. 'Must' criteria exclude; others are weighted.">
+      <Card title="Who do you want WEZA to find?" subtitle="'Must' criteria exclude. Others shape appetite fit (weighted).">
         <RuleBuilder rules={d.criteria} onChange={(criteria) => setD({ ...d, criteria })} cfg={cfg} appetite />
       </Card>
-
+      <Card title="Mandate limits" subtitle="Hard constraints. A customer outside them is not offered to you at all. Leave a limit empty to stay open on that dimension.">
+        <div className="space-y-4">
+          <Field label="Customer types">
+            <Chips options={CUSTOMER_TYPES} value={customer_types} onChange={(v) => setD({ ...d, customer_types: v })} />
+          </Field>
+          <Field label="Sectors">
+            <Chips options={cfg ? (Object.entries(cfg.sectors) as [string, string][]) : []} value={sectors} onChange={(v) => setD({ ...d, sectors: v })} />
+          </Field>
+          <Field label="Regions">
+            <Chips options={cfg ? (Object.keys(cfg.regions).map((r) => [r, r] as [string, string])) : []} value={regions} onChange={(v) => setD({ ...d, regions: v })} />
+          </Field>
+          <div className="grid gap-4 md:grid-cols-3">
+            <Field label="Minimum amount (UGX)"><Input inputMode="numeric" value={d.min_amount ?? ""} onChange={(e) => setD({ ...d, min_amount: e.target.value ? Number(e.target.value) : null })} /></Field>
+            <Field label="Maximum amount (UGX)"><Input inputMode="numeric" value={d.max_amount ?? ""} onChange={(e) => setD({ ...d, max_amount: e.target.value ? Number(e.target.value) : null })} /></Field>
+            <Field label="Minimum business age (months)"><Input inputMode="numeric" value={d.min_business_age_months ?? ""} onChange={(e) => setD({ ...d, min_business_age_months: e.target.value ? Number(e.target.value) : null })} /></Field>
+          </div>
+        </div>
+      </Card>
       <Card title="Targets & capacity" subtitle="Capacity protects your teams: WEZA marks the mandate LIMITED at 80% and FULL at 100%.">
         <div className="grid gap-4 md:grid-cols-4">
           <Field label="Target opportunities"><Input inputMode="numeric" value={d.target_count ?? ""} onChange={(e) => setD({ ...d, target_count: e.target.value ? Number(e.target.value) : null })} /></Field>
@@ -184,10 +88,13 @@ export function AppetiteEditor({ initial, onSave, saving, error }: { initial: Ap
           <Field label="Max per week"><Input inputMode="numeric" value={lim.weekly_count ?? ""} onChange={(e) => setLim("weekly_count", e.target.value)} /></Field>
           <Field label="Max per month"><Input inputMode="numeric" value={lim.monthly_count ?? ""} onChange={(e) => setLim("monthly_count", e.target.value)} /></Field>
           <Field label="Max value per month (UGX)"><Input inputMode="numeric" value={lim.monthly_value ?? ""} onChange={(e) => setLim("monthly_value", e.target.value)} /></Field>
+          <Field label="Routing destination" hint="The desk that receives opportunities matched by this mandate.">
+            <Select value={lim.routing_team_id || ""} onChange={(e) => setRoutingTeam(e.target.value)} options={[["", "Unassigned queue"], ...teams.map((t: any) => [t.id, t.name] as [string, string])]} />
+          </Field>
         </div>
       </Card>
       {error && <Banner tone="danger">{error.message}</Banner>}
-      <div className="flex justify-end"><Button pending={saving} disabled={!d.name || d.product_ids.length === 0} onClick={save}>Save draft</Button></div>
+      <div className="flex justify-end"><Button pending={saving} disabled={!d.name || d.product_ids.length === 0} onClick={() => onSave(d)}>Save draft</Button></div>
     </div>
   );
 }

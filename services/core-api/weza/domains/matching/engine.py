@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from weza.domains.admin_config import get_config
+from weza.domains.appetite.mandate import mandate_rules
 from weza.domains.appetite.models import Appetite, AppetiteVersion, CapacityUsage
 from weza.domains.customer.models import Customer, Fact, Preference
 from weza.domains.customer.service import current_facts, documents_on_file, rule_fields, snapshot_profile
@@ -167,7 +168,10 @@ def evaluate_supply(s: Supply, fields: dict, prefs: list[str], weights: dict) ->
                  "label": f"Amount within {fmt_money(t.get('min_amount', 0))}–{fmt_money(t.get('max_amount', 0))}",
                  "public": True}]
     product_results = [evaluate(r, fields) | {"public": r.get("public", True)} for r in implicit + (s.pv.rules or [])]
-    appetite_results = [evaluate(r, fields) | {"public": False} for r in (s.av.criteria if s.av else [])]
+    # The mandate dimensions are hard constraints: a customer outside them is not this institution's
+    # business, whatever the appetite's softer criteria say.
+    appetite_results = [evaluate(r, fields) | {"public": False}
+                        for r in (s.av.criteria if s.av else []) + mandate_rules(s.av)]
 
     hard_fail = [r for r in product_results if r["status"] == "FAIL"] + \
                 [r for r in appetite_results if r["status"] == "FAIL" and r["must"]]
@@ -223,7 +227,8 @@ def evaluate_supply(s: Supply, fields: dict, prefs: list[str], weights: dict) ->
             "components": components, "eligibility": product_results + appetite_results,
             "explanation": explanation, "missing_docs": missing_docs, "unknown": unknown,
             "hard_fail_count": len(hard_fail), "near_count": len(near_miss),
-            "ruleset_hash": ruleset_hash(s.pv.rules, s.pv.terms, s.av.criteria if s.av else None)}
+            "ruleset_hash": ruleset_hash(s.pv.rules, s.pv.terms, s.av.criteria if s.av else None,
+                                         mandate_rules(s.av) if s.av else None)}
 
 
 def _shadow_score(result: dict) -> float:
@@ -446,12 +451,15 @@ def suppress(counter: Counter, k: int = K_ANON) -> dict:
 
 
 def simulate(db: Session, institution_id: uuid.UUID, *, product_versions: list[ProductVersion], criteria: list,
-             min_match_score: int, capacity_state: str = "ACTIVE", days: int = 90) -> dict:
+             min_match_score: int, capacity_state: str = "ACTIVE", days: int = 90,
+             mandate: dict | None = None) -> dict:
     """Run proposed appetite against anonymised demand (FSD-APP-002, TSD §37). Never returns identity."""
     weights, _ = get_config(db, "match_weights")
     inst = db.get(Institution, institution_id)
     fake_ap = Appetite(institution_id=institution_id, name="simulation", capacity_state=capacity_state)
     fake_av = AppetiteVersion(criteria=criteria, min_match_score=min_match_score, capacity_limits={})
+    for k, v in (mandate or {}).items():
+        setattr(fake_av, k, v)
     rows = demand_rows(db, days)
     inside, near, outside = [], [], []
     near_reasons: Counter = Counter()

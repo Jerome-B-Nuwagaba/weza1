@@ -21,8 +21,15 @@ from weza.domains.customer.models import Document
 from weza.domains.identity import service as identity
 from weza.domains.identity.models import Membership, User
 from weza.domains.institution import service as inst_svc
-from weza.domains.institution.models import Institution, NotificationPref, RoutingRule, ServiceTarget, Team
-from weza.domains.intelligence import ai, assistant, insights
+from weza.domains.institution.models import (
+    Contact,
+    Institution,
+    NotificationPref,
+    RoutingRule,
+    ServiceTarget,
+    Team,
+)
+from weza.domains.intelligence import agents, assistant, insights
 from weza.domains.matching import engine
 from weza.domains.misc_models import Notification
 from weza.domains.opportunity import service as opp_svc
@@ -60,16 +67,28 @@ def _inst(db: Session, actor: Actor) -> Institution:
 @router.get("/workspace")
 def workspace(actor: Actor = A, db: Session = DB):
     inst = _inst(db, actor)
-    return {"institution": {"id": str(inst.id), "legal_name": inst.legal_name, "display_name": inst.display_name,
-                            "type": inst.institution_type, "status": inst.status, "licence_no": inst.licence_no,
-                            "regulator": inst.regulator, "profile": inst.profile, "terms_version": inst.terms_version,
-                            "verified_at": inst.verified_at.isoformat() if inst.verified_at else None,
-                            "status_reason": inst.status_reason},
+    return {"institution": {**inst_svc.summary(inst), "profile": inst.profile,
+                            "status_reason": inst.status_reason,
+                            "primary_contact": inst_svc.primary_contact(db, inst)},
             "onboarding": inst_svc.checklist(db, inst),
             "permissions": policy.permissions_for(actor.roles),
             "teams": [{"id": str(t.id), "name": t.name} for t in db.execute(select(Team).where(
                 Team.institution_id == inst.id)).scalars()],
             "features": {"preview": flag(db, "marketplace.preview", False)}}
+
+
+@router.get("/contacts")
+def contacts(actor: Actor = A, db: Session = DB):
+    inst = _inst(db, actor)
+    rows = db.execute(select(Contact).where(Contact.institution_id == inst.id).order_by(Contact.kind, Contact.name)).scalars()
+    return {"contacts": [inst_svc.contact_summary(c) for c in rows],
+            "primary_contact": inst_svc.primary_contact(db, inst)}
+
+
+@router.put("/contacts/{contact_id}/primary")
+def set_primary_contact(contact_id: uuid.UUID, actor: Actor = A, db: Session = DB):
+    inst = _inst(db, actor)
+    return inst_svc.set_primary_contact(db, actor, inst, contact_id)
 
 
 @router.post("/activate")
@@ -388,7 +407,7 @@ async def extract_product(file: UploadFile = File(...), actor: Actor = A, db: Se
             raise ValidationFailed("Upload a PDF or a plain-text document.") from exc
     if len(text.strip()) < 40:
         raise ValidationFailed("The document has too little readable text.")
-    proposal = ai.extract_product_rules(db, text, subject=f"extract:{actor.institution_id}")
+    proposal = agents.product_rules(db, text, subject=f"extract:{actor.institution_id}")
     audit(db, actor, "product.ai_extraction", "institution", actor.institution_id,
           after={"source": proposal.get("source"), "rules": len(proposal.get("rules") or [])})
     return {"proposal": proposal, "filename": file.filename,
@@ -407,7 +426,8 @@ def _av_dict(av: AppetiteVersion) -> dict:
             "campaign_to": av.campaign_to.isoformat() if av.campaign_to else None,
             "simulation_run_id": str(av.simulation_run_id) if av.simulation_run_id else None,
             "author_id": str(av.author_id) if av.author_id else None, "review_note": av.review_note,
-            "approved_at": av.approved_at.isoformat() if av.approved_at else None}
+            "approved_at": av.approved_at.isoformat() if av.approved_at else None,
+            "mandate": av.mandate}
 
 
 @router.get("/appetites")
@@ -421,6 +441,7 @@ def appetites(actor: Actor = A, db: Session = DB):
         cur = db.get(AppetiteVersion, ap.active_version_id) if ap.active_version_id else None
         version = cur or latest
         crit = version.criteria or []
+        mand = version.mandate or {}
 
         def pick(field, criteria=crit):
             for c in criteria:
@@ -439,9 +460,14 @@ def appetites(actor: Actor = A, db: Session = DB):
                     "latest_status": latest.status, "target_count": (cur or latest).target_count,
                     "target_value": float((cur or latest).target_value) if (cur or latest).target_value else None,
                     "min_match_score": (cur or latest).min_match_score, "criteria": len((cur or latest).criteria),
-                    "products": products, "customer_type": pick("customer_type"), "sector": pick("sector"),
-                    "region": pick("region"), "amount_range": pick("amount"),
-                    "business_age_months": pick("business_age_months"),
+                    "mandate": (cur or latest).mandate, "products": products,
+                    "customer_type": mand.get("customer_types") or pick("customer_type"),
+                    "sector": mand.get("sectors") or pick("sector"),
+                    "region": mand.get("regions") or pick("region"),
+                    "amount_range": ([mand["min_amount"], mand["max_amount"]]
+                                     if mand.get("min_amount") is not None and mand.get("max_amount") is not None
+                                     else pick("amount")),
+                    "business_age_months": mand.get("min_business_age_months") or pick("business_age_months"),
                     "routing_team_id": (version.capacity_limits or {}).get("routing_team_id")})
     return {"appetites": out}
 
@@ -474,6 +500,14 @@ class AppetiteIn(BaseModel):
     capacity_limits: dict = {}
     campaign_from: str | None = None
     campaign_to: str | None = None
+    # The mandate dimensions (Goal 1 §4). Each is optional; an empty list or null means the
+    # institution is not restricted on that dimension.
+    customer_types: list[str] = []
+    sectors: list[str] = []
+    regions: list[str] = []
+    min_amount: float | None = None
+    max_amount: float | None = None
+    min_business_age_months: int | None = None
 
 
 @router.post("/appetites", status_code=201)
@@ -699,8 +733,8 @@ def opportunity(opp_id: uuid.UUID, actor: Actor = A, db: Session = DB):
     from weza.domains.customer.service import EDITABLE, FIELD_LABELS
     consented = set(out["consent"]["categories"] or [])
     out["fact_fields"] = {k: FIELD_LABELS[k] for k in sorted(EDITABLE) if policy.fact_category(k) in consented}
-    out["members"] = [m for m in opp_svc.team_members(db, actor.institution_id) if "OFFICER" in m["roles"]
-                      or "MANAGER" in m["roles"]]
+    out["members"] = [m for m in opp_svc.team_members(db, actor.institution_id)
+                      if {"OFFICER", "MANAGER"} & set(m["role_set"])]
     return out
 
 

@@ -58,6 +58,31 @@ class AppetiteVersion(IdMixin, TimestampMixin, Base):
     effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     synthetic: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # The mandate as the product specification names it, first class (Goal 1 §4). Each dimension is
+    # optional: an empty list or NULL means "not restricted on this dimension", and matching then
+    # relies on `criteria` alone. When set, the dimension is enforced as a hard constraint, so a
+    # mandate and its criteria can never disagree about who the institution will lend to.
+    customer_types: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
+    sectors: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
+    regions: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)  # geography
+    min_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    max_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    min_business_age_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    @property
+    def mandate(self) -> dict:
+        """The six mandate dimensions, as one structure for API clients."""
+        return {
+            "product_ids": [str(p) for p in self.product_ids or []],
+            "customer_types": list(self.customer_types or []),
+            "sectors": list(self.sectors or []),
+            "regions": list(self.regions or []),
+            "min_amount": float(self.min_amount) if self.min_amount is not None else None,
+            "max_amount": float(self.max_amount) if self.max_amount is not None else None,
+            "min_business_age_months": self.min_business_age_months,
+            "activation_state": self.status,
+        }
+
 
 class CapacityUsage(Base):
     __tablename__ = "capacity_usage"

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from weza.config import get_settings
 from weza.domains.appetite.models import Appetite, AppetiteVersion
-from weza.domains.intelligence import ai, insights, parsing
+from weza.domains.intelligence import agents, ai, insights, parsing
 from weza.domains.matching import engine
 from weza.domains.matching.rules import fmt_money
 from weza.domains.misc_models import AiCallLog, LoopMetric
@@ -131,10 +131,16 @@ TOOLS = {
 }
 
 
-def run_tool(db: Session, actor: Actor, name: str, args: dict) -> dict:
+def run_tool(db: Session, actor: Actor, name: str, args: dict, *, step_no: int = 1) -> dict:
+    if name not in TOOLS:
+        raise agents.AgentPolicyError("Unknown institution assistant tool")
     fn = TOOLS[name][0]
     allowed = set(TOOLS[name][2])
-    return fn(db, actor, **{k: v for k, v in (args or {}).items() if k in allowed})
+    safe_args = {k: v for k, v in (args or {}).items() if k in allowed}
+    return agents.institution_tool(
+        db, name, safe_args, lambda: fn(db, actor, **safe_args),
+        subject=str(actor.id), step_no=step_no,
+    )
 
 
 # ------------------------------------------------------------------ deterministic router
@@ -217,9 +223,9 @@ def ask(db: Session, actor: Actor, question: str) -> dict:
             db.add(LoopMetric(loop="institution_assistant", event="FALLBACK", subject=str(actor.id)))
     calls = []
     answer_parts = []
-    for name, args in _route(question)[:MAX_TOOL_CALLS]:
+    for step_no, (name, args) in enumerate(_route(question)[:MAX_TOOL_CALLS], start=1):
         try:
-            r = run_tool(db, actor, name, args)
+            r = run_tool(db, actor, name, args, step_no=step_no)
         except Exception as exc:  # noqa: BLE001 — permission or data errors become a safe message
             r = {"error": getattr(exc, "message", "That information isn't available to your role.")}
         calls.append({"tool": name, "args": args, "result": r})
@@ -268,7 +274,7 @@ def _ask_claude(db: Session, actor: Actor, question: str) -> dict:
                 results.append({"type": "tool_result", "tool_use_id": b.id, "content": "Unknown tool", "is_error": True})
                 continue
             try:
-                r = run_tool(db, actor, b.name, b.input if isinstance(b.input, dict) else {})
+                r = run_tool(db, actor, b.name, b.input if isinstance(b.input, dict) else {}, step_no=len(calls) + 1)
                 calls.append({"tool": b.name, "args": b.input, "result": r})
                 results.append({"type": "tool_result", "tool_use_id": b.id, "content": json.dumps(r, default=str)[:20000]})
             except Exception as exc:  # noqa: BLE001

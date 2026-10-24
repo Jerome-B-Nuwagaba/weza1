@@ -3,13 +3,23 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from weza.platform.db import Base, IdMixin, TimestampMixin
 
 S = {"schema": "institution"}
+
+#: The institution lifecycle the product specification names, projected onto the internal state machine.
+#: The internal statuses stay authoritative (they drive the transition rules in institution/service.py);
+#: this is the four-state view every client reads.
+CANONICAL_STATUS = {
+    "DRAFT": "draft", "SUBMITTED": "pending_review", "UNDER_VERIFICATION": "pending_review",
+    "APPROVED": "pending_review", "CONFIGURING": "pending_review", "READY": "pending_review",
+    "REJECTED": "draft", "CLOSED": "draft",
+    "ACTIVE": "active", "PAUSED": "paused", "SUSPENDED": "paused",
+}
 
 
 class Institution(IdMixin, TimestampMixin, Base):
@@ -32,10 +42,24 @@ class Institution(IdMixin, TimestampMixin, Base):
     profile: Mapped[dict] = mapped_column(JSONB, default=dict)  # description, website, regions served, colour
     onboarding: Mapped[dict] = mapped_column(JSONB, default=dict)  # checklist cache
 
+    @property
+    def canonical_status(self) -> str:
+        """draft | pending_review | active | paused — the four states the product specification names."""
+        return CANONICAL_STATUS.get(self.status, "draft")
+
+    @property
+    def is_primary_contact_known(self) -> bool:
+        return bool(self.profile.get("primary_contact"))
+
 
 class Contact(IdMixin, Base):
     __tablename__ = "contact"
-    __table_args__ = (S,)
+    __table_args__ = (
+        # At most one primary contact per institution, enforced by the database.
+        Index("uq_contact_primary_per_institution", "institution_id", unique=True,
+              postgresql_where=text("is_primary")),
+        S,
+    )
 
     institution_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     kind: Mapped[str] = mapped_column(String(20))  # REPRESENTATIVE | BUSINESS | COMPLIANCE
@@ -43,6 +67,7 @@ class Contact(IdMixin, Base):
     email: Mapped[str] = mapped_column(String(200))
     phone: Mapped[str] = mapped_column(String(40), default="")
     title: Mapped[str] = mapped_column(String(120), default="")
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False)  # the contact WEZA reaches first
 
 
 class Team(IdMixin, TimestampMixin, Base):

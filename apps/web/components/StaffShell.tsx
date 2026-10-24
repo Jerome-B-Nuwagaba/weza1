@@ -59,6 +59,7 @@ const ADMIN_NAV: [string, Item[]][] = [
     { href: "/admin", label: "Control Centre", icon: Gauge },
     { href: "/admin/market", label: "Market State", icon: Network },
     { href: "/admin/institutions", label: "Institutions", icon: Building2 },
+    { href: "/staff/institutions", label: "Institution onboarding", icon: ClipboardCheck, perm: "admin.institution_onboard" },
     { href: "/admin/opportunities", label: "Opportunities", icon: Inbox },
     { href: "/admin/customers", label: "Customer support", icon: LifeBuoy, perm: "admin.vault_lookup" },
   ]],
@@ -77,8 +78,18 @@ const ADMIN_NAV: [string, Item[]][] = [
     { href: "/admin/whatsapp", label: "WhatsApp connection", icon: MessageSquareText, perm: "admin.config" },
   ]],
 ];
+// The Weza Staff area (Goal 2): bringing an institution into the marketplace. It is its own area rather than a
+// corner of the admin portal, because onboarding an institution is a different job from running the network.
+const STAFF_NAV: [string, Item[]][] = [
+  ["Onboarding", [
+    { href: "/staff/institutions", label: "Institutions", icon: Building2, perm: "admin.institution_onboard" },
+  ]],
+  ["Network", [
+    { href: "/admin", label: "Control Centre", icon: Gauge },
+  ]],
+];
 
-export function StaffShell({ area, children }: { area: "institution" | "admin"; children: React.ReactNode }) {
+export function StaffShell({ area, children }: { area: "institution" | "admin" | "staff"; children: React.ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [open, setOpen] = useState(false);
   const [bell, setBell] = useState(false);
@@ -90,7 +101,7 @@ export function StaffShell({ area, children }: { area: "institution" | "admin"; 
     setConnectionError(false);
     return api<Me>("/auth/me")
       .then((m) => {
-        if (area === "admin" && m.kind !== "WEZA") window.location.href = "/institution";
+        if (area !== "institution" && m.kind !== "WEZA") window.location.href = "/institution";
         else if (area === "institution" && m.kind === "WEZA") window.location.href = "/admin";
         else setMe(m);
       })
@@ -131,7 +142,8 @@ export function StaffShell({ area, children }: { area: "institution" | "admin"; 
   );
   if (!me) return <div className="mx-auto max-w-5xl p-8"><Loading /></div>;
   const can = (p?: string) => !p || me.permissions.includes(p);
-  const nav = area === "admin" ? ADMIN_NAV : INST_NAV;
+  const nav = area === "admin" ? ADMIN_NAV : area === "staff" ? STAFF_NAV : INST_NAV;
+  const home = area === "admin" ? "/admin" : area === "staff" ? "/staff/institutions" : "/institution";
   const active = (href: string) => (href === "/institution" || href === "/admin" ? pathname === href : pathname.startsWith(href));
 
   const sidebar = (
@@ -158,7 +170,7 @@ export function StaffShell({ area, children }: { area: "institution" | "admin"; 
     <MeCtx.Provider value={{ me, can: (p) => can(p), refresh: load }}>
       <div className="flex min-h-screen">
         <aside className="sticky top-0 hidden h-screen w-60 shrink-0 border-r border-line bg-surface lg:block">
-          <div className="flex h-14 items-center border-b border-line px-5"><Logo href={area === "admin" ? "/admin" : "/institution"} small /></div>
+          <div className="flex h-14 items-center border-b border-line px-5"><Logo href={home} small /></div>
           {sidebar}
         </aside>
         {open && (
@@ -176,7 +188,7 @@ export function StaffShell({ area, children }: { area: "institution" | "admin"; 
               {me.institution ? (
                 <span className="font-medium text-ink">{me.institution.name} {me.institution.status !== "ACTIVE" && <Badge tone="warning" className="ml-1">{me.institution.status.toLowerCase().replace(/_/g, " ")}</Badge>}</span>
               ) : (
-                <span className="font-medium text-ink">WEZA Network Operations</span>
+                <span className="font-medium text-ink">{area === "staff" ? "WEZA Staff" : "WEZA Network Operations"}</span>
               )}
             </div>
             <button className="relative rounded-lg p-2 hover:bg-blue-50" onClick={() => setBell(!bell)} aria-label="Notifications">
@@ -200,7 +212,7 @@ export function StaffShell({ area, children }: { area: "institution" | "admin"; 
 function NotificationPanel({ area, onClose }: { area: string; onClose: () => void }) {
   const [items, setItems] = useState<any[] | null>(null);
   useEffect(() => {
-    api(area === "admin" ? "/admin/notifications" : "/inst/notifications").then((r) => setItems(r.notifications)).catch(() => setItems([]));
+    api(area === "institution" ? "/inst/notifications" : "/admin/notifications").then((r) => setItems(r.notifications)).catch(() => setItems([]));
   }, [area]);
   async function readAll() {
     if (area === "institution") await api("/inst/notifications/read-all", { method: "POST" }).catch(() => undefined);

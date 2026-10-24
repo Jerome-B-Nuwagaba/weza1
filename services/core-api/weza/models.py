@@ -12,6 +12,7 @@ from weza.domains.need import models as _need  # noqa: F401
 from weza.domains.opportunity import models as _opportunity  # noqa: F401
 from weza.domains.product import models as _product  # noqa: F401
 from weza.domains.trust import models as _trust  # noqa: F401
+from weza.domains.verification import models as _verification  # noqa: F401
 from weza.platform import models as _platform  # noqa: F401
 from weza.platform.db import Base
 

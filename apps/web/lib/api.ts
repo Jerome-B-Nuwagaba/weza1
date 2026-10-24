@@ -72,7 +72,7 @@ async function refreshStaff(): Promise<boolean> {
 }
 
 export async function api<T = any>(path: string, opts: Opts = {}): Promise<T> {
-  const auth = opts.auth ?? (path.startsWith("/inst") || path.startsWith("/admin") || path.startsWith("/auth/me") ? "staff" : path.startsWith("/me") ? "customer" : "none");
+  const auth = opts.auth ?? (path.startsWith("/inst") || path.startsWith("/admin") || path.startsWith("/staff") || path.startsWith("/auth/me") ? "staff" : path.startsWith("/me") ? "customer" : "none");
   const run = async (): Promise<Response> => {
     const headers: Record<string, string> = { ...(opts.headers || {}) };
     if (!opts.form) headers["Content-Type"] = "application/json";
