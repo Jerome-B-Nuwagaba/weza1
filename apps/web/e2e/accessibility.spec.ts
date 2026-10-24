@@ -14,7 +14,7 @@ async function scan(page: Page, label: string) {
   const serious = violations.filter((v) => v.impact === "serious");
   if (serious.length) console.log(`[a11y] ${label} serious:\n  ${serious.map(summary).join("\n  ")}`);
   const blocking = violations.filter((v) => BLOCKING.includes(v.impact || ""));
-  expect(blocking.map(summary), `${label} has blocking accessibility violations`).toEqual([]);
+  expect.soft(blocking.map(summary), `${label} has blocking accessibility violations`).toEqual([]);
 }
 
 test("the sign-in page is accessible", async ({ page }) => {

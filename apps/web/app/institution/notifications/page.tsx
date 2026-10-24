@@ -71,7 +71,7 @@ export default function Notifications() {
           <div className="flex flex-col gap-3">
             <Field label={smsOn ? "Replace the number" : "Mobile number"}><Input inputMode="tel" value={mobile} onChange={(e) => setMobile(e.target.value)} placeholder="0772 123 456" autoComplete="tel" /></Field>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" pending={busy === "mobile"} disabled={!mobile.trim()} onClick={() => saveMobile(mobile.trim())}>{smsOn ? "Replace" : "Save"}</Button>
+              <Button size="sm" pending={busy === "mobile"} disabled={!mobile.trim()} onClick={() => saveMobile(mobile.trim())}>{smsOn ? "Replace" : "Add number"}</Button>
               {smsOn && <Button size="sm" variant="ghost" onClick={() => saveMobile("")}>Remove</Button>}
             </div>
           </div>

@@ -47,6 +47,7 @@ export function ReferralLinks() {
       {err && <div className="mt-3"><Banner tone="danger">{err}</Banner></div>}
       {out && (
         <div className="mt-4 flex flex-col gap-4 sm:flex-row">
+          {/* eslint-disable-next-line @next/next/no-img-element -- an inline data URL: nothing for the image loader to optimise */}
           <img src={svg} alt={`QR code for ${out.reference}`} className="h-44 w-44 shrink-0 rounded-lg border border-line bg-white p-1" />
           <div className="min-w-0 flex-1 space-y-2">
             <div className="text-[12px] uppercase tracking-wide text-muted">Tracking tag {out.reference}</div>
