@@ -59,3 +59,41 @@ test("an officer is only offered the pages their role can open", async ({ page }
     await expect(settings.getByRole("link", { name, exact: true })).toHaveCount(0);
   }
 });
+
+test("the Command Centre is a calm front door: greeting, Ask Weza, suggestions and at most three insights", async ({ page }) => {
+  await signIn(page, "manager@lakeside.demo");
+  await page.goto("/institution");
+  await expect(page.getByRole("heading", { level: 1, name: /^Good (morning|afternoon|evening), / })).toBeVisible();
+  await expect(page.getByLabel("Ask Weza", { exact: true })).toBeVisible();
+  const insights = page.getByRole("region", { name: "Insights from your workspace" });
+  await expect(insights).toBeVisible();
+  await expect(insights.locator("[aria-busy=true]")).toHaveCount(0, { timeout: 30_000 });
+  expect(await insights.getByRole("listitem").count()).toBeLessThanOrEqual(3);
+  // The old dashboard content now lives under Opportunities, not on the Command Centre.
+  await expect(page.getByRole("heading", { name: "Priority opportunities" })).toHaveCount(0);
+
+  // A suggestion asks Weza and the answer links to where the work is.
+  const suggestions = page.getByRole("list", { name: "Suggested questions" });
+  await suggestions.getByRole("button", { name: "Show current team workload" }).click();
+  await expect(page.locator("main p.whitespace-pre-line").first()).toContainText("open opportunities", { timeout: 30_000 });
+  await expect(page.getByRole("link", { name: "Team workload" })).toBeVisible();
+
+  // The priority table and needs-attention queue are one tab away.
+  await page.goto("/institution/priority");
+  await expect(page.getByRole("heading", { name: "Priority opportunities" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Needs attention" })).toBeVisible();
+  const tabs = page.getByRole("navigation", { name: "Opportunities sections" });
+  await expect(tabs.getByRole("link", { name: "Priority & attention", exact: true })).toHaveAttribute("aria-current", "page");
+});
+
+test("the chevron beside Command Centre collapses and expands the sidebar", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await signIn(page, "admin@lakeside.demo");
+  await page.goto("/institution/products");
+  const sidebar = page.getByRole("complementary", { name: "Workspace" });
+  await sidebar.getByRole("button", { name: "Collapse menu" }).click();
+  await expect(sidebar.getByText("Products & Appetite", { exact: true })).toHaveCount(0);
+  await expect(sidebar.getByRole("link", { name: "Products & Appetite", exact: true })).toHaveAttribute("aria-current", "page");
+  await sidebar.getByRole("button", { name: "Expand menu" }).click();
+  await expect(sidebar.getByText("Products & Appetite", { exact: true })).toBeVisible();
+});

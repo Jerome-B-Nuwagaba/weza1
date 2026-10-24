@@ -20,6 +20,7 @@ export const NAV_AREAS: NavArea[] = [
     key: "opportunities", label: "Opportunities", also: ["/institution/opportunities"],
     tabs: [
       { href: "/institution/feed", label: "All opportunities", perm: "opportunity.read_meta" },
+      { href: "/institution/priority", label: "Priority & attention", perm: "opportunity.read_meta" },
       { href: "/institution/my-day", label: "My work", perm: "opportunity.update_status" },
       { href: "/institution/previews", label: "Previews", perm: "preview.read" },
       { href: "/institution/reports", label: "Outcomes", perm: "analytics.read" },

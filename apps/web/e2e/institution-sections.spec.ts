@@ -4,7 +4,7 @@ import { signIn } from "./helpers";
 /** Smoke test: all 21 institution sections render for every institution role — no crash, no runtime/console
  * error, no "Application error" screen. Split by role × section group so each test has its own time budget. */
 const GROUPS: Record<string, string[]> = {
-  Work: ["/institution", "/institution/my-day", "/institution/feed", "/institution/previews", "/institution/team"],
+  Work: ["/institution", "/institution/my-day", "/institution/feed", "/institution/priority", "/institution/previews", "/institution/team"],
   Supply: ["/institution/products", "/institution/appetite", "/institution/sandbox"],
   Intelligence: ["/institution/radius", "/institution/demand", "/institution/product-opportunity",
     "/institution/insights", "/institution/ask", "/institution/reports"],
