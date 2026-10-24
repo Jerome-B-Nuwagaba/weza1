@@ -1,9 +1,8 @@
 "use client";
 
 import {
-  Activity, BarChart3, Bell, BookOpen, Briefcase, Building2, CalendarCheck, ClipboardCheck, Compass, Cpu, FileSearch,
-  FlaskConical, Gauge, GitBranch, Inbox, Landmark, LayoutDashboard, LifeBuoy, LogOut, Map, Menu, MessageSquareText,
-  Network, Package, Radar, Receipt, Scale, Settings, ShieldAlert, ShieldCheck, Sliders, Target, Users, Wrench, X,
+  Bell, BookOpen, Building2, ClipboardCheck, Cpu, FileSearch, Gauge, Inbox, Landmark, LayoutDashboard,
+  LifeBuoy, LogOut, Menu, MessageSquareText, Network, Package, Scale, Settings, ShieldAlert, Sliders, Users, Wrench, X,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -26,31 +25,13 @@ type Item = { href: string; label: string; icon: any; perm?: string };
 const INST_NAV: [string, Item[]][] = [
   ["Work", [
     { href: "/institution", label: "Command Centre", icon: LayoutDashboard, perm: "opportunity.read_meta" },
-    { href: "/institution/my-day", label: "My Day", icon: CalendarCheck, perm: "opportunity.update_status" },
-    { href: "/institution/feed", label: "Opportunity Feed", icon: Inbox, perm: "opportunity.read_meta" },
-    { href: "/institution/previews", label: "Previews", icon: Compass, perm: "preview.read" },
+    { href: "/institution/feed", label: "Opportunities", icon: Inbox, perm: "opportunity.read_meta" },
     { href: "/institution/team", label: "Team", icon: Users, perm: "team.manage" },
   ]],
-  ["Supply", [
-    { href: "/institution/products", label: "Product Studio", icon: Package, perm: "product.read" },
-    { href: "/institution/appetite", label: "Appetite Studio", icon: Target, perm: "appetite.read" },
-    { href: "/institution/sandbox", label: "Sandbox", icon: FlaskConical, perm: "sandbox.run" },
-  ]],
-  ["Intelligence", [
-    { href: "/institution/radius", label: "Opportunity Radius", icon: Radar, perm: "analytics.read" },
-    { href: "/institution/demand", label: "Demand Intelligence", icon: Map, perm: "analytics.read" },
-    { href: "/institution/product-opportunity", label: "Product Opportunity", icon: Briefcase, perm: "analytics.read" },
-    { href: "/institution/insights", label: "Insights", icon: Activity, perm: "analytics.read" },
-    { href: "/institution/ask", label: "Ask WEZA", icon: MessageSquareText },
-    { href: "/institution/reports", label: "Outcomes & reports", icon: BarChart3, perm: "analytics.read" },
+  ["Configure", [
+    { href: "/institution/products", label: "Products & appetite", icon: Package, perm: "product.read" },
   ]],
   ["Workspace", [
-    { href: "/institution/onboarding", label: "Activation", icon: ClipboardCheck },
-    { href: "/institution/users", label: "Users & roles", icon: Users },
-    { href: "/institution/routing", label: "Routing & targets", icon: GitBranch },
-    { href: "/institution/notifications", label: "Notifications", icon: Bell },
-    { href: "/institution/billing", label: "Billing", icon: Receipt, perm: "billing.view" },
-    { href: "/institution/audit", label: "Consent & access log", icon: ShieldCheck, perm: "consent.audit" },
     { href: "/institution/settings", label: "Settings", icon: Settings },
   ]],
 ];

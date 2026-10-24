@@ -1,16 +1,12 @@
 "use client";
 
-import { ArrowRight, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useApi } from "@/lib/hooks";
-import { money, STATE_LABEL } from "@/lib/format";
 import { useMe } from "@/components/StaffShell";
-import { Banner, Bar, Button, Card, ErrorState, Loading, Stat } from "@/components/ui";
-
-const FUNNEL = ["ROUTED", "RECEIVED", "ASSIGNED", "CONTACTED", "PROCEEDING", "SUBMITTED_TO_INSTITUTION", "REPORTED_APPROVED", "REPORTED_DISBURSED", "REPORTED_DECLINED"];
+import { Banner, Button, Card, ErrorState, Loading, Stat } from "@/components/ui";
 
 export default function CommandCentre() {
-  const { me, can } = useMe();
+  const { me } = useMe();
   const cc = useApi<any>("/inst/command-centre");
   const hour = new Date().getHours();
   const greet = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
@@ -25,15 +21,15 @@ export default function CommandCentre() {
   if (cc.error) return <ErrorState error={cc.error} onRetry={cc.reload} />;
   const d = cc.data;
   const c = d.cards;
-  const funnelMax = Math.max(1, ...FUNNEL.map((s) => d.funnel[s] || 0));
   return (
     <div className="space-y-6">
-      <section className="rounded-2xl border border-line bg-surface p-6">
-        <div className="text-[13px] text-muted">{greet}, {me.full_name.split(" ")[0]}.</div>
-        <p className="mt-1 max-w-4xl font-serif text-[22px] leading-snug text-ink">{d.briefing}</p>
-        {d.insights_open > 0 && can("analytics.read") && (
-          <Link href="/institution/insights" className="mt-3 inline-flex items-center gap-1.5 text-[14px] font-medium text-gold-700"><Sparkles className="h-4 w-4" /> {d.insights_open} appetite insight{d.insights_open > 1 ? "s" : ""} to review <ArrowRight className="h-3.5 w-3.5" /></Link>
-        )}
+      <section className="flex flex-col gap-4 rounded-2xl border border-line bg-surface p-6 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <div className="text-[13px] text-muted">{greet}, {me.full_name.split(" ")[0]}.</div>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-ink">Today&apos;s opportunities</h1>
+          <p className="mt-1 max-w-3xl text-[14px] text-muted">{d.briefing}</p>
+        </div>
+        <Button href="/institution/feed">View opportunities</Button>
       </section>
 
       {d.no_lead && (
@@ -42,7 +38,14 @@ export default function CommandCentre() {
         </Banner>
       )}
 
-      <Card title="Needs your attention" subtitle="What requires action first — unassigned, service targets and holds.">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <Stat label={c.new.label} value={c.new.value} href="/institution/feed" />
+        <Stat label={c.high_match.label} value={c.high_match.value} tone="gold" href="/institution/feed?min_match=90" />
+        <Stat label={c.unassigned.label} value={c.unassigned.value} href="/institution/feed?view=unassigned" />
+        <Stat label={c.waiting.label} value={c.waiting.value} />
+      </div>
+
+      <Card title="Needs your attention" subtitle="The few items that need an action now.">
         {d.attention.length === 0 ? <p className="text-[14px] text-muted">Nothing urgent. Nicely done.</p> : (
           <ul className="divide-y divide-line">
             {d.attention.map((a: any, i: number) => (
@@ -55,30 +58,12 @@ export default function CommandCentre() {
         )}
       </Card>
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
-        <Stat label={c.new.label} value={c.new.value} href="/institution/feed" />
-        <Stat label={c.qualified_demand.label} value={money(c.qualified_demand.value)} />
-        <Stat label={c.high_match.label} value={c.high_match.value} tone="gold" href="/institution/feed?min_match=90" />
-        <Stat label={c.unassigned.label} value={c.unassigned.value} href="/institution/feed?view=unassigned" />
-        <Stat label={c.waiting.label} value={c.waiting.value} />
-        <Stat label={c.avg_response.label} value={c.avg_response.value !== null ? `${c.avg_response.value}h` : "—"} />
-        <Stat label={c.contacted.label} value={c.contacted.value} />
-        <Stat label={c.progressing.label} value={c.progressing.value} />
-        <Stat label={c.reported_approved.label} value={c.reported_approved.value} sub={c.reported_approved.sub} />
-        <Stat label={c.reported_disbursed.label} value={c.reported_disbursed.value} sub={c.reported_disbursed.sub} tone="gold" />
-        <Stat label={c.conversion.label} value={c.conversion.value !== null ? `${c.conversion.value}%` : "—"} />
-      </div>
-
-      <Card title="Marketplace pipeline" subtitle="Approvals and disbursements are as reported by your institution.">
-        <ul className="space-y-2">
-          {FUNNEL.map((s) => (
-            <li key={s} className="grid grid-cols-[160px_1fr_40px] items-center gap-3 text-[13px]">
-              <span className="text-muted">{STATE_LABEL[s]}</span>
-              <Bar value={d.funnel[s] || 0} max={funnelMax} tone={s === "REPORTED_DISBURSED" ? "gold" : "blue"} />
-              <span className="num text-right font-medium">{d.funnel[s] || 0}</span>
-            </li>
-          ))}
-        </ul>
+      <Card title="Your matching setup" subtitle="Keep your active products and appetite current so WEZA can find relevant customer demand.">
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" href="/institution/products">Manage products</Button>
+          <Button variant="secondary" href="/institution/appetite">Manage appetite</Button>
+          <Button variant="ghost" href="/institution/team">Review team routing</Button>
+        </div>
       </Card>
     </div>
   );
