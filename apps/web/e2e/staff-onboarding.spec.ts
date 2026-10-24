@@ -95,6 +95,17 @@ test("WEZA staff onboard an institution and take it live, then pause it", async 
   expect(ws.permissions).toContain("users.manage");
 
   // ---- Activation is refused while the institution has no supply. The checklist names what is missing.
+  await expect(page.getByText("Next: Institution has an officer to work opportunities")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Activate" })).toBeDisabled();
+
+  // ---- An officer on a desk: without one, opportunities would have nobody to work them.
+  const team = await apiPost(request, "/inst/teams", adminToken, { name: "SME Desk" });
+  const officerEmail = `officer@e2e-staff-${suffix}.co.ug`;
+  const officerPassword = "E2e-Officer-Passw0rd!";
+  await apiPost(request, "/inst/users", adminToken, {
+    full_name: "Desk Officer", email: officerEmail, password: officerPassword, roles: ["OFFICER"], team_id: team.id,
+  });
+  await page.reload();
   await expect(page.getByText("Next: At least one active product")).toBeVisible();
   await expect(page.getByRole("button", { name: "Activate" })).toBeDisabled();
 
@@ -127,7 +138,7 @@ test("WEZA staff onboard an institution and take it live, then pause it", async 
   })).ok()).toBeTruthy();
 
   const routing = await request.put(`${API}/inst/routing`, {
-    headers: adminToken, data: { rules: [{ name: "Default", conditions: {}, active: true }] },
+    headers: adminToken, data: { rules: [{ name: "Default", conditions: {}, active: true, target_team_id: team.id }] },
   });
   expect(routing.ok(), await routing.text()).toBeTruthy();
 
