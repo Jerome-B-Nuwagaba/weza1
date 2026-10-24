@@ -60,7 +60,7 @@ def _onboard_institution(client, staff) -> tuple[str, dict]:
 
 
 def _build_supply(client, admin) -> None:
-    """The institution's own team builds its supply: a product, a mandate and a routing rule.
+    """The institution's own team builds its supply: an officer, a product, a mandate and a routing rule.
 
     Two people are needed, not one: WEZA separates duties, so whoever authors a product or a mandate cannot
     approve it. The administrator adds a business lead, and the two of them take opposite sides.
@@ -71,6 +71,12 @@ def _build_supply(client, admin) -> None:
                           "password": "FlowBiz!Initial2026", "roles": ["BUSINESS"]})
     assert r.status_code == 201, r.text
     business = login(client, business_email, "FlowBiz!Initial2026")
+
+    officer_email = f"flow-officer-{uuid.uuid4().hex[:8]}@flow.demo"
+    r = client.post("/api/v1/inst/users", headers=admin["headers"],
+                    json={"full_name": "Desk Officer", "email": officer_email,
+                          "password": "FlowOfficer!Initial2026", "roles": ["OFFICER"]})
+    assert r.status_code == 201, r.text
 
     r = client.post("/api/v1/inst/products", headers=business,
                     json={"name": "Working Capital", "family": "SME_WORKING_CAPITAL",
@@ -125,7 +131,7 @@ def test_a_staff_created_institution_can_be_driven_all_the_way_to_trading(client
     r = client.post(f"{API}/institutions/{inst_id}/activate", headers=weza_admin,
                     json={"reason": "Too early."})
     assert r.status_code == 422, r.text
-    assert {d["missing"] for d in r.json()["error"]["details"]} == {"product", "appetite", "routing"}
+    assert {d["missing"] for d in r.json()["error"]["details"]} == {"officer", "product", "appetite", "routing"}
 
     # The institution's own team builds the supply.
     _build_supply(client, admin)

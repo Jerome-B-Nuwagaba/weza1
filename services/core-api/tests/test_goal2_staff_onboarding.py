@@ -85,12 +85,17 @@ def _add_administrator(client, headers, inst_id: str) -> str:
     return email
 
 
-def _give_supply(inst_id: str, *, routing: bool = True) -> None:
-    """Give the institution an active product, an active mandate and a routing rule — the supply a trading
+def _give_supply(inst_id: str, *, routing: bool = True, officer: bool = True) -> None:
+    """Give the institution an officer, an active product, an active mandate and a routing rule — what a trading
     institution needs. The institution itself builds these through Product and Appetite Studio; the staff
     onboarding flow only has to see that they exist."""
     with session_scope() as db:
         inst = db.get(Institution, uuid.UUID(inst_id))
+        if officer:
+            from weza.domains.identity import service as identity
+            identity.create_user(db, email=f"officer-{uuid.uuid4().hex[:8]}@goal2.demo", full_name="Desk Officer",
+                                 password="GoalTwo!Initial2026", kind="INSTITUTION", institution_id=inst.id,
+                                 roles=["INSTITUTION_OFFICER"])
         product = Product(institution_id=inst.id, name="Working Capital", family="SME_WORKING_CAPITAL",
                           status="ACTIVE")
         db.add(product)
@@ -243,10 +248,10 @@ def test_the_administrator_is_counted_by_the_readiness_check(client, weza_admin)
     inst_id = _create(client, weza_admin)
     r = client.get(f"{API}/institutions/{inst_id}/readiness", headers=weza_admin).json()
     assert r["ready"] is False
-    assert r["missing"] == ["administrator", "product", "appetite", "routing"]
+    assert r["missing"] == ["administrator", "officer", "product", "appetite", "routing"]
     _add_administrator(client, weza_admin, inst_id)
     r = client.get(f"{API}/institutions/{inst_id}/readiness", headers=weza_admin).json()
-    assert r["missing"] == ["product", "appetite", "routing"]
+    assert r["missing"] == ["officer", "product", "appetite", "routing"]
     assert next(c for c in r["conditions"] if c["key"] == "administrator")["done"] is True
 
 
@@ -260,7 +265,7 @@ def test_activation_is_refused_until_every_condition_holds(client, weza_admin):
     assert r.status_code == 422, r.text
     body = r.json()["error"]
     assert body["code"] == "ACTIVATION_NOT_READY"
-    assert {d["missing"] for d in body["details"]} == {"administrator", "product", "appetite", "routing"}
+    assert {d["missing"] for d in body["details"]} == {"administrator", "officer", "product", "appetite", "routing"}
     assert _status(inst_id) == "DRAFT"
 
     # One condition short: still refused, and the refusal names it.
@@ -270,6 +275,17 @@ def test_activation_is_refused_until_every_condition_holds(client, weza_admin):
                     json={"reason": "Almost."})
     assert r.status_code == 422, r.text
     assert {d["missing"] for d in r.json()["error"]["details"]} == {"routing"}
+    assert _status(inst_id) == "DRAFT"
+
+
+def test_an_institution_with_supply_but_no_officer_cannot_be_activated(client, weza_admin):
+    """Supply without anyone to work the opportunities it attracts is not a trading institution."""
+    inst_id = _create(client, weza_admin)
+    _add_administrator(client, weza_admin, inst_id)
+    _give_supply(inst_id, officer=False)
+    r = client.post(f"{API}/institutions/{inst_id}/activate", headers=weza_admin, json={"reason": "No officer."})
+    assert r.status_code == 422, r.text
+    assert {d["missing"] for d in r.json()["error"]["details"]} == {"officer"}
     assert _status(inst_id) == "DRAFT"
 
 

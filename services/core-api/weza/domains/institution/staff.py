@@ -140,11 +140,16 @@ def create_administrator(db: Session, actor: Actor, inst: Institution, data: dic
 
 
 def readiness(db: Session, inst: Institution) -> dict:
-    """The activation checklist. Four conditions, all of which must hold before an institution may trade."""
+    """The activation checklist. Five conditions, all of which must hold before an institution may trade."""
     administrators = db.execute(
         select(func.count()).select_from(Membership).join(User, User.id == Membership.user_id)
         .where(Membership.institution_id == inst.id, User.status == "ACTIVE",
                canon.sql_any(Membership.roles, canon.INSTITUTION_ADMIN))
+    ).scalar_one()
+    officers = db.execute(
+        select(func.count()).select_from(Membership).join(User, User.id == Membership.user_id)
+        .where(Membership.institution_id == inst.id, User.status == "ACTIVE",
+               canon.sql_any(Membership.roles, canon.INSTITUTION_OFFICER))
     ).scalar_one()
     products = db.execute(
         select(func.count()).select_from(Product)
@@ -177,6 +182,9 @@ def readiness(db: Session, inst: Institution) -> dict:
     conditions = [
         {"key": "administrator", "label": "Institution has an administrator", "done": administrators > 0,
          "detail": f"{administrators} active administrator(s)"},
+        # Without an officer a live institution would be routed opportunities that nobody can work.
+        {"key": "officer", "label": "Institution has an officer to work opportunities", "done": officers > 0,
+         "detail": f"{officers} active officer(s)"},
         {"key": "product", "label": "At least one active product", "done": products > 0,
          "detail": f"{products} active product(s)"},
         {"key": "appetite", "label": "At least one active appetite / mandate",
