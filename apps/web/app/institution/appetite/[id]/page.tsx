@@ -13,6 +13,7 @@ export default function AppetiteDetail({ params }: { params: Promise<{ id: strin
   const { id } = use(params);
   const { can } = useMe();
   const a = useApi<any>(`/inst/appetites/${id}`);
+  const routing = useApi<any>("/inst/routing");
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<ApiError | null>(null);
@@ -50,7 +51,7 @@ export default function AppetiteDetail({ params }: { params: Promise<{ id: strin
   return (
     <>
       {node}
-      <PageHeader eyebrow="Appetite Studio" title={d.name} subtitle={`Current v${current.version} · min match ${current.min_match_score} · ${current.criteria.length} criteria`}
+      <PageHeader eyebrow="Mandates" title={d.name} subtitle={`Current v${current.version} · min match ${current.min_match_score} · ${current.criteria.length} criteria`}
         actions={<>
           <StateBadge state={d.lifecycle_status} />
           {d.lifecycle_status === "ACTIVE" && <StateBadge state={d.capacity_state} label={`Capacity ${d.capacity_state.toLowerCase()}`} />}
@@ -81,7 +82,7 @@ export default function AppetiteDetail({ params }: { params: Promise<{ id: strin
               {latest.criteria.length === 0 ? <p className="text-[14px] text-muted">No extra criteria: all demand eligible for the selected products.</p> : (
                 <ul className="space-y-1.5 text-[14px]">{latest.criteria.map((c: any, i: number) => <li key={i} className="flex flex-wrap items-center gap-2"><Badge tone={c.must ? "warning" : "muted"}>{c.must ? "must" : `×${c.weight}`}</Badge>{c.label || `${c.field} ${c.op} ${JSON.stringify(c.value)}`}</li>)}</ul>
               )}
-              <div className="mt-4"><KV items={[["Target", latest.target_count ? `${latest.target_count} opportunities` : "—"], ["Target value", latest.target_value ? money(latest.target_value) : "—"], ["Campaign", latest.campaign_from ? `${latest.campaign_from} → ${latest.campaign_to}` : "Open-ended"], ["Daily capacity", latest.capacity_limits.daily_count ?? "—"]]} /></div>
+              <div className="mt-4"><KV items={[["Target", latest.target_count ? `${latest.target_count} opportunities` : "—"], ["Target value", latest.target_value ? money(latest.target_value) : "—"], ["Campaign", latest.campaign_from ? `${latest.campaign_from} → ${latest.campaign_to}` : "Open-ended"], ["Daily capacity", latest.capacity_limits.daily_count ?? "—"], ["Routing destination", (routing.data?.teams || []).find((t: any) => t.id === latest.capacity_limits.routing_team_id)?.name || "Unassigned queue"]]} /></div>
             </Card>
             <Card title="Fulfilment">
               <div className="num text-2xl font-semibold">{d.fulfilled_count}{current.target_count ? <span className="text-[15px] text-muted"> / {current.target_count}</span> : ""}</div>

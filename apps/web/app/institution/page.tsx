@@ -1,19 +1,23 @@
 "use client";
 
-import { ArrowRight, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useApi } from "@/lib/hooks";
-import { money, STATE_LABEL } from "@/lib/format";
+import { money } from "@/lib/format";
 import { useMe } from "@/components/StaffShell";
-import { Banner, Bar, Button, Card, ErrorState, Loading, Stat } from "@/components/ui";
+import { FIELD_META } from "@/components/RuleBuilder";
+import { Banner, Button, Card, EmptyState, ErrorState, Loading, PageHeader, StateBadge, Table, Td } from "@/components/ui";
 
-const FUNNEL = ["ROUTED", "RECEIVED", "ASSIGNED", "CONTACTED", "PROCEEDING", "SUBMITTED_TO_INSTITUTION", "REPORTED_APPROVED", "REPORTED_DISBURSED", "REPORTED_DECLINED"];
+const CUSTOMER_TYPE: Record<string, string> = {
+  SME: "Business (SME)", SALARIED: "Salaried", AGRICULTURE: "Farmer",
+};
 
+const customerType = (v?: string | null) => (v ? CUSTOMER_TYPE[v] || v.replace(/_/g, " ").toLowerCase() : null);
+
+/** The Command Centre: what the institution can offer, what it is looking for, what just arrived and what
+ * needs action. No dashboards, no charts — four lists an institution admin can act on. */
 export default function CommandCentre() {
   const { me, can } = useMe();
   const cc = useApi<any>("/inst/command-centre");
-  const hour = new Date().getHours();
-  const greet = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
   if (me.institution && me.institution.status !== "ACTIVE")
     return (
       <div className="space-y-4">
@@ -24,17 +28,21 @@ export default function CommandCentre() {
   if (cc.loading) return <Loading rows={6} />;
   if (cc.error) return <ErrorState error={cc.error} onRetry={cc.reload} />;
   const d = cc.data;
-  const c = d.cards;
-  const funnelMax = Math.max(1, ...FUNNEL.map((s) => d.funnel[s] || 0));
+  const products: any[] = d.active_products || [];
+  const mandates: any[] = d.active_mandates || [];
+  const fresh: any[] = d.new_opportunities || [];
+  const attention: any[] = d.attention || [];
+
   return (
     <div className="space-y-6">
-      <section className="rounded-2xl border border-line bg-surface p-6">
-        <div className="text-[13px] text-muted">{greet}, {me.full_name.split(" ")[0]}.</div>
-        <p className="mt-1 max-w-4xl font-serif text-[22px] leading-snug text-ink">{d.briefing}</p>
-        {d.insights_open > 0 && can("analytics.read") && (
-          <Link href="/institution/insights" className="mt-3 inline-flex items-center gap-1.5 text-[14px] font-medium text-gold-700"><Sparkles className="h-4 w-4" /> {d.insights_open} appetite insight{d.insights_open > 1 ? "s" : ""} to review <ArrowRight className="h-3.5 w-3.5" /></Link>
-        )}
-      </section>
+      <PageHeader
+        title="Command Centre"
+        subtitle={d.briefing}
+        actions={<>
+          {can("product.create") && <Button variant="secondary" href="/institution/products">Products</Button>}
+          {can("appetite.edit") && <Button href="/institution/appetite">Mandates</Button>}
+        </>}
+      />
 
       {d.no_lead && (
         <Banner tone="info" title="No opportunities in your queue right now">
@@ -42,43 +50,92 @@ export default function CommandCentre() {
         </Banner>
       )}
 
-      <Card title="Needs your attention" subtitle="What requires action first — unassigned, service targets and holds.">
-        {d.attention.length === 0 ? <p className="text-[14px] text-muted">Nothing urgent. Nicely done.</p> : (
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card title="Active products" subtitle="What your institution can offer customers today."
+          action={<Link href="/institution/products" className="text-[13px] font-medium text-blue-800 hover:underline">All products</Link>}>
+          {products.length === 0 ? (
+            <EmptyState title="No active products">
+              {can("product.create") ? "Create a product so customers can be matched to it." : "Your administrator manages products."}
+            </EmptyState>
+          ) : (
+            <ul className="divide-y divide-line">
+              {products.map((p) => (
+                <li key={p.id} className="flex items-start justify-between gap-3 py-2.5">
+                  <div className="min-w-0">
+                    <Link href={`/institution/products/${p.id}`} className="font-medium text-blue-800 hover:underline">{p.name}</Link>
+                    <div className="text-[13px] text-muted">
+                      {customerType(p.customer_type) || p.family.replace(/_/g, " ").toLowerCase()} · {money(p.min_amount)} – {money(p.max_amount)} · {p.min_tenor_months}–{p.max_tenor_months} mo
+                    </div>
+                  </div>
+                  <StateBadge state={p.status} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+
+        <Card title="Active mandates" subtitle="The customers WEZA should be finding for you."
+          action={<Link href="/institution/appetite" className="text-[13px] font-medium text-blue-800 hover:underline">All mandates</Link>}>
+          {mandates.length === 0 ? (
+            <EmptyState title="No active mandates">
+              {can("appetite.edit") ? "Define a mandate so WEZA knows who you want to serve." : "Your administrator manages mandates."}
+            </EmptyState>
+          ) : (
+            <ul className="divide-y divide-line">
+              {mandates.map((m) => (
+                <li key={m.id} className="flex items-start justify-between gap-3 py-2.5">
+                  <div className="min-w-0">
+                    <Link href={`/institution/appetite/${m.id}`} className="font-medium text-blue-800 hover:underline">{m.name}</Link>
+                    <div className="text-[13px] text-muted">
+                      {m.products.length ? m.products.map((x: any) => x.name).join(", ") : "No products linked"}
+                      {m.criteria?.length ? ` · ${m.criteria.map((c: any) => FIELD_META[c.field]?.label || c.field).slice(0, 3).join(", ")}` : ""}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 gap-1">
+                    <StateBadge state={m.status} />
+                    {m.capacity_state && m.capacity_state !== "ACTIVE" && <StateBadge state={m.capacity_state} label={`Capacity ${m.capacity_state.toLowerCase()}`} />}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+      </div>
+
+      <Card title="New opportunities" subtitle="Matched to your mandates in the last 24 hours."
+        action={<Link href="/institution/feed" className="text-[13px] font-medium text-blue-800 hover:underline">Open feed</Link>}>
+        {fresh.length === 0 ? (
+          <p className="text-[14px] text-muted">No new opportunities in the last 24 hours.</p>
+        ) : (
+          <Table head={["Reference", "Amount", "Match", "Customer", "Purpose", "Status"]}>
+            {fresh.map((o) => (
+              <tr key={o.id} className="hover:bg-canvas">
+                <Td><Link href={`/institution/opportunities/${o.id}`} className="font-medium text-blue-800 hover:underline">{o.reference}</Link></Td>
+                <Td className="num">{money(o.amount)}</Td>
+                <Td className="num">{o.match_score}%</Td>
+                <Td>{customerType(o.customer_type) || "—"}</Td>
+                <Td>{o.purpose_category ? o.purpose_category.replace(/_/g, " ").toLowerCase() : "—"}</Td>
+                <Td><StateBadge state={o.state} /></Td>
+              </tr>
+            ))}
+          </Table>
+        )}
+      </Card>
+
+      <Card title="Needs attention" subtitle="Unassigned work, missed service targets and holds.">
+        {attention.length === 0 ? <p className="text-[14px] text-muted">Nothing urgent. Nicely done.</p> : (
           <ul className="divide-y divide-line">
-            {d.attention.map((a: any, i: number) => (
+            {attention.map((a: any, i: number) => (
               <li key={i} className="flex items-center justify-between gap-3 py-2.5">
-                <span className="flex items-center gap-2 text-[14px]"><span className={`h-2 w-2 shrink-0 rounded-full ${a.severity === "high" ? "bg-danger" : a.severity === "medium" ? "bg-warning" : "bg-blue-400"}`} />{a.text}</span>
+                <span className="flex items-center gap-2 text-[14px]">
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${a.severity === "high" ? "bg-danger" : a.severity === "medium" ? "bg-warning" : "bg-blue-400"}`} />
+                  {a.text}
+                </span>
                 <Button size="sm" variant="secondary" href={a.id ? `/institution/opportunities/${a.id}` : a.link}>{a.action}</Button>
               </li>
             ))}
           </ul>
         )}
-      </Card>
-
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
-        <Stat label={c.new.label} value={c.new.value} href="/institution/feed" />
-        <Stat label={c.qualified_demand.label} value={money(c.qualified_demand.value)} />
-        <Stat label={c.high_match.label} value={c.high_match.value} tone="gold" href="/institution/feed?min_match=90" />
-        <Stat label={c.unassigned.label} value={c.unassigned.value} href="/institution/feed?view=unassigned" />
-        <Stat label={c.waiting.label} value={c.waiting.value} />
-        <Stat label={c.avg_response.label} value={c.avg_response.value !== null ? `${c.avg_response.value}h` : "—"} />
-        <Stat label={c.contacted.label} value={c.contacted.value} />
-        <Stat label={c.progressing.label} value={c.progressing.value} />
-        <Stat label={c.reported_approved.label} value={c.reported_approved.value} sub={c.reported_approved.sub} />
-        <Stat label={c.reported_disbursed.label} value={c.reported_disbursed.value} sub={c.reported_disbursed.sub} tone="gold" />
-        <Stat label={c.conversion.label} value={c.conversion.value !== null ? `${c.conversion.value}%` : "—"} />
-      </div>
-
-      <Card title="Marketplace pipeline" subtitle="Approvals and disbursements are as reported by your institution.">
-        <ul className="space-y-2">
-          {FUNNEL.map((s) => (
-            <li key={s} className="grid grid-cols-[160px_1fr_40px] items-center gap-3 text-[13px]">
-              <span className="text-muted">{STATE_LABEL[s]}</span>
-              <Bar value={d.funnel[s] || 0} max={funnelMax} tone={s === "REPORTED_DISBURSED" ? "gold" : "blue"} />
-              <span className="num text-right font-medium">{d.funnel[s] || 0}</span>
-            </li>
-          ))}
-        </ul>
       </Card>
     </div>
   );

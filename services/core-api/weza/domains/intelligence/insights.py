@@ -20,13 +20,13 @@ from weza.domains.matching.rules import fmt_money
 from weza.domains.misc_models import AiCallLog, Notification, ReviewItem
 from weza.domains.need.models import FinancialNeed
 from weza.domains.opportunity.models import Assignment, Insight, Opportunity, Outcome
-from weza.domains.product.models import Product
+from weza.domains.product.models import Product, ProductVersion
 from weza.domains.trust import policy
 from weza.platform.context import Actor
 from weza.platform.db import utcnow
 from weza.platform.models import EventDelivery, GraphInstance
 
-PROGRESSING = {"PROCEEDING", "SUBMITTED_TO_INSTITUTION"}
+PROGRESSING = {"INFORMATION_REQUESTED", "PROCEEDING", "SUBMITTED_TO_INSTITUTION"}
 
 
 def _scope(db: Session, actor: Actor):
@@ -116,8 +116,53 @@ def command_centre(db: Session, actor: Actor) -> dict:
                                "Demand Intelligence to see where WEZA demand is growing.", "link": "/institution/demand"}
     return {"briefing": briefing, "cards": cards, "attention": attention[:10], "funnel": dict(funnel),
             "no_lead": no_lead, "roles": sorted(actor.roles), "generated_at": now.isoformat(),
+            "active_products": active_products(db, actor), "active_mandates": active_mandates(db, actor),
+            "new_opportunities": new_opportunities(new),
             "insights_open": db.execute(select(func.count()).select_from(Insight).where(
                 Insight.institution_id == actor.institution_id, Insight.status == "OPEN")).scalar_one()}
+
+
+def active_products(db: Session, actor: Actor) -> list[dict]:
+    """Products this institution can currently offer (the Command Centre's 'active products')."""
+    out = []
+    for p in db.execute(select(Product).where(Product.institution_id == actor.institution_id,
+                                              Product.status == "ACTIVE").order_by(Product.name)).scalars():
+        pv = db.get(ProductVersion, p.active_version_id) if p.active_version_id else None
+        terms = (pv.terms if pv else {}) or {}
+        out.append({"id": str(p.id), "name": p.name, "family": p.family,
+                    "customer_type": terms.get("customer_type"),
+                    "min_amount": terms.get("min_amount"), "max_amount": terms.get("max_amount"),
+                    "min_tenor_months": terms.get("min_tenor_months"),
+                    "max_tenor_months": terms.get("max_tenor_months"), "status": p.status})
+    return out
+
+
+def active_mandates(db: Session, actor: Actor) -> list[dict]:
+    """Live mandates (appetites) and the products they cover."""
+    out = []
+    for ap in db.execute(select(Appetite).where(Appetite.institution_id == actor.institution_id,
+                                                 Appetite.lifecycle_status == "ACTIVE").order_by(Appetite.name)).scalars():
+        av = db.get(AppetiteVersion, ap.active_version_id) if ap.active_version_id else None
+        products = []
+        if av and av.product_ids:
+            products = [{"id": str(x.id), "name": x.name} for x in db.execute(
+                select(Product).where(Product.id.in_(list(av.product_ids)))).scalars()]
+        out.append({"id": str(ap.id), "name": ap.name, "status": ap.lifecycle_status,
+                    "capacity_state": ap.capacity_state, "version": av.version if av else None,
+                    "min_match_score": av.min_match_score if av else None,
+                    "products": products, "criteria": (av.criteria if av else []) or [],
+                    "target_count": av.target_count if av else None,
+                    "fulfilled_count": ap.fulfilled_count, "fulfilled_value": float(ap.fulfilled_value or 0)})
+    return out
+
+
+def new_opportunities(new: list, limit: int = 10) -> list[dict]:
+    """The newest matched opportunities (last 24h) for the Command Centre's 'new opportunities' section."""
+    return [{"id": str(o.id), "reference": o.reference, "amount": float(o.amount),
+             "match_score": round(o.match_score), "purpose_category": o.purpose_category,
+             "district": o.district, "customer_type": o.customer_type, "sector": o.sector,
+             "state": o.state, "qualified_at": o.qualified_at.isoformat()}
+            for o in sorted(new, key=lambda x: -float(x.match_score))[:limit]]
 
 
 def _briefing(cards: dict, unassigned: int, high: list, new: list, waiting: list) -> str:

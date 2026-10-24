@@ -32,20 +32,67 @@ from weza.platform.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from weza.platform.events import emit
 
 TERMINAL = {"CLOSED", "WITHDRAWN", "EXPIRED", "ROUTING_FAILED"}
-OPEN_STATES = {"QUALIFIED", "ROUTED", "RECEIVED", "ASSIGNED", "CONTACTED", "PROCEEDING", "SUBMITTED_TO_INSTITUTION",
-               "REPORTED_APPROVED"}
-INSTITUTION_FORWARD = ["RECEIVED", "ASSIGNED", "CONTACTED", "PROCEEDING", "SUBMITTED_TO_INSTITUTION"]
+OPEN_STATES = {"QUALIFIED", "ROUTED", "RECEIVED", "ASSIGNED", "CONTACTED", "INFORMATION_REQUESTED", "PROCEEDING",
+               "SUBMITTED_TO_INSTITUTION", "REPORTED_APPROVED"}
+INSTITUTION_FORWARD = ["RECEIVED", "ASSIGNED", "CONTACTED", "INFORMATION_REQUESTED", "PROCEEDING",
+                       "SUBMITTED_TO_INSTITUTION"]
+# How each stored state reads in the institution's workspace. "Approved" and "Disbursed reported" are
+# institution-reported outcomes, never WEZA decisions.
+STATUS_LABEL = {
+    "ROUTED": "New", "RECEIVED": "New", "ASSIGNED": "Assigned", "CONTACTED": "Contacted",
+    "INFORMATION_REQUESTED": "More information requested", "PROCEEDING": "Customer proceeding",
+    "SUBMITTED_TO_INSTITUTION": "In institution review", "REPORTED_APPROVED": "Approved",
+    "REPORTED_DECLINED": "Declined", "REPORTED_DISBURSED": "Disbursed reported",
+}
+# The forward path an officer may skip along (the state machine allows the jump).
+FORWARD_PATH = ["ROUTED", "RECEIVED", "ASSIGNED", "CONTACTED", "INFORMATION_REQUESTED", "PROCEEDING",
+                "SUBMITTED_TO_INSTITUTION"]
+
+
+def status_ladder(opp) -> list[dict]:
+    """The statuses an institution officer works through, with the one they are on now."""
+    order = ["ROUTED", "ASSIGNED", "CONTACTED", "INFORMATION_REQUESTED", "PROCEEDING", "SUBMITTED_TO_INSTITUTION"]
+    reached = {s: True for s in order}
+    if opp.state in order:
+        for s in order:
+            if order.index(s) > order.index(opp.state):
+                reached[s] = False
+    else:
+        # Past the working statuses: an outcome, or closed.
+        reached = {s: True for s in order}
+    ladder = [{"state": s, "label": STATUS_LABEL[s], "current": s == opp.state, "reached": reached[s]}
+              for s in order]
+    for s in ("REPORTED_APPROVED", "REPORTED_DECLINED", "REPORTED_DISBURSED"):
+        ladder.append({"state": s, "label": STATUS_LABEL[s], "current": opp.state == s,
+                       "reached": opp.state == s or (s == "REPORTED_APPROVED" and opp.state == "REPORTED_DISBURSED")})
+    return ladder
+
+
+def allowed_next_states(opp) -> list[str]:
+    """The statuses the officer may record from here: the next step in the ladder and nothing else. Asking for
+    more information is offered separately, because it is the officer's choice rather than a step they must take."""
+    if opp.state in ("ROUTED", "RECEIVED", "ASSIGNED"):
+        return ["CONTACTED"]
+    if opp.state in ("CONTACTED", "INFORMATION_REQUESTED"):
+        return ["PROCEEDING", "SUBMITTED_TO_INSTITUTION"]
+    if opp.state == "PROCEEDING":
+        return ["SUBMITTED_TO_INSTITUTION"]
+    return []
 
 OPP_SM = StateMachine("Opportunity", {
     "QUALIFIED": {"ROUTED", "ROUTING_FAILED", "CLOSED", "WITHDRAWN"},
-    "ROUTED": {"RECEIVED", "ASSIGNED", "CONTACTED", "WITHDRAWN", "EXPIRED", "CLOSED"},
-    "RECEIVED": {"ASSIGNED", "CONTACTED", "WITHDRAWN", "EXPIRED", "CLOSED"},
-    "ASSIGNED": {"CONTACTED", "PROCEEDING", "WITHDRAWN", "EXPIRED", "CLOSED", "REPORTED_DECLINED"},
-    "CONTACTED": {"PROCEEDING", "SUBMITTED_TO_INSTITUTION", "REPORTED_APPROVED", "REPORTED_DECLINED", "WITHDRAWN",
-                  "EXPIRED", "CLOSED"},
-    "PROCEEDING": {"SUBMITTED_TO_INSTITUTION", "REPORTED_APPROVED", "REPORTED_DECLINED", "WITHDRAWN", "EXPIRED",
-                   "CLOSED"},
-    "SUBMITTED_TO_INSTITUTION": {"REPORTED_APPROVED", "REPORTED_DECLINED", "WITHDRAWN", "CLOSED"},
+    "ROUTED": {"RECEIVED", "ASSIGNED", "CONTACTED", "INFORMATION_REQUESTED", "WITHDRAWN", "EXPIRED", "CLOSED"},
+    "RECEIVED": {"ASSIGNED", "CONTACTED", "INFORMATION_REQUESTED", "WITHDRAWN", "EXPIRED", "CLOSED"},
+    "ASSIGNED": {"CONTACTED", "INFORMATION_REQUESTED", "PROCEEDING", "WITHDRAWN", "EXPIRED", "CLOSED",
+                 "REPORTED_DECLINED"},
+    "CONTACTED": {"PROCEEDING", "INFORMATION_REQUESTED", "SUBMITTED_TO_INSTITUTION", "REPORTED_APPROVED",
+                  "REPORTED_DECLINED", "WITHDRAWN", "EXPIRED", "CLOSED"},
+    "INFORMATION_REQUESTED": {"PROCEEDING", "SUBMITTED_TO_INSTITUTION", "REPORTED_APPROVED", "REPORTED_DECLINED",
+                              "WITHDRAWN", "EXPIRED", "CLOSED"},
+    "PROCEEDING": {"SUBMITTED_TO_INSTITUTION", "INFORMATION_REQUESTED", "REPORTED_APPROVED", "REPORTED_DECLINED",
+                   "WITHDRAWN", "EXPIRED", "CLOSED"},
+    "SUBMITTED_TO_INSTITUTION": {"INFORMATION_REQUESTED", "REPORTED_APPROVED", "REPORTED_DECLINED", "WITHDRAWN",
+                                 "CLOSED"},
     "REPORTED_APPROVED": {"REPORTED_DISBURSED", "WITHDRAWN", "CLOSED"},
     "REPORTED_DISBURSED": {"CLOSED"},
     "REPORTED_DECLINED": {"REMATCH_ELIGIBLE", "CLOSED"},
@@ -247,6 +294,8 @@ def route(db: Session, opp: Opportunity, actor: Actor = SYSTEM) -> None:
         need = db.get(FinancialNeed, opp.need_id)
         need.status = "READY_FOR_MATCHING"
         _log(db, opp, "ROUTING_FAILED", actor, note="Institution not available; customer data not shared.")
+        audit(db, actor, "opportunity.routing_failed", "opportunity", opp.id, institution_id=opp.institution_id,
+              after={"reference": opp.reference, "reason": "institution_or_routing_unavailable"})
         emit(db, "OpportunityRoutingFailed", topic="opportunity", aggregate_type="opportunity", aggregate_id=opp.id,
              institution_id=opp.institution_id, data={"need_id": str(opp.need_id)})
         return
@@ -255,6 +304,9 @@ def route(db: Session, opp: Opportunity, actor: Actor = SYSTEM) -> None:
     opp.routed_at = utcnow()
     opp.integrity_hold = False
     _log(db, opp, "ROUTED", actor)
+    audit(db, actor, "opportunity.routed", "opportunity", opp.id, institution_id=inst.id,
+          after={"reference": opp.reference, "priority": opp.priority, "amount": str(opp.amount),
+                 "match_score": opp.match_score, "consent_id": str(opp.consent_id) if opp.consent_id else None})
     emit(db, "OpportunityRouted", topic="opportunity", aggregate_type="opportunity", aggregate_id=opp.id,
          institution_id=opp.institution_id, data={"reference": opp.reference, "priority": opp.priority,
                                                   "amount": str(opp.amount), "score": opp.match_score})
@@ -282,6 +334,27 @@ def _rule_matches(rule: RoutingRule, opp: Opportunity) -> bool:
     return True
 
 
+def _appetite_destination(db: Session, opp: Opportunity):
+    """The desk a mandate names as its routing destination (its own team), when one is set and still exists."""
+    if not opp.appetite_id:
+        return None
+    av = db.execute(select(AppetiteVersion).join(
+        Appetite, Appetite.active_version_id == AppetiteVersion.id).where(
+        Appetite.id == opp.appetite_id, Appetite.institution_id == opp.institution_id)).scalar_one_or_none()
+    if av is None:
+        return None
+    team_id = (av.capacity_limits or {}).get("routing_team_id")
+    if not team_id:
+        return None
+    try:
+        tid = uuid.UUID(str(team_id))
+    except ValueError:
+        return None
+    exists = db.execute(select(func.count()).select_from(Team).where(
+        Team.id == tid, Team.institution_id == opp.institution_id)).scalar_one()
+    return tid if exists else None
+
+
 def assign_by_rules(db: Session, opp: Opportunity) -> Assignment:
     """FSD-ASG-001/002: rule-based assignment; least-loaded officer within the team; else Unassigned."""
     existing = db.get(Assignment, opp.id)
@@ -294,6 +367,7 @@ def assign_by_rules(db: Session, opp: Opportunity) -> Assignment:
     rules = db.execute(select(RoutingRule).where(RoutingRule.institution_id == opp.institution_id,
                                                  RoutingRule.active.is_(True)).order_by(RoutingRule.priority)).scalars()
     chosen = next((r for r in rules if _rule_matches(r, opp)), None)
+    source = "RULE"
     if chosen is not None:
         a.rule_id, a.team_id = chosen.id, chosen.target_team_id
         # A named person only receives work while they are an active officer/manager of this institution;
@@ -301,8 +375,15 @@ def assign_by_rules(db: Session, opp: Opportunity) -> Assignment:
         named = chosen.target_user_id if _can_receive_work(db, opp.institution_id, chosen.target_user_id) else None
         a.user_id = named or (_least_loaded_officer(db, opp.institution_id, chosen.target_team_id)
                               if chosen.target_team_id else None)
+    else:
+        # No routing rule matched: a mandate may name its own routing destination (desk) instead.
+        team = _appetite_destination(db, opp)
+        if team is not None:
+            source = "MANDATE"
+            a.team_id = team
+            a.user_id = _least_loaded_officer(db, opp.institution_id, team)
     if a.user_id:
-        a.assigned_at, a.assigned_by = utcnow(), "RULE"
+        a.assigned_at, a.assigned_by = utcnow(), source
         a.ack_due_at = utcnow() + timedelta(minutes=st.ack_within_minutes or 120)
         if opp.state in ("ROUTED", "RECEIVED"):
             OPP_SM.check(opp.state, "ASSIGNED")
@@ -312,7 +393,9 @@ def assign_by_rules(db: Session, opp: Opportunity) -> Assignment:
     db.add(a)
     db.flush()
     _log(db, opp, "ASSIGNED" if a.user_id else "UNASSIGNED", SYSTEM,
-         note=f"Rule: {chosen.name}" if chosen else "No routing rule matched — waiting in Unassigned queue")
+         note=(f"Rule: {chosen.name}" if chosen else
+               ("Mandate routing destination" if source == "MANDATE" else
+                "No routing rule matched — waiting in Unassigned queue")))
     record_decision(db, "ASSIGNMENT", "opportunity", opp.id, inputs={"rules_evaluated": True},
                     output={"rule": str(chosen.id) if chosen else None, "user": str(a.user_id) if a.user_id else None,
                             "team": str(a.team_id) if a.team_id else None}, algorithm_version="assign_v1")
@@ -420,7 +503,7 @@ def _advance_to(db: Session, actor: Actor, opp: Opportunity, to_state: str, note
     """Officers may skip intermediate forward states (e.g. ROUTED → CONTACTED) but never move backwards."""
     if opp.state == to_state:
         return
-    path = ["ROUTED", "RECEIVED", "ASSIGNED", "CONTACTED", "PROCEEDING", "SUBMITTED_TO_INSTITUTION"]
+    path = FORWARD_PATH
     if opp.state in path and to_state in path and path.index(to_state) > path.index(opp.state):
         before = opp.state
         opp.state = to_state
@@ -469,6 +552,12 @@ def report_outcome(db: Session, actor: Actor, opp: Opportunity, *, state: str, r
         _advance_to(db, actor, opp, "REPORTED_APPROVED", "Implied by reported disbursement")
     if opp.state in ("ROUTED", "RECEIVED", "ASSIGNED") and state in ("REPORTED_APPROVED", "REPORTED_DECLINED"):
         _advance_to(db, actor, opp, "CONTACTED", "Implied by reported outcome")
+        a = db.get(Assignment, opp.id)
+        if a and a.first_contact_at is None:
+            a.first_contact_at, a.breach_state = utcnow(), "MET"
+    elif opp.state == "INFORMATION_REQUESTED" and state in ("REPORTED_APPROVED", "REPORTED_DECLINED"):
+        # The officer has been in touch (they asked for information) — record the contact, but do not walk the
+        # opportunity backwards out of "More information requested".
         a = db.get(Assignment, opp.id)
         if a and a.first_contact_at is None:
             a.first_contact_at, a.breach_state = utcnow(), "MET"
@@ -576,14 +665,33 @@ def request_info(db: Session, actor: Actor, opp: Opportunity, *, kind: str, mess
                     due_at=utcnow() + timedelta(days=due_in_days or 3))
     db.add(r)
     db.flush()
-    _log(db, opp, "INFO_REQUESTED", actor, note=message, data={"request_id": str(r.id), "kind": kind,
-                                                               "doc_type": doc_type, "fact_key": r.fact_key})
+    # The ask is recorded on the opportunity's timeline. It is not a state change: the officer records the
+    # statuses themselves (the ladder only moves forward), and an open request shows as "Waiting for customer".
+    _log(db, opp, "INFORMATION_REQUESTED", actor, note=message, data={"request_id": str(r.id), "kind": kind,
+                                                                     "doc_type": doc_type, "fact_key": r.fact_key})
     audit(db, actor, "info_request.created", "info_request", r.id, institution_id=opp.institution_id,
           after={"opportunity": str(opp.id), "kind": kind, "doc_type": doc_type, "fact_key": r.fact_key})
     emit(db, "InfoRequested", topic="opportunity", aggregate_type="opportunity", aggregate_id=opp.id,
          institution_id=opp.institution_id, data={"request_id": str(r.id), "kind": kind, "doc_type": doc_type,
                                                   "reference": opp.reference})
     return r
+
+
+def add_internal_note(db: Session, actor: Actor, opp: Opportunity, note: str) -> Activity:
+    """An internal note: visible to the institution's own staff, never to the customer. It changes no state and
+    carries no customer data beyond what the officer already has permission to see."""
+    policy.require(actor, "opportunity.update_status")
+    policy.require_tenant(actor, opp.institution_id)
+    _require_assignee_or_manager(db, actor, opp)
+    text = (note or "").strip()
+    if not text:
+        raise ValidationFailed("Write the note first.", code="NOTE_REQUIRED")
+    if len(text) > 1000:
+        raise ValidationFailed("That note is too long — keep it under 1000 characters.", code="NOTE_TOO_LONG")
+    a = _log(db, opp, "NOTE", actor, note=text)
+    audit(db, actor, "opportunity.note_added", "opportunity", opp.id, institution_id=opp.institution_id,
+          after={"note": text})
+    return a
 
 
 def cancel_info_request(db: Session, actor: Actor, opp: Opportunity, r: InfoRequest, reason: str | None = None) -> None:
@@ -796,7 +904,10 @@ def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
             "can_request_info": decision.result == "PERMIT" and policy.has(actor, "opportunity.request_info")
             and opp.state in OPEN_STATES and not opp.integrity_hold,
             "can_request_documents": "documents" in decision.fields,
-            "decline_reasons": DECLINE_REASONS}
+            "decline_reasons": DECLINE_REASONS,
+            "status_ladder": status_ladder(opp),
+            "next_states": allowed_next_states(opp),
+            "can_add_note": policy.has(actor, "opportunity.update_status")}
 
 
 def purpose_label(category: str | None) -> str | None:
@@ -857,7 +968,8 @@ def _next_action(opp: Opportunity, a: Assignment | None, awaiting_customer: bool
     if awaiting_customer and opp.state in OPEN_STATES:
         return "Waiting for customer info"
     return {"ROUTED": "Review & contact", "RECEIVED": "Contact customer", "ASSIGNED": "Contact customer",
-            "CONTACTED": "Record progress", "PROCEEDING": "Report outcome", "SUBMITTED_TO_INSTITUTION": "Report outcome",
+            "CONTACTED": "Record progress", "INFORMATION_REQUESTED": "Waiting for the customer's answer",
+            "PROCEEDING": "Report outcome", "SUBMITTED_TO_INSTITUTION": "Report outcome",
             "REPORTED_APPROVED": "Report disbursement"}.get(opp.state, "—")
 
 

@@ -7,17 +7,29 @@ import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { dateTime, money, moneyFull, STATE_LABEL } from "@/lib/format";
 import { AwaitingBadge, FreshnessBadge, IdentityBadge, PriorityBadge, TargetBadge, TermsLine } from "@/components/opportunity";
-import { Badge, Banner, Bar, Button, Card, ErrorState, Field, Input, KV, Loading, Modal, ReasonChips, ScoreRing, Select, StateBadge, Textarea, useToast } from "@/components/ui";
+import { useMe } from "@/components/StaffShell";
+import { Badge, Banner, Bar, Button, Card, cx, ErrorState, Field, Input, KV, Loading, Modal, ReasonChips, ScoreRing, Select, StateBadge, Textarea, useToast } from "@/components/ui";
 
 const COMPONENTS: [string, string][] = [["product_fit", "Product fit"], ["appetite_fit", "Appetite fit"], ["preference_fit", "Preference fit"], ["readiness", "Readiness"], ["capacity_fit", "Capacity"]];
 const FIELD_LABEL: Record<string, string> = { full_name: "Name", phone: "Phone", email: "Email", contact_channel: "Preferred contact", contact_window: "Contact window", nin: "NIN", business_name: "Business name", business_registered: "Business registered", employer: "Employer", employment_type: "Employment type", farm_activity: "Farming activity", monthly_turnover: "Monthly turnover", monthly_income: "Monthly income", annual_income: "Annual farm income", monthly_repayments: "Existing monthly repayments" };
+// The statuses an institution officer records. WEZA records what the institution reports — it never decides.
+const STATUS_ACTION: Record<string, { label: string; variant?: "secondary" | "gold" | "ghost" }> = {
+  CONTACTED: { label: "Mark contacted" },
+  INFORMATION_REQUESTED: { label: "More information requested…" },
+  PROCEEDING: { label: "Customer proceeding" },
+  SUBMITTED_TO_INSTITUTION: { label: "Send for institution review" },
+};
 
 export default function Opportunity360({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const { me } = useMe();
   const o = useApi<any>(`/inst/opportunities/${id}`);
   const { toast, node } = useToast();
   const [outcome, setOutcome] = useState<string | null>(null);
   const [assign, setAssign] = useState(false);
+  const [ask, setAsk] = useState(false);
+  const [note, setNote] = useState("");
+  const [noteBusy, setNoteBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -25,12 +37,28 @@ export default function Opportunity360({ params }: { params: Promise<{ id: strin
     setBusy(true);
     setErr(null);
     try {
-      o.setData(await api(`/inst/opportunities/${id}/status`, { body: { state }, idempotencyKey: true }));
+      o.setData(await api(`/inst/opportunities/${id}/status`, { body: { state, note: note.trim() || null }, idempotencyKey: true }));
+      setNote("");
       toast(`Marked ${STATE_LABEL[state].toLowerCase()}`);
     } catch (e) {
       setErr((e as ApiError).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function saveNote() {
+    if (!note.trim()) return;
+    setNoteBusy(true);
+    setErr(null);
+    try {
+      o.setData(await api(`/inst/opportunities/${id}/note`, { body: { note: note.trim() } }));
+      setNote("");
+      toast("Note saved");
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setNoteBusy(false);
     }
   }
 
@@ -45,7 +73,7 @@ export default function Opportunity360({ params }: { params: Promise<{ id: strin
   return (
     <div className="space-y-5">
       {node}
-      <Link href="/institution/feed" className="inline-flex items-center gap-1 text-[13px] text-muted hover:text-ink"><ArrowLeft className="h-4 w-4" /> Feed</Link>
+      <Link href={me && me.permissions.includes("opportunity.update_status") ? "/institution/my-day" : "/institution/feed"} className="inline-flex items-center gap-1 text-[13px] text-muted hover:text-ink"><ArrowLeft className="h-4 w-4" /> {me && me.permissions.includes("opportunity.update_status") ? "My queue" : "Feed"}</Link>
       <div className="flex flex-col gap-4 rounded-2xl border border-line bg-surface p-5 md:flex-row md:items-center">
         <ScoreRing score={d.match_score} size={64} />
         <div className="flex-1">
@@ -63,17 +91,45 @@ export default function Opportunity360({ params }: { params: Promise<{ id: strin
         </div>
         <div className="flex flex-wrap gap-2">
           {d.can_assign && <Button variant="secondary" onClick={() => setAssign(true)}>{d.owner ? "Reassign" : "Assign"}</Button>}
-          {d.can_update && !closed && !d.integrity_hold && (
-            <>
-              {["ROUTED", "RECEIVED", "ASSIGNED"].includes(d.state) && <Button pending={busy} onClick={() => status("CONTACTED")}>Mark contacted</Button>}
-              {d.state === "CONTACTED" && <Button pending={busy} onClick={() => status("PROCEEDING")}>Customer proceeding</Button>}
-              {d.state === "PROCEEDING" && <Button pending={busy} onClick={() => status("SUBMITTED_TO_INSTITUTION")}>Submitted internally</Button>}
-            </>
-          )}
         </div>
       </div>
       {err && <Banner tone="danger">{err}</Banner>}
       {d.integrity_hold && <Banner tone="warning" title="On hold">WEZA is completing routine checks. Customer details are not shared until the hold is released.</Banner>}
+
+      <Card title="Next action" subtitle="Your institution makes the credit decision. WEZA records the status you report — it never approves, declines or sends funds.">
+        <ol className="mb-4 flex flex-wrap items-center gap-1.5">
+          {(d.status_ladder || []).map((s: any) => (
+            <li key={s.state} className={cx(
+              "rounded-full border px-2.5 py-1 text-[12px]",
+              s.current ? "border-blue-300 bg-blue-50 font-medium text-blue-800"
+                : s.reached ? "border-line bg-canvas text-ink" : "border-dashed border-line text-muted")}>
+              {s.label}
+            </li>
+          ))}
+        </ol>
+        {d.can_update && !closed && !d.integrity_hold && (
+          <>
+            <div className="mb-3">
+              <Field label="Internal note (optional)" hint="Kept inside your institution. The customer never sees it.">
+                <Textarea rows={2} maxLength={1000} value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Called the customer; they will send the turnover statements on Monday." />
+              </Field>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {(d.next_states || []).map((s: string) => (
+                <Button key={s} pending={busy} variant={STATUS_ACTION[s]?.variant} onClick={() => status(s)}>
+                  {STATUS_ACTION[s]?.label || STATE_LABEL[s]}
+                </Button>
+              ))}
+              {d.state !== "INFORMATION_REQUESTED" && (
+                <Button variant="secondary" pending={busy} onClick={() => status("INFORMATION_REQUESTED")}>More information requested</Button>
+              )}
+              {d.can_add_note && (
+                <Button variant="ghost" pending={noteBusy} onClick={saveNote} disabled={!note.trim()}>Save note only</Button>
+              )}
+            </div>
+          </>
+        )}
+      </Card>
 
       {d.can_update && !closed && !d.integrity_hold && (
         <Card title="What happened with this customer?" subtitle="One tap. Your institution makes the credit decision — WEZA records what you report.">
@@ -83,6 +139,7 @@ export default function Opportunity360({ params }: { params: Promise<{ id: strin
             {d.state !== "REPORTED_APPROVED" && <Button variant="secondary" onClick={() => setOutcome("REPORTED_DECLINED")}>Declined…</Button>}
             <Button variant="ghost" onClick={() => setOutcome("WITHDRAWN")}>Customer withdrew</Button>
           </div>
+          <p className="mt-3 text-[12px] text-muted">Approved and disbursed are your institution&apos;s own outcomes, reported back to WEZA and to the customer. WEZA does not make a credit decision and never moves money.</p>
         </Card>
       )}
 
@@ -142,12 +199,12 @@ export default function Opportunity360({ params }: { params: Promise<{ id: strin
         </Card>
       </div>
 
-      <InfoRequestsCard d={d} id={id} onChange={(r: any, msg: string) => { o.setData(r); toast(msg); }} />
+      <InfoRequestsCard d={d} id={id} ask={ask} setAsk={setAsk} onChange={(r: any, msg: string) => { o.setData(r); toast(msg); }} />
 
-      <Card title="Activity">
+      <Card title="Internal notes and activity" subtitle="Your institution's record of this opportunity. The customer sees only the status, not your notes.">
         <ol className="space-y-2 border-l-2 border-line pl-4">
           {d.activity.map((a: any, i: number) => (
-            <li key={i} className="text-[14px]"><span className="font-medium">{STATE_LABEL[a.kind] || a.kind.replace(/_/g, " ").toLowerCase()}</span> <span className="text-muted">· {a.actor} · {dateTime(a.at)}</span>{a.note && <div className="text-[13px] text-muted">{a.note}</div>}</li>
+            <li key={i} className="text-[14px]"><span className="font-medium">{a.kind === "NOTE" ? "Internal note" : STATE_LABEL[a.kind] || a.kind.replace(/_/g, " ").toLowerCase()}</span> <span className="text-muted">· {a.actor} · {dateTime(a.at)}</span>{a.note && <div className="text-[13px] text-muted">{a.note}</div>}</li>
           ))}
           {d.outcomes.map((x: any, i: number) => (
             <li key={"o" + i} className="text-[14px]"><span className="font-medium">{STATE_LABEL[x.state]}</span> <span className="text-muted">· {x.label} · {dateTime(x.reported_at)}</span>{x.reason && <div className="text-[13px] text-muted">Reason: {x.reason}</div>}{x.terms && <TermsLine terms={x.terms} />}{x.disbursed_amount && <div className="text-[13px] text-muted">Disbursed {money(x.disbursed_amount)}</div>}</li>
@@ -164,8 +221,7 @@ export default function Opportunity360({ params }: { params: Promise<{ id: strin
 const REQUEST_TONE: Record<string, "warning" | "success" | "muted" | "danger"> = { OPEN: "warning", FULFILLED: "success", CANCELLED: "muted", EXPIRED: "danger" };
 const REQUEST_LABEL: Record<string, string> = { OPEN: "Waiting for customer", FULFILLED: "Answered", CANCELLED: "Cancelled", EXPIRED: "Expired — no answer" };
 
-function InfoRequestsCard({ d, id, onChange }: any) {
-  const [open, setOpen] = useState(false);
+function InfoRequestsCard({ d, id, ask, setAsk, onChange }: any) {
   const [err, setErr] = useState<string | null>(null);
   const reqs: any[] = d.info_requests || [];
   if (!d.can_request_info && reqs.length === 0) return null;
@@ -181,7 +237,7 @@ function InfoRequestsCard({ d, id, onChange }: any) {
 
   return (
     <Card title="Requests to customer" subtitle="Ask for a document or an answer through WEZA. The customer chooses whether to respond."
-      action={d.can_request_info ? <Button variant="secondary" onClick={() => setOpen(true)}>Ask the customer…</Button> : undefined}>
+      action={d.can_request_info ? <Button variant="secondary" onClick={() => setAsk(true)}>Ask the customer…</Button> : undefined}>
       {err && <Banner tone="danger" className="mb-3">{err}</Banner>}
       {reqs.length === 0 ? (
         <p className="text-[14px] text-muted">No requests yet.</p>
@@ -206,7 +262,7 @@ function InfoRequestsCard({ d, id, onChange }: any) {
           ))}
         </ul>
       )}
-      <RequestModal open={open} onClose={() => setOpen(false)} id={id} docTypes={d.doc_types} factFields={d.fact_fields} canDocs={d.can_request_documents} onDone={(r: any) => { setOpen(false); onChange(r, "Request sent to customer"); }} />
+      <RequestModal open={ask} onClose={() => setAsk(false)} id={id} docTypes={d.doc_types} factFields={d.fact_fields} canDocs={d.can_request_documents} onDone={(r: any) => { setAsk(false); onChange(r, "Request sent to customer"); }} />
     </Card>
   );
 }
