@@ -26,30 +26,13 @@ type Item = { href: string; label: string; icon: any; perm?: string };
 const INST_NAV: [string, Item[]][] = [
   ["Work", [
     { href: "/institution", label: "Command Centre", icon: LayoutDashboard, perm: "opportunity.read_meta" },
-    { href: "/institution/my-day", label: "My Day", icon: CalendarCheck, perm: "opportunity.update_status" },
-    { href: "/institution/feed", label: "Opportunity Feed", icon: Inbox, perm: "opportunity.read_meta" },
-    { href: "/institution/previews", label: "Previews", icon: Compass, perm: "preview.read" },
-    { href: "/institution/team", label: "Team", icon: Users, perm: "team.manage" },
+    { href: "/institution/feed", label: "Opportunities", icon: Inbox, perm: "opportunity.read_meta" },
   ]],
-  ["Supply", [
-    { href: "/institution/products", label: "Products", icon: Package, perm: "product.read" },
-    { href: "/institution/appetite", label: "Mandates", icon: Target, perm: "appetite.read" },
-    { href: "/institution/sandbox", label: "Sandbox", icon: FlaskConical, perm: "sandbox.run" },
-  ]],
-  ["Intelligence", [
-    { href: "/institution/radius", label: "Opportunity Radius", icon: Radar, perm: "analytics.read" },
-    { href: "/institution/demand", label: "Demand Intelligence", icon: Map, perm: "analytics.read" },
-    { href: "/institution/product-opportunity", label: "Product Opportunity", icon: Briefcase, perm: "analytics.read" },
-    { href: "/institution/insights", label: "Insights", icon: Activity, perm: "analytics.read" },
-    { href: "/institution/reports", label: "Outcomes & reports", icon: BarChart3, perm: "analytics.read" },
+  ["Configure", [
+    { href: "/institution/products", label: "Products & appetite", icon: Package, perm: "product.read" },
+    { href: "/institution/team", label: "Team & routing", icon: Users, perm: "team.manage" },
   ]],
   ["Workspace", [
-    { href: "/institution/onboarding", label: "Activation", icon: ClipboardCheck },
-    { href: "/institution/users", label: "Users & roles", icon: Users },
-    { href: "/institution/routing", label: "Routing & targets", icon: GitBranch },
-    { href: "/institution/notifications", label: "Notifications", icon: Bell },
-    { href: "/institution/billing", label: "Billing", icon: Receipt, perm: "billing.view" },
-    { href: "/institution/audit", label: "Consent & access log", icon: ShieldCheck, perm: "consent.audit" },
     { href: "/institution/settings", label: "Settings", icon: Settings },
   ]],
 ];
