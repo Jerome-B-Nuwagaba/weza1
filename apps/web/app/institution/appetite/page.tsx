@@ -36,6 +36,7 @@ export default function Appetites() {
                   <div className="flex gap-1"><StateBadge state={x.lifecycle_status} />{x.lifecycle_status === "ACTIVE" && <StateBadge state={x.capacity_state} label={`Capacity ${x.capacity_state.toLowerCase()}`} />}</div>
                 </div>
                 <div className="mt-1 text-[13px] text-muted">v{x.active_version ?? x.latest_version} · {x.criteria} criteria · min match {x.min_match_score}{x.latest_status !== "APPROVED" && x.latest_version !== x.active_version ? ` · v${x.latest_version} ${x.latest_status.toLowerCase()}` : ""}</div>
+                {x.lifecycle_status === "ACTIVE" && x.demand?.message && <div className="mt-1 text-[13px] text-muted">{x.demand.message}</div>}
                 <dl className="mt-3 space-y-1 text-[13px]">
                   <div className="flex gap-2"><dt className="text-muted">Products</dt><dd className="font-medium text-ink">{x.products?.length ? x.products.map((p: any) => p.name).join(", ") : "—"}</dd></div>
                   <div className="flex gap-2"><dt className="text-muted">Customer type</dt><dd className="font-medium text-ink">{one(x.customer_type) ? CUSTOMER_TYPE[one(x.customer_type)] || text(one(x.customer_type)) : "Any"}</dd></div>

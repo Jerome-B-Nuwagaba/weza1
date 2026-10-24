@@ -137,6 +137,7 @@ export default function CommandCentre() {
                       {m.products.length ? m.products.map((x: any) => x.name).join(", ") : "No products linked"}
                       {m.criteria?.length ? ` · ${m.criteria.map((c: any) => FIELD_META[c.field]?.label || c.field).slice(0, 3).join(", ")}` : ""}
                     </div>
+                    {m.demand?.message && <div className="text-[13px] text-muted">{m.demand.message}</div>}
                   </div>
                   <div className="flex shrink-0 gap-1">
                     <StateBadge state={m.status} />
