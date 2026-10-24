@@ -1,15 +1,15 @@
 "use client";
 
 import {
-  Activity, BarChart3, Bell, BookOpen, Briefcase, Building2, CalendarCheck, ClipboardCheck, Compass, Cpu, FileSearch,
-  FlaskConical, Gauge, GitBranch, Inbox, Landmark, LayoutDashboard, LifeBuoy, LogOut, Map, Menu, MessageSquareText,
-  Network, Package, Radar, Receipt, Scale, Settings, ShieldAlert, ShieldCheck, Sliders, Target, Users, Wrench, X,
+  Bell, BookOpen, Building2, ClipboardCheck, Cpu, FileSearch, Gauge, Inbox, Landmark, LayoutDashboard, LifeBuoy,
+  LogOut, Menu, MessageSquareText, Network, Package, Scale, Settings, ShieldAlert, Sliders, Users, Wrench, X,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createContext, useContext, useEffect, useState } from "react";
 import { api, ApiError, staffLogout, tokens } from "@/lib/api";
 import { ago } from "@/lib/format";
+import { areaEntry, areaFor, NAV_AREAS, type NavArea } from "@/lib/institutionNav";
 import { Logo } from "./Logo";
 import { Badge, Button, Card, cx, Loading } from "./ui";
 
@@ -22,20 +22,21 @@ export type Me = {
 const MeCtx = createContext<{ me: Me; can: (p: string) => boolean; refresh: () => void } | null>(null);
 export const useMe = () => useContext(MeCtx)!;
 
-type Item = { href: string; label: string; icon: any; perm?: string };
-const INST_NAV: [string, Item[]][] = [
-  ["Work", [
-    { href: "/institution", label: "Command Centre", icon: LayoutDashboard, perm: "opportunity.read_meta" },
-    { href: "/institution/feed", label: "Opportunities", icon: Inbox, perm: "opportunity.read_meta" },
-  ]],
-  ["Configure", [
-    { href: "/institution/products", label: "Products & appetite", icon: Package, perm: "product.read" },
-    { href: "/institution/team", label: "Team & routing", icon: Users, perm: "team.manage" },
-  ]],
-  ["Workspace", [
-    { href: "/institution/settings", label: "Settings", icon: Settings },
-  ]],
+type Item = { href: string; label: string; icon: any; perm?: string; section?: NavArea["key"] };
+// The institution sidebar has one entry per workspace section. Its target, label and visibility come from
+// lib/institutionNav, the same source the section tabs use; the page a section opens on depends on the role.
+const SECTION_ICONS: Record<NavArea["key"], any> = {
+  command: LayoutDashboard, opportunities: Inbox, products: Package, team: Users, settings: Settings,
+};
+const INST_GROUPS: [string, NavArea["key"][]][] = [
+  ["Work", ["command", "opportunities"]],
+  ["Configure", ["products", "team"]],
+  ["Workspace", ["settings"]],
 ];
+const INST_NAV: [string, Item[]][] = INST_GROUPS.map(([group, keys]) => [group, keys.map((key) => {
+  const a = NAV_AREAS.find((x) => x.key === key)!;
+  return { href: a.tabs[0].href, label: a.label, icon: SECTION_ICONS[key], section: key };
+})]);
 const ADMIN_NAV: [string, Item[]][] = [
   ["Network", [
     { href: "/admin", label: "Control Centre", icon: Gauge },
@@ -126,18 +127,21 @@ export function StaffShell({ area, children }: { area: "institution" | "admin" |
   const can = (p?: string) => !p || me.permissions.includes(p);
   const nav = area === "admin" ? ADMIN_NAV : area === "staff" ? STAFF_NAV : INST_NAV;
   const home = area === "admin" ? "/admin" : area === "staff" ? "/staff/institutions" : "/institution";
-  const active = (href: string) => (href === "/institution" || href === "/admin" ? pathname === href : pathname.startsWith(href));
+  const here = areaFor(pathname)?.key;
+  const active = (i: Item) => (i.section ? i.section === here : i.href === "/admin" ? pathname === i.href : pathname.startsWith(i.href));
+  // A section leads to the first page of it this person may open, and is hidden when there is none.
+  const target = (i: Item) => (i.section ? areaEntry(NAV_AREAS.find((a) => a.key === i.section)!, can) : i.href);
 
   const sidebar = (
     <nav className="flex h-full flex-col gap-5 overflow-y-auto px-3 py-4 scroll-thin">
       {nav.map(([group, items]) => {
-        const visible = items.filter((i) => can(i.perm));
+        const visible = items.filter((i) => (i.section ? !!target(i) : can(i.perm)));
         if (!visible.length) return null;
         return (
           <div key={group}>
             <div className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wider text-muted">{group}</div>
             {visible.map((i) => (
-              <Link key={i.href} href={i.href} className={cx("flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[14px]", active(i.href) ? "bg-blue-50 font-medium text-blue-800" : "text-ink hover:bg-canvas")}>
+              <Link key={i.href} href={target(i) ?? i.href} aria-current={active(i) ? "page" : undefined} className={cx("flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[14px]", active(i) ? "bg-blue-50 font-medium text-blue-800" : "text-ink hover:bg-canvas")}>
                 <i.icon className="h-4 w-4 shrink-0 opacity-80" />
                 {i.label}
               </Link>
