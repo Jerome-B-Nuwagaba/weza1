@@ -1,20 +1,12 @@
 "use client";
 
-import { ArrowUp, Sparkles, Wrench } from "lucide-react";
+import { ArrowRight, Search, Wrench } from "lucide-react";
 import { useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { Badge, Banner, cx } from "./ui";
 
-/** Questions the read-only assistant can answer from its tools — never actions it cannot take. */
-const SUGGESTIONS = [
-  "Summarise today's opportunities",
-  "Show my best SME opportunities",
-  "What sits just outside our appetite?",
-  "How is the team's queue?",
-];
-
-/** Ask Weza, as the Command Centre's centrepiece: one prompt, suggestion chips, and the answers below it.
- * Read-only: it answers from the data the person may already see and never changes anything. */
+/** Ask Weza, as drawn on the Command Centre: one prompt with a search glyph and a send button in the W's light
+ * green. Read-only — it answers from data the person may already see and never changes anything. */
 export function InstitutionAskPanel() {
   const [question, setQuestion] = useState("");
   const [items, setItems] = useState<{ q: string; a?: any; err?: string }[]>([]);
@@ -37,39 +29,27 @@ export function InstitutionAskPanel() {
   }
 
   return (
-    <section aria-label="Ask Weza" className="mx-auto w-full max-w-[1020px]">
+    <section aria-label="Ask Weza assistant">
       <form onSubmit={(event) => { event.preventDefault(); void ask(question); }}
-        className="flex h-16 items-center gap-3 rounded-full border border-line bg-surface pl-6 pr-2.5 shadow-sm transition-shadow focus-within:border-blue-400 focus-within:shadow-[0_0_0_4px_var(--blue-100)]">
-        <Sparkles className="h-6 w-6 shrink-0 text-blue-600" strokeWidth={1.75} aria-hidden />
+        className="flex h-16 items-center gap-3 rounded-xl border border-line bg-surface pl-4 pr-2 sm:h-[72px] sm:gap-4 sm:pl-6 focus-within:border-evergreen focus-within:ring-[3px] focus-within:ring-blue-100">
+        <Search className="h-6 w-6 shrink-0 text-muted" strokeWidth={1.75} aria-hidden />
         <input value={question} onChange={(event) => setQuestion(event.target.value)} aria-label="Ask Weza"
-          placeholder="Ask Weza anything or tell it what to do…"
-          className="h-full min-w-0 flex-1 bg-transparent text-[17px] text-ink placeholder:text-[#94a3b8] focus:!border-0 focus:!shadow-none focus:outline-none" />
-        <button type="submit" disabled={busy || !question.trim()} aria-label="Send question"
-          className={cx("flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition-colors",
-            question.trim() ? "bg-blue-600 text-white hover:bg-blue-700" : "bg-canvas text-muted")}>
-          <ArrowUp className="h-5 w-5" />
+          placeholder="Ask Weza anything or tell me what to do..."
+          className="h-full min-w-0 flex-1 bg-transparent text-[16px] text-ink sm:text-[18px] placeholder:text-[#7a8783] focus:!border-0 focus:!shadow-none focus:outline-none" />
+        <button type="submit" disabled={busy} aria-label="Send question"
+          className={cx("flex h-12 w-12 shrink-0 items-center sm:h-14 sm:w-[60px] justify-center rounded-lg bg-leaf text-white transition-colors hover:bg-leaf-press active:bg-olive disabled:opacity-60")}>
+          <ArrowRight className="h-6 w-6" strokeWidth={2} />
         </button>
       </form>
 
-      {items.length === 0 && (
-        <div className="mt-5 flex flex-wrap justify-center gap-3">
-          {SUGGESTIONS.map((suggestion) => (
-            <button key={suggestion} type="button" onClick={() => ask(suggestion)}
-              className="rounded-full border border-line bg-surface px-4 py-2 text-[14px] text-[#475569] shadow-xs transition-colors hover:border-blue-400 hover:text-blue-700 dark:text-muted">
-              {suggestion}
-            </button>
-          ))}
-        </div>
-      )}
-
       {items.length > 0 && (
-        <div className="mt-5 max-h-[28rem] space-y-4 overflow-y-auto rounded-2xl border border-line bg-surface p-5 shadow-xs scroll-thin" aria-live="polite">
+        <div className="mt-4 max-h-[28rem] space-y-4 overflow-y-auto rounded-xl border border-line bg-surface p-5 scroll-thin" aria-live="polite">
           {items.map((item, index) => (
             <div key={`${item.q}-${index}`} className="space-y-2">
-              <div className="ml-auto w-fit max-w-[80%] rounded-2xl rounded-tr-md bg-blue-600 px-4 py-2.5 text-[14px] text-white">{item.q}</div>
+              <div className="ml-auto w-fit max-w-[80%] rounded-xl rounded-tr-sm bg-evergreen px-4 py-2.5 text-[15px] text-white">{item.q}</div>
               {item.err ? <Banner tone="danger">{item.err}</Banner> : item.a ? (
-                <div className="max-w-[90%] rounded-2xl rounded-tl-md border border-line bg-canvas px-4 py-3">
-                  <p className="whitespace-pre-line text-[14px] leading-6 text-ink">{item.a.answer}</p>
+                <div className="max-w-[90%] rounded-xl rounded-tl-sm border border-line bg-soft px-4 py-3">
+                  <p className="whitespace-pre-line text-[15px] leading-6 text-ink">{item.a.answer}</p>
                   <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-line pt-2.5 text-[12px] text-muted">
                     <Wrench className="h-3.5 w-3.5" aria-hidden />
                     {(item.a.tool_calls || []).map((tool: any, toolIndex: number) => <Badge key={toolIndex} tone="muted">{tool.tool}</Badge>)}

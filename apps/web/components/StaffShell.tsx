@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  Box, ChevronDown, House, Target,
+  BarChart3, Box, ChevronDown, ChevronRight, House, Landmark as Bank,
   Bell, BookOpen, Building2, ClipboardCheck, Cpu, FileSearch, Gauge, Inbox, Landmark, LayoutDashboard, LifeBuoy,
   LogOut, Menu, MessageSquareText, Network, Package, Scale, Settings, ShieldAlert, Sliders, Users, Wrench, X,
 } from "lucide-react";
@@ -27,7 +27,7 @@ type Item = { href: string; label: string; icon: any; perm?: string; section?: N
 // The institution sidebar has one entry per workspace section. Its target, label and visibility come from
 // lib/institutionNav, the same source the section tabs use; the page a section opens on depends on the role.
 const SECTION_ICONS: Record<NavArea["key"], any> = {
-  command: House, opportunities: Target, products: Box, team: Users, settings: Settings,
+  command: House, opportunities: BarChart3, products: Box, team: Users, settings: Settings,
 };
 const INST_GROUPS: [string, NavArea["key"][]][] = [
   ["Work", ["command", "opportunities"]],
@@ -212,102 +212,162 @@ export function StaffShell({ area, children }: { area: "institution" | "admin" |
 const initials = (name: string) =>
   name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]!.toUpperCase()).join("") || "?";
 
-/** The institution workspace frame (2026-10 mockups): a full-width top bar — wordmark, the section you are in,
- * today's date, notifications and your account — over a narrow icon rail with one icon per section. */
+/** The W monogram from the supplied brand artwork, exported at the exact size it is shown (1x/2x/3x), so every
+ * screen maps it pixel for pixel — no browser rescaling, no soft edges on low-end devices. */
+function Monogram({ height }: { height: 28 | 32 }) {
+  const width = height === 32 ? 65 : 57;
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={`/brand/weza-monogram-${height}.png`} srcSet={`/brand/weza-monogram-${height}.png 1x, /brand/weza-monogram-${height}@2x.png 2x, /brand/weza-monogram-${height}@3x.png 3x`}
+      width={width} height={height} alt="WEZA" draggable={false} className="block select-none" />
+  );
+}
+
+const COLLAPSE_KEY = "weza.nav.collapsed";
+
+/** The institution workspace frame — the "WEZA Command Centre navigation update" and "Collapsed Command Centre
+ * with W icon rail" designs: a soft-surface sidebar with the W monogram (expanded with labels, or collapsed to an
+ * icon rail; the chevron on the current item toggles it), and a white top bar with the page title, the
+ * institution, notifications and the signed-in person. */
 function InstitutionFrame({ me, items, target, active, section, open, setOpen, bell, setBell, reload, children }: {
   me: Me; items: Item[]; target: (i: Item) => string | undefined; active: (i: Item) => boolean; section: string;
   open: boolean; setOpen: (v: boolean) => void; bell: boolean; setBell: (v: boolean) => void; reload: () => void;
   children: React.ReactNode;
 }) {
-  const [menu, setMenu] = useState(false);
-  const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" });
-  const live = !me.institution || me.institution.status === "ACTIVE";
+  const [menu, setMenu] = useState<null | "account" | "institution">(null);
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    try { setCollapsed(window.localStorage.getItem(COLLAPSE_KEY) === "1"); } catch { /* storage unavailable */ }
+  }, []);
+  const toggle = () => setCollapsed((c) => {
+    try { window.localStorage.setItem(COLLAPSE_KEY, c ? "0" : "1"); } catch { /* storage unavailable */ }
+    return !c;
+  });
   useEffect(() => {
     if (!menu) return;
-    const close = (e: KeyboardEvent) => e.key === "Escape" && setMenu(false);
+    const close = (e: KeyboardEvent) => e.key === "Escape" && setMenu(null);
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, [menu]);
+  const live = !me.institution || me.institution.status === "ACTIVE";
+  const first = me.full_name.split(/\s+/)[0] || me.full_name;
+  const rail = collapsed ? "lg:w-24" : "lg:w-[288px]";
+
+  const navList = (labels: boolean) => (
+    <ul className="space-y-2 px-3">
+      {items.map((i) => {
+        const on = active(i);
+        const Icon = i.icon;
+        return (
+          <li key={i.label} className="relative flex items-center">
+            <Link href={target(i) ?? i.href} aria-label={labels ? undefined : i.label} aria-current={on ? "page" : undefined}
+              title={labels ? undefined : i.label}
+              className={cx("flex h-12 items-center rounded-xl text-[16px] transition-colors",
+                labels ? cx("w-full gap-4 px-4", on && "pr-11") : "w-12 justify-center",
+                on ? "bg-blue-50 font-semibold text-ink" : "font-medium text-[#3c4744] hover:bg-blue-50/60 hover:text-ink dark:text-muted")}>
+              <Icon className={cx("h-[22px] w-[22px] shrink-0", on ? "text-evergreen" : "text-[#4a5552] dark:text-muted")}
+                strokeWidth={2} fill={on && i.section === "command" ? "currentColor" : "none"} aria-hidden />
+              {labels && <span className="min-w-0 flex-1 truncate">{i.label}</span>}
+            </Link>
+            {on && (
+              <button type="button" onClick={toggle} aria-label={collapsed ? "Expand menu" : "Collapse menu"} aria-expanded={!collapsed}
+                className={cx("hidden h-8 w-8 items-center justify-center rounded-lg text-ink hover:bg-blue-50 lg:flex",
+                  labels ? "absolute right-3" : "ml-1")}>
+                <ChevronRight className="h-5 w-5" strokeWidth={2} />
+              </button>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
 
   return (
     <div data-skin="institution" className="min-h-screen bg-canvas text-ink">
-      <header className="fixed inset-x-0 top-0 z-30 flex h-16 items-center gap-3 border-b border-line bg-surface px-4 sm:px-6">
-        <button className="-ml-1 rounded-lg p-2 text-muted hover:bg-canvas lg:hidden" onClick={() => setOpen(true)} aria-label="Open menu"><Menu className="h-5 w-5" /></button>
-        <Link href="/institution" className="text-[22px] font-extrabold tracking-[-0.01em] text-blue-600" aria-label="WEZA home">WEZA</Link>
-        <span aria-hidden className="hidden h-6 w-px bg-line sm:block" />
-        <span className="hidden min-w-0 truncate text-[17px] font-medium text-ink sm:block">{section}</span>
-        {!live && (
-          <Link href="/institution/onboarding" className="hidden sm:inline-flex">
-            <Badge tone="warning" dot>Not live yet</Badge>
-          </Link>
-        )}
-        <div className="ml-auto flex items-center gap-1 sm:gap-3">
-          <span className="hidden text-[15px] text-ink md:block">{today}</span>
-          <button className="relative rounded-lg p-2 text-muted hover:bg-canvas hover:text-ink" onClick={() => setBell(!bell)} aria-label="Notifications">
-            <Bell className="h-5 w-5" />
-            {me.unread_notifications > 0 && <span className="num absolute right-1 top-1 min-w-4 rounded-full bg-danger px-1 text-center text-[10px] font-bold leading-4 text-white">{me.unread_notifications > 99 ? "99+" : me.unread_notifications}</span>}
-          </button>
-          <div className="relative">
-            <button onClick={() => setMenu(!menu)} className="flex items-center gap-1.5 rounded-full p-0.5 hover:bg-canvas" aria-haspopup="menu" aria-expanded={menu} aria-label="Account">
-              <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[#1e3a8a] text-[14px] font-semibold text-white">{initials(me.full_name)}</span>
-              <ChevronDown className="mr-1 hidden h-4 w-4 text-muted sm:block" />
-            </button>
-            {menu && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setMenu(false)} />
-                <div role="menu" className="absolute right-0 top-12 z-50 w-72 overflow-hidden rounded-2xl border border-line bg-surface shadow-lg">
-                  <div className="border-b border-line px-4 py-3.5">
-                    <div className="truncate text-[15px] font-semibold text-ink">{me.full_name}</div>
-                    <div className="truncate text-[13px] text-muted">{me.email}</div>
-                    <div className="mt-1 truncate text-[13px] text-muted">{me.roles.map((r) => me.role_labels[r]).join(", ")}</div>
-                    {me.institution && <div className="mt-2 flex items-center gap-2 text-[13px] text-ink">{me.institution.name}{!live && <Badge tone="warning">{me.institution.status.toLowerCase().replace(/_/g, " ")}</Badge>}</div>}
-                  </div>
-                  <Link role="menuitem" href="/institution/settings" onClick={() => setMenu(false)} className="flex items-center gap-2.5 px-4 py-2.5 text-[14px] text-ink hover:bg-canvas"><Settings className="h-4 w-4 text-muted" />Settings</Link>
-                  <button role="menuitem" onClick={staffLogout} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-[14px] text-ink hover:bg-canvas"><LogOut className="h-4 w-4 text-muted" />Sign out</button>
-                </div>
-              </>
-            )}
-          </div>
+      <aside aria-label="Workspace" className={cx("fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-line bg-soft lg:flex", rail)}>
+        <div className={cx("flex h-20 shrink-0 items-center", collapsed ? "justify-center" : "px-8")}>
+          <Link href="/institution" aria-label="WEZA — Command Centre"><Monogram height={32} /></Link>
         </div>
-      </header>
-
-      <nav aria-label="Workspace" className="fixed bottom-0 left-0 top-16 z-20 hidden w-[76px] flex-col items-center gap-2 border-r border-line bg-surface py-5 lg:flex">
-        {items.map((i) => {
-          const on = active(i);
-          return (
-            <Link key={i.label} href={target(i) ?? i.href} aria-label={i.label} aria-current={on ? "page" : undefined}
-              className={cx("group relative flex h-12 w-12 items-center justify-center rounded-xl transition-colors",
-                on ? "bg-blue-50 text-blue-600" : "text-[#475569] hover:bg-canvas hover:text-ink dark:text-muted")}>
-              <i.icon className="h-[22px] w-[22px]" strokeWidth={1.75} />
-              <span role="tooltip" className="pointer-events-none absolute left-full top-1/2 z-50 ml-3 -translate-y-1/2 whitespace-nowrap rounded-md bg-navy px-2.5 py-1 text-[12px] font-medium text-surface opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">{i.label}</span>
-            </Link>
-          );
-        })}
-      </nav>
+        <nav aria-label="Workspace sections" className="mt-3">{navList(!collapsed)}</nav>
+      </aside>
 
       {open && (
         <div className="fixed inset-0 z-40 bg-black/40 lg:hidden" onClick={() => setOpen(false)}>
-          <aside className="h-full w-72 border-r border-line bg-surface" onClick={(e) => e.stopPropagation()}>
-            <div className="flex h-16 items-center justify-between border-b border-line px-5">
-              <span className="text-[22px] font-extrabold text-blue-600">WEZA</span>
-              <button onClick={() => setOpen(false)} aria-label="Close menu" className="rounded-lg p-1.5 text-muted hover:bg-canvas"><X className="h-5 w-5" /></button>
+          <aside className="h-full w-72 border-r border-line bg-soft" onClick={(e) => e.stopPropagation()}>
+            <div className="flex h-16 items-center justify-between px-6">
+              <Monogram height={28} />
+              <button onClick={() => setOpen(false)} aria-label="Close menu" className="rounded-lg p-2 text-muted hover:bg-blue-50"><X className="h-5 w-5" /></button>
             </div>
-            <nav aria-label="Workspace" className="space-y-1 p-3">
-              {items.map((i) => (
-                <Link key={i.label} href={target(i) ?? i.href} aria-current={active(i) ? "page" : undefined}
-                  className={cx("flex items-center gap-3 rounded-xl px-3 py-2.5 text-[15px] font-medium", active(i) ? "bg-blue-50 text-blue-600" : "text-ink hover:bg-canvas")}>
-                  <i.icon className="h-5 w-5" strokeWidth={1.75} />{i.label}
-                </Link>
-              ))}
-            </nav>
+            <nav aria-label="Workspace sections" className="mt-2">{navList(true)}</nav>
           </aside>
         </div>
       )}
 
-      {bell && <NotificationPanel area="institution" top="top-16" onClose={() => { setBell(false); reload(); }} />}
-      <main className="pt-16 lg:pl-[76px]">
-        <div className="mx-auto w-full max-w-[1440px] px-4 py-6 sm:px-8 sm:py-8">{children}</div>
-      </main>
+      <div className={cx("transition-[padding] duration-150", collapsed ? "lg:pl-24" : "lg:pl-[288px]")}>
+        <header className="sticky top-0 z-20 border-b border-line bg-surface">
+          <div className="flex h-16 items-center gap-3 px-4 sm:h-20 sm:px-8">
+            <button className="-ml-1 rounded-lg p-2 text-muted hover:bg-soft lg:hidden" onClick={() => setOpen(true)} aria-label="Open menu"><Menu className="h-5 w-5" /></button>
+            <span className="lg:hidden"><Monogram height={28} /></span>
+            <div className="hidden min-w-0 truncate text-[22px] font-semibold tracking-[-0.01em] text-ink sm:block sm:text-[26px]">{section}</div>
+            <div className="ml-auto flex items-center gap-2 sm:gap-4">
+              <span aria-hidden className="hidden h-10 w-px bg-line md:block" />
+              {me.institution && (
+                <div className="relative hidden md:block">
+                  <button onClick={() => setMenu(menu === "institution" ? null : "institution")} aria-haspopup="menu" aria-expanded={menu === "institution"}
+                    className="flex h-12 items-center gap-3 rounded-xl border border-line bg-surface px-4 text-[15px] font-medium text-ink hover:bg-soft">
+                    <Bank className="h-5 w-5 text-ink" strokeWidth={1.75} aria-hidden />
+                    <span className="max-w-[12rem] truncate">{me.institution.name}</span>
+                    {!live && <Badge tone="warning" dot>Not live</Badge>}
+                    <ChevronDown className="h-4 w-4 text-muted" strokeWidth={2} aria-hidden />
+                  </button>
+                  {menu === "institution" && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
+                      <div role="menu" className="absolute right-0 top-14 z-50 w-72 overflow-hidden rounded-xl border border-line bg-surface shadow-lg">
+                        <div className="border-b border-line px-4 py-3.5">
+                          <div className="truncate text-[15px] font-semibold">{me.institution.name}</div>
+                          <div className="mt-1"><Badge tone={live ? "success" : "warning"} dot>{live ? "Live on WEZA" : me.institution.status.toLowerCase().replace(/_/g, " ")}</Badge></div>
+                        </div>
+                        <Link role="menuitem" href="/institution/settings" onClick={() => setMenu(null)} className="block px-4 py-3 text-[14px] hover:bg-soft">Organisation settings</Link>
+                        {!live && <Link role="menuitem" href="/institution/onboarding" onClick={() => setMenu(null)} className="block px-4 py-3 text-[14px] hover:bg-soft">Activation checklist</Link>}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+              <button className="relative rounded-xl p-2.5 text-ink hover:bg-soft" onClick={() => setBell(!bell)}
+                aria-label={me.unread_notifications > 0 ? `Notifications (${me.unread_notifications} unread)` : "Notifications"}>
+                <Bell className="h-6 w-6" strokeWidth={1.75} />
+                {me.unread_notifications > 0 && <span aria-hidden className="absolute right-2.5 top-2 h-2.5 w-2.5 rounded-full bg-danger-dot ring-2 ring-surface" />}
+              </button>
+              <div className="relative">
+                <button onClick={() => setMenu(menu === "account" ? null : "account")} aria-haspopup="menu" aria-expanded={menu === "account"} aria-label="Account"
+                  className="flex items-center gap-3 rounded-full py-1 pl-1 pr-2 hover:bg-soft">
+                  <span className="flex h-11 w-11 items-center justify-center rounded-full bg-leaf-tint text-[15px] font-semibold text-evergreen">{initials(me.full_name)}</span>
+                  <span className="hidden text-[15px] font-medium text-ink sm:block">{first}</span>
+                  <ChevronDown className="hidden h-4 w-4 text-muted sm:block" strokeWidth={2} aria-hidden />
+                </button>
+                {menu === "account" && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
+                    <div role="menu" className="absolute right-0 top-14 z-50 w-72 overflow-hidden rounded-xl border border-line bg-surface shadow-lg">
+                      <div className="border-b border-line px-4 py-3.5">
+                        <div className="truncate text-[15px] font-semibold">{me.full_name}</div>
+                        <div className="truncate text-[13px] text-muted">{me.email}</div>
+                        <div className="mt-1 truncate text-[13px] text-muted">{me.roles.map((x) => me.role_labels[x]).join(", ")}</div>
+                      </div>
+                      <Link role="menuitem" href="/institution/settings" onClick={() => setMenu(null)} className="flex items-center gap-2.5 px-4 py-3 text-[14px] hover:bg-soft"><Settings className="h-4 w-4 text-muted" />Settings</Link>
+                      <button role="menuitem" onClick={staffLogout} className="flex w-full items-center gap-2.5 px-4 py-3 text-left text-[14px] hover:bg-soft"><LogOut className="h-4 w-4 text-muted" />Sign out</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </header>
+        {bell && <NotificationPanel area="institution" top="top-20" onClose={() => { setBell(false); reload(); }} />}
+        <main className="w-full max-w-[1560px] px-4 py-6 sm:px-8 sm:py-8">{children}</main>
+      </div>
     </div>
   );
 }

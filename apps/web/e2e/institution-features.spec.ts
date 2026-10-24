@@ -113,8 +113,8 @@ test("reports export downloads a CSV without customer identity", async ({ page }
 test("officers don't get an export they aren't allowed to use", async ({ page }) => {
   await signIn(page, "officer@lakeside.demo");
   await page.goto("/institution/feed");
-  await expect(page.getByRole("heading", { name: "Opportunity Feed" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Export CSV/ })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Opportunities", level: 1 })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Export/ })).toHaveCount(0);
 });
 
 test("a charge is disputed by the institution", async ({ page, request }) => {

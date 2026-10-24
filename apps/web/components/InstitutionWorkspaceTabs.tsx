@@ -25,7 +25,7 @@ export function InstitutionWorkspaceTabs() {
             <li key={tab.href}>
               <Link href={tab.href} aria-current={active ? "page" : undefined}
                 className={cx("flex h-11 items-center whitespace-nowrap rounded-lg border px-5 text-[15px] font-medium transition-colors",
-                  active ? "border-blue-600 bg-surface text-blue-600 shadow-xs" : "border-transparent text-[#334155] hover:bg-surface hover:text-ink dark:text-muted")}>
+                  active ? "border-evergreen bg-surface font-semibold text-evergreen" : "border-transparent text-[#3c4744] hover:bg-soft hover:text-ink dark:text-muted")}>
                 {tab.label}
               </Link>
             </li>

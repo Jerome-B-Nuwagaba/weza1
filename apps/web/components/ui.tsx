@@ -31,8 +31,9 @@ export function Button({
     crisp
       ? size === "sm" ? "h-9 px-3.5 text-[13px]" : size === "lg" ? "h-12 px-6 text-base" : "h-11 px-5 text-[15px]"
       : size === "sm" ? "h-8 px-3 text-[13px]" : size === "lg" ? "h-12 px-6 text-base" : "h-10 px-4 text-sm",
-    variant === "primary" && cx("bg-blue-600 text-white hover:bg-blue-700 dark:text-[#07111a]", crisp && "shadow-xs"),
-    variant === "secondary" && (crisp ? "border border-line bg-surface text-ink shadow-xs hover:border-[#cfd8e3] hover:bg-canvas"
+    variant === "primary" && (crisp ? "bg-evergreen text-white hover:bg-evergreen-hover active:bg-evergreen-press dark:text-[#06120f]"
+      : "bg-blue-600 text-white hover:bg-blue-700 dark:text-[#07111a]"),
+    variant === "secondary" && (crisp ? "border border-line bg-surface text-evergreen hover:bg-soft active:bg-blue-50"
       : "border border-line bg-surface text-ink hover:bg-blue-50"),
     variant === "ghost" && "text-blue-800 hover:bg-blue-50",
     variant === "danger" && "bg-danger text-white hover:opacity-90",
@@ -56,12 +57,12 @@ export function Button({
 export function Card({ children, className, title, action, subtitle }: { children: ReactNode; className?: string; title?: ReactNode; action?: ReactNode; subtitle?: ReactNode }) {
   if (useSkin() === "crisp")
     return (
-      <section className={cx("rounded-2xl border border-line bg-surface shadow-xs", className)}>
+      <section className={cx("rounded-xl border border-line bg-surface", className)}>
         {(title || action) && (
           <header className="flex items-start justify-between gap-3 px-6 pb-1 pt-5">
             <div className="min-w-0">
-              {title && <h2 className="text-[18px] font-semibold tracking-[-0.01em] text-ink">{title}</h2>}
-              {subtitle && <p className="mt-0.5 text-[14px] text-muted">{subtitle}</p>}
+              {title && <h2 className="text-[20px] font-bold leading-7 tracking-[-0.01em] text-ink">{title}</h2>}
+              {subtitle && <p className="mt-0.5 text-[14px] leading-5 text-muted">{subtitle}</p>}
             </div>
             {action}
           </header>
@@ -123,23 +124,26 @@ const TONES: Record<string, string> = {
   muted: "bg-canvas text-muted border-line",
 };
 
-const CRISP_TONES: Record<string, string> = {
-  neutral: "bg-blue-50 text-blue-700",
-  gold: "bg-gold-100 text-gold-700",
-  success: "bg-success-bg text-success",
-  warning: "bg-warning-bg text-warning",
-  danger: "bg-danger-bg text-danger",
-  muted: "bg-[#f1f4f8] text-muted dark:bg-canvas",
+// [background, label colour, dot colour] — status is never colour alone (brief §4): the label always says it.
+const CRISP_TONES: Record<string, [string, string, string]> = {
+  neutral: ["bg-info-bg", "text-info", "bg-info-dot"],
+  gold: ["bg-warning-bg", "text-warning", "bg-warning-dot"],
+  success: ["bg-success-bg", "text-success", "bg-success-dot"],
+  warning: ["bg-warning-bg", "text-warning", "bg-warning-dot"],
+  danger: ["bg-danger-bg", "text-danger", "bg-danger-dot"],
+  muted: ["bg-soft", "text-muted", "bg-muted"],
 };
 
 export function Badge({ children, tone = "neutral", className, dot }: { children: ReactNode; tone?: keyof typeof TONES | string; className?: string; dot?: boolean }) {
-  if (useSkin() === "crisp")
+  if (useSkin() === "crisp") {
+    const [bg, fg, dotColour] = CRISP_TONES[tone] || CRISP_TONES.neutral;
     return (
-      <span className={cx("inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1 text-[13px] font-medium leading-5", CRISP_TONES[tone] || CRISP_TONES.neutral, className)}>
-        {dot && <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-current" />}
+      <span className={cx("inline-flex h-7 items-center gap-2 whitespace-nowrap rounded-md px-2.5 text-[13px] font-medium", bg, dot ? "text-ink" : fg, className)}>
+        {dot && <span aria-hidden className={cx("h-2 w-2 shrink-0 rounded-full", dotColour)} />}
         {children}
       </span>
     );
+  }
   return (
     <span className={cx("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[12px] font-medium", TONES[tone] || TONES.neutral, className)}>
       {children}
@@ -162,7 +166,7 @@ export function StateBadge({ state, label }: { state?: string | null; label?: st
 export function Stat({ label, value, sub, tone, href }: { label: string; value: ReactNode; sub?: ReactNode; tone?: "gold" | "default"; href?: string }) {
   if (useSkin() === "crisp") {
     const tile = (
-      <div className={cx("h-full rounded-2xl border bg-surface p-5 shadow-xs transition-colors", tone === "gold" ? "border-gold-500/40" : "border-line", href && "hover:border-blue-400")}>
+      <div className={cx("h-full rounded-xl border bg-surface p-5 transition-colors", tone === "gold" ? "border-gold-500/40" : "border-line", href && "hover:border-blue-400")}>
         <div className="text-[14px] font-medium text-muted">{label}</div>
         <div className={cx("num mt-1.5 text-[28px] font-bold leading-none tracking-[-0.02em]", tone === "gold" ? "text-gold-700" : "text-ink")}>{value ?? "—"}</div>
         {sub && <div className="mt-2 text-[13px] text-muted">{sub}</div>}
@@ -183,7 +187,8 @@ export function Stat({ label, value, sub, tone, href }: { label: string; value: 
 export function ScoreRing({ score, size = 44 }: { score: number; size?: number }) {
   const r = (size - 6) / 2;
   const c = 2 * Math.PI * r;
-  const gold = score >= 90;
+  const crisp = useSkin() === "crisp";
+  const gold = score >= 90 && !crisp;
   return (
     <div className="relative inline-flex shrink-0 items-center justify-center" style={{ width: size, height: size }} title={`Match ${Math.round(score)} — fit with current criteria, not an approval`}>
       <svg width={size} height={size} className="-rotate-90">
@@ -275,7 +280,7 @@ export function Banner({ tone = "info", title, children, className }: { tone?: "
       role={tone === "danger" ? "alert" : "status"}
       className={cx(
         "flex gap-3 border text-[14px]",
-        crisp ? "rounded-2xl px-5 py-4" : "rounded-xl px-4 py-3",
+        crisp ? "rounded-xl px-5 py-4" : "rounded-xl px-4 py-3",
         tone === "info" && "border-blue-100 bg-blue-50 text-blue-800",
         tone === "gold" && "border-gold-500/30 bg-gold-100 text-gold-700",
         tone === "warning" && "border-warning/25 bg-warning-bg text-warning",
@@ -296,7 +301,7 @@ export function Banner({ tone = "info", title, children, className }: { tone?: "
 export function EmptyState({ title, children, action }: { title: string; children?: ReactNode; action?: ReactNode }) {
   const crisp = useSkin() === "crisp";
   return (
-    <div className={cx("border border-dashed border-line bg-surface px-6 text-center", crisp ? "rounded-2xl py-12" : "rounded-xl py-10")}>
+    <div className={cx("border border-dashed border-line bg-surface px-6 text-center", crisp ? "rounded-xl py-12" : "rounded-xl py-10")}>
       <div className="text-[15px] font-semibold text-ink">{title}</div>
       {children && <div className="mx-auto mt-1 max-w-lg text-[14px] text-muted">{children}</div>}
       {action && <div className="mt-4">{action}</div>}
@@ -376,7 +381,7 @@ export function Tabs({ tabs, value, onChange }: { tabs: [string, string][]; valu
     return (
       <div className="mb-5 flex gap-2 overflow-x-auto pb-0.5 scroll-thin" role="tablist">
         {tabs.map(([v, l]) => (
-          <button key={v} role="tab" aria-selected={value === v} onClick={() => onChange(v)} className={cx("h-10 whitespace-nowrap rounded-lg border px-4 text-[15px] font-medium transition-colors", value === v ? "border-blue-600 bg-surface text-blue-700 shadow-xs" : "border-transparent text-muted hover:bg-surface hover:text-ink")}>
+          <button key={v} role="tab" aria-selected={value === v} onClick={() => onChange(v)} className={cx("h-10 whitespace-nowrap rounded-lg border px-4 text-[15px] font-medium transition-colors", value === v ? "border-evergreen bg-surface text-evergreen" : "border-transparent text-muted hover:bg-soft hover:text-ink")}>
             {l}
           </button>
         ))}
@@ -396,18 +401,18 @@ export function Tabs({ tabs, value, onChange }: { tabs: [string, string][]; valu
 export function Table({ head, children, empty, bare }: { head: ReactNode[]; children: ReactNode; empty?: boolean; bare?: boolean }) {
   if (useSkin() === "crisp")
     return (
-      <div className={cx("scroll-thin overflow-x-auto bg-surface", !bare && "rounded-2xl border border-line shadow-xs")}>
+      <div className={cx("scroll-thin overflow-x-auto bg-surface", !bare && "rounded-xl border border-line")}>
         <table className="w-full min-w-[640px] text-left text-[14px]">
-          <thead className="border-b border-line bg-[#f8fafc] text-[13px] text-muted dark:bg-canvas">
+          <thead className="border-b border-line bg-soft text-[12px] uppercase tracking-[0.06em] text-muted">
             <tr>
               {head.map((h, i) => (
-                <th key={i} className="whitespace-nowrap px-5 py-3.5 font-medium">
+                <th key={i} className="whitespace-nowrap px-5 py-3.5 font-semibold">
                   {h}
                 </th>
               ))}
             </tr>
           </thead>
-          <tbody className="divide-y divide-line [&>tr]:transition-colors [&>tr:hover]:bg-[#fafbfd] dark:[&>tr:hover]:bg-canvas">{children}</tbody>
+          <tbody className="divide-y divide-line [&>tr]:transition-colors [&>tr:hover]:bg-soft/60">{children}</tbody>
         </table>
         {empty && <div className="px-5 py-10 text-center text-[14px] text-muted">Nothing to show.</div>}
       </div>

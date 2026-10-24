@@ -26,7 +26,7 @@ export const NAV_AREAS: NavArea[] = [
     ],
   },
   {
-    key: "products", label: "Products & appetite",
+    key: "products", label: "Products & Appetite",
     tabs: [
       { href: "/institution/products", label: "Products", perm: "product.read" },
       { href: "/institution/appetite", label: "Appetite", perm: "appetite.read" },
@@ -38,7 +38,7 @@ export const NAV_AREAS: NavArea[] = [
     ],
   },
   {
-    key: "team", label: "Team & routing",
+    key: "team", label: "Team & Routing",
     tabs: [
       { href: "/institution/team", label: "Workload", perm: "team.manage" },
       { href: "/institution/users", label: "People & access" },
