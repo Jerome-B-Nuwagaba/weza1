@@ -3,7 +3,7 @@
 import {
   BarChart3, Box, ChevronDown, ChevronRight, House, Landmark as Bank,
   Bell, BookOpen, Building2, ClipboardCheck, Cpu, FileSearch, Gauge, Inbox, Landmark, LayoutDashboard, LifeBuoy,
-  ChevronsLeft, ChevronsRight, LogOut, Menu, MessageSquareText, Network, Package, Scale, Settings, ShieldAlert, Sliders, Users, Wrench, X,
+  LogOut, Menu, MessageSquareText, Network, Package, Scale, Settings, ShieldAlert, Sliders, Users, Wrench, X,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -12,9 +12,8 @@ import { api, ApiError, staffLogout, tokens } from "@/lib/api";
 import { ago } from "@/lib/format";
 import { ADMIN_SECTIONS, landing, sectionOf, visibleTabs } from "./institutionSections";
 import { areaEntry, areaFor, NAV_AREAS, type NavArea } from "@/lib/institutionNav";
-import { Logo } from "./Logo";
 import { SectionTabs } from "./SectionTabs";
-import { Badge, Button, Card, cx, Loading, SkinProvider } from "./ui";
+import { Badge, Button, Card, cx, HeaderSlot, Loading, SkinProvider } from "./ui";
 
 export type Me = {
   id: string; email: string; full_name: string; kind: "INSTITUTION" | "WEZA"; roles: string[]; permissions: string[];
@@ -52,15 +51,6 @@ const STAFF_NAV: [string, Item[]][] = [
 export function StaffShell({ area, children }: { area: "institution" | "admin" | "staff"; children: React.ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [open, setOpen] = useState(false);
-  // The desktop rail can be collapsed to icons; the choice is a per-browser convenience, so storage failing is harmless.
-  const [compact, setCompact] = useState(false);
-  useEffect(() => {
-    try { setCompact(localStorage.getItem("weza.rail") === "compact"); } catch { /* storage unavailable */ }
-  }, []);
-  const toggleRail = () => setCompact((c) => {
-    try { localStorage.setItem("weza.rail", c ? "full" : "compact"); } catch { /* storage unavailable */ }
-    return !c;
-  });
   const [bell, setBell] = useState(false);
   const [connectionError, setConnectionError] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -129,83 +119,23 @@ export function StaffShell({ area, children }: { area: "institution" | "admin" |
   const here = areaFor(pathname)?.key;
   const active = (i: Item) => i.current ?? (i.section ? i.section === here : i.href === "/admin" ? pathname === i.href : pathname.startsWith(i.href));
   // A section leads to the first page of it this person may open, and is hidden when there is none.
-  const target = (i: Item) => (i.section ? areaEntry(NAV_AREAS.find((a) => a.key === i.section)!, can) : i.href);
-
-  if (area === "institution")
-    return (
-      <MeCtx.Provider value={{ me, can: (p) => can(p), refresh: load }}>
-        <SkinProvider value="crisp">
-          <InstitutionFrame me={me} items={nav.flatMap(([, items]) => items).filter((i) => !!target(i))}
-            target={target} active={active} section={areaFor(pathname)?.label || "Workspace"}
-            open={open} setOpen={setOpen} bell={bell} setBell={setBell} reload={load}>
-            {children}
-          </InstitutionFrame>
-        </SkinProvider>
-      </MeCtx.Provider>
-    );
-
-  const railOf = (narrow: boolean) => (
-    <nav aria-label="Main" className={cx("flex h-full flex-col gap-5 overflow-y-auto py-4 scroll-thin", narrow ? "px-2" : "px-3")}>
-      {nav.map(([group, items]) => {
-        const visible = items.filter((i) => (i.section ? !!target(i) : can(i.perm)));
-        if (!visible.length) return null;
-        return (
-          <div key={group}>
-            <div className={cx("mb-1 px-2 text-[11px] font-semibold uppercase tracking-wider text-muted", narrow && "sr-only")}>{group}</div>
-            {visible.map((i) => (
-              <Link key={i.href} href={i.href} aria-current={active(i) ? "page" : undefined} title={narrow ? i.label : undefined} aria-label={narrow ? i.label : undefined} className={cx("flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[14px]", narrow && "justify-center", active(i) ? "bg-blue-50 font-medium text-blue-800" : "text-ink hover:bg-canvas")}>
-                <i.icon className="h-4 w-4 shrink-0 opacity-80" />
-                {!narrow && i.label}
-              </Link>
-            ))}
-          </div>
-        );
-      })}
-      <button type="button" onClick={toggleRail} aria-label={narrow ? "Expand menu" : "Collapse menu"} title={narrow ? "Expand menu" : "Collapse menu"} className="mt-auto hidden items-center justify-center gap-2 rounded-lg px-2 py-1.5 text-[13px] text-muted hover:bg-canvas lg:flex">
-        {narrow ? <ChevronsRight className="h-4 w-4" /> : <><ChevronsLeft className="h-4 w-4" /> Collapse</>}
-      </button>
-    </nav>
-  );
+  const target = (i: Item) => (i.section ? areaEntry(NAV_AREAS.find((a) => a.key === i.section)!, can) : can(i.perm) ? i.href : undefined);
+  // Every area wears the workspace frame and skin; only the menu, the title and the account links differ.
+  const title = area === "institution"
+    ? areaFor(pathname)?.label || "Workspace"
+    : sectionOf(ADMIN_SECTIONS, pathname)?.label || (area === "staff" ? "WEZA Staff" : "Network Operations");
+  const settingsHref = area === "institution" ? "/institution/settings" : area === "admin" && can("admin.config") ? "/admin/config" : undefined;
 
   return (
     <MeCtx.Provider value={{ me, can: (p) => can(p), refresh: load }}>
-      <div className="flex min-h-screen">
-        <aside className={cx("sticky top-0 hidden h-screen shrink-0 border-r border-line bg-surface lg:block", compact ? "w-16" : "w-60")}>
-          <div className={cx("flex h-14 items-center border-b border-line", compact ? "justify-center px-2" : "px-5")}>{compact ? <Link href={home} aria-label="Home"><Gauge className="h-5 w-5 text-blue-800" /></Link> : <Logo href={home} small />}</div>
-          {railOf(compact)}
-        </aside>
-        {open && (
-          <div className="fixed inset-0 z-40 bg-black/40 lg:hidden" onClick={() => setOpen(false)}>
-            <aside className="h-full w-72 bg-surface" onClick={(e) => e.stopPropagation()}>
-              <div className="flex h-14 items-center justify-between border-b border-line px-4"><Logo small /><button onClick={() => setOpen(false)} aria-label="Close menu"><X className="h-5 w-5" /></button></div>
-              {railOf(false)}
-            </aside>
-          </div>
-        )}
-        <div className="flex min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-line bg-surface/95 px-4 backdrop-blur">
-            <button className="lg:hidden" onClick={() => setOpen(true)} aria-label="Open menu"><Menu className="h-5 w-5" /></button>
-            <div className="min-w-0 flex-1 truncate text-[14px]">
-              {me.institution ? (
-                <span className="font-medium text-ink">{me.institution.name} {me.institution.status !== "ACTIVE" && <Badge tone="warning" className="ml-1">{me.institution.status.toLowerCase().replace(/_/g, " ")}</Badge>}</span>
-              ) : (
-                <span className="font-medium text-ink">{area === "staff" ? "WEZA Staff" : "WEZA Network Operations"}</span>
-              )}
-            </div>
-            <button className="relative rounded-lg p-2 hover:bg-blue-50" onClick={() => setBell(!bell)} aria-label="Notifications">
-              <Bell className="h-5 w-5 text-muted" />
-              {me.unread_notifications > 0 && <span className="num absolute right-1 top-1 rounded-full bg-gold-500 px-1 text-[10px] font-bold text-[#1d1704]">{me.unread_notifications > 99 ? "99+" : me.unread_notifications}</span>}
-            </button>
-            <div className="hidden text-right text-[12px] leading-tight sm:block">
-              <div className="font-medium text-ink">{me.full_name}</div>
-              <div className="text-muted">{me.roles.map((r) => me.role_labels[r]).join(", ")}</div>
-            </div>
-            <button onClick={staffLogout} className="rounded-lg p-2 hover:bg-blue-50" aria-label="Sign out" title="Sign out"><LogOut className="h-4 w-4 text-muted" /></button>
-          </header>
-          {bell && <NotificationPanel area={area} onClose={() => { setBell(false); load(); }} />}
-          <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6">{sections && <SectionTabs sections={sections} pathname={pathname} can={can} />}{children}</main>
-        </div>
-      </div>
+      <SkinProvider value="crisp">
+        <WorkspaceFrame area={area} me={me} home={home} settingsHref={settingsHref}
+          items={nav.flatMap(([, items]) => items).filter((i) => !!target(i))}
+          target={target} active={active} section={title}
+          open={open} setOpen={setOpen} bell={bell} setBell={setBell} reload={load}>
+          {sections ? <HeaderSlot value={<SectionTabs sections={sections} pathname={pathname} can={can} />}>{children}</HeaderSlot> : children}
+        </WorkspaceFrame>
+      </SkinProvider>
     </MeCtx.Provider>
   );
 }
@@ -226,12 +156,13 @@ function Monogram({ height }: { height: 28 | 32 }) {
 
 const COLLAPSE_KEY = "weza.nav.collapsed";
 
-/** The institution workspace frame — the "WEZA Command Centre navigation update" and "Collapsed Command Centre
- * with W icon rail" designs: a soft-surface sidebar with the W monogram (expanded with labels, or collapsed to an
- * icon rail; the chevron on the current item toggles it), and a white top bar with the page title, the
- * institution, notifications and the signed-in person. */
-function InstitutionFrame({ me, items, target, active, section, open, setOpen, bell, setBell, reload, children }: {
-  me: Me; items: Item[]; target: (i: Item) => string | undefined; active: (i: Item) => boolean; section: string;
+/** The workspace frame shared by the institution, WEZA admin and WEZA staff areas — the "WEZA Command Centre
+ * navigation update" and "Collapsed Command Centre with W icon rail" designs: a soft-surface sidebar with the W
+ * monogram (expanded with labels, or collapsed to an icon rail; the chevron on the current item toggles it), and a
+ * white top bar with the page title, the institution (institution users only), notifications and the signed-in person. */
+function WorkspaceFrame({ area, me, home, settingsHref, items, target, active, section, open, setOpen, bell, setBell, reload, children }: {
+  area: "institution" | "admin" | "staff"; me: Me; home: string; settingsHref?: string;
+  items: Item[]; target: (i: Item) => string | undefined; active: (i: Item) => boolean; section: string;
   open: boolean; setOpen: (v: boolean) => void; bell: boolean; setBell: (v: boolean) => void; reload: () => void;
   children: React.ReactNode;
 }) {
@@ -287,7 +218,7 @@ function InstitutionFrame({ me, items, target, active, section, open, setOpen, b
     <div data-skin="institution" className="min-h-screen bg-canvas text-ink">
       <aside aria-label="Workspace" className={cx("fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-line bg-soft lg:flex", rail)}>
         <div className={cx("flex h-20 shrink-0 items-center", collapsed ? "justify-center" : "px-8")}>
-          <Link href="/institution" aria-label="WEZA — Command Centre"><Monogram height={32} /></Link>
+          <Link href={home} aria-label={area === "institution" ? "WEZA — Command Centre" : "WEZA — Home"}><Monogram height={32} /></Link>
         </div>
         <nav aria-label="Workspace sections" className="mt-3">{navList(!collapsed)}</nav>
       </aside>
@@ -357,7 +288,7 @@ function InstitutionFrame({ me, items, target, active, section, open, setOpen, b
                         <div className="truncate text-[13px] text-muted">{me.email}</div>
                         <div className="mt-1 truncate text-[13px] text-muted">{me.roles.map((x) => me.role_labels[x]).join(", ")}</div>
                       </div>
-                      <Link role="menuitem" href="/institution/settings" onClick={() => setMenu(null)} className="flex items-center gap-2.5 px-4 py-3 text-[14px] hover:bg-soft"><Settings className="h-4 w-4 text-muted" />Settings</Link>
+                      {settingsHref && <Link role="menuitem" href={settingsHref} onClick={() => setMenu(null)} className="flex items-center gap-2.5 px-4 py-3 text-[14px] hover:bg-soft"><Settings className="h-4 w-4 text-muted" />Settings</Link>}
                       <button role="menuitem" onClick={staffLogout} className="flex w-full items-center gap-2.5 px-4 py-3 text-left text-[14px] hover:bg-soft"><LogOut className="h-4 w-4 text-muted" />Sign out</button>
                     </div>
                   </>
@@ -366,7 +297,7 @@ function InstitutionFrame({ me, items, target, active, section, open, setOpen, b
             </div>
           </div>
         </header>
-        {bell && <NotificationPanel area="institution" top="top-20" onClose={() => { setBell(false); reload(); }} />}
+        {bell && <NotificationPanel area={area} top="top-20" onClose={() => { setBell(false); reload(); }} />}
         <main className="w-full max-w-[1560px] px-4 py-6 sm:px-8 sm:py-8">{children}</main>
       </div>
     </div>

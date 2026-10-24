@@ -24,7 +24,7 @@ from weza.seed import seed_journey_demo_bank
 # triggers one.
 DEMO_ANSWERS = {**SME_ANSWERS, "identity.nin": "skip"}
 PDF = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF"
-OFFICER = "officer@demobank.demo"
+OFFICER = "officer@demo.bank"
 
 
 @pytest.fixture(scope="module")
@@ -81,7 +81,7 @@ def test_the_officer_works_a_routed_opportunity_from_queue_to_reported_disbursem
     assert view["customer"]["restricted"] is False  # the assigned officer sees the customer
     assert view["customer"]["fields"]["full_name"] == "Grace Nakato"
     assert "documents" in view["customer"]  # the documents shared with this institution
-    assert view["owner"] == "Sarah Namazzi"
+    assert view["owner"] == "Isaac Lukwago"
     assert view["state"] in ("ROUTED", "ASSIGNED")
     # The officer's status ladder, with the status they are on now
     assert [s["label"] for s in view["status_ladder"]] == [
@@ -164,7 +164,7 @@ def test_the_officer_works_a_routed_opportunity_from_queue_to_reported_disbursem
                       "REPORTED_DISBURSED"]
     assert any(a == "opportunity.note_added" for a, _, _ in actions)
     assert any(a == "opportunity.routed" for a, _, _ in actions)
-    assert all("Sarah Namazzi" in (who or "") for a, s, who in actions if a == "opportunity.status")
+    assert all("Isaac Lukwago" in (who or "") for a, s, who in actions if a == "opportunity.status")
 
     # ---- the customer sees the status trail and the institution-reported outcome, but no internal note
     needs = client.get("/api/v1/me/needs", headers=j.customer_headers).json()["needs"]
@@ -201,12 +201,12 @@ def test_an_officer_cannot_work_an_opportunity_assigned_to_someone_else(client, 
     # A second Journey Demo Bank officer, created for this test only
     from weza.domains.identity import service as identity
     with session_scope() as db:
-        other = identity.create_user(db, email="officer2@demobank.demo", full_name="Peter Kalyango",
+        other = identity.create_user(db, email="officer2@demo.bank", full_name="Peter Kalyango",
                                      password="WezaDemo!2026", kind="INSTITUTION",
                                      institution_id=uuid.UUID(demo_bank["id"]), roles=["OFFICER"])
         other_id = other.id
 
-    h = as_user("officer2@demobank.demo")
+    h = as_user("officer2@demo.bank")
     # They cannot see it, and they cannot change it
     assert client.get(f"/api/v1/inst/opportunities/{oid}", headers=h).status_code == 404
     r = client.post(f"/api/v1/inst/opportunities/{oid}/status", headers=_k(h), json={"state": "CONTACTED"})
