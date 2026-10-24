@@ -33,7 +33,7 @@ os.environ.pop("ANTHROPIC_API_KEY", None)  # the deterministic path, so the demo
 
 PHONE = f"077{random.randint(100, 999)}{random.randint(1000, 9999)}"  # a fresh customer every run
 NEED_TEXT = "I need UGX 30 million to expand my pharmacy"
-OFFICER_EMAIL = "officer@demo.bank"
+OFFICER_EMAIL = "officer@demobank.demo"
 OFFICER_PASSWORD = "WezaDemo!2026"
 PDF = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF"
 

@@ -475,6 +475,7 @@ def appetites(actor: Actor = A, db: Session = DB):
         cur = db.get(AppetiteVersion, ap.active_version_id) if ap.active_version_id else None
         version = cur or latest
         crit = version.criteria or []
+        mand = version.mandate or {}
 
         def pick(field, criteria=crit):
             for c in criteria:
@@ -494,11 +495,15 @@ def appetites(actor: Actor = A, db: Session = DB):
                     "latest_status": latest.status, "target_count": (cur or latest).target_count,
                     "target_value": float((cur or latest).target_value) if (cur or latest).target_value else None,
                     "min_match_score": (cur or latest).min_match_score, "criteria": len((cur or latest).criteria),
-                    "products": products, "customer_type": pick("customer_type"), "sector": pick("sector"),
-                    "region": pick("region"), "amount_range": pick("amount"),
-                    "business_age_months": pick("business_age_months"),
-                    "routing_team_id": (version.capacity_limits or {}).get("routing_team_id"),
-                    "mandate": (cur or latest).mandate})
+                    "mandate": (cur or latest).mandate, "products": products,
+                    "customer_type": mand.get("customer_types") or pick("customer_type"),
+                    "sector": mand.get("sectors") or pick("sector"),
+                    "region": mand.get("regions") or pick("region"),
+                    "amount_range": ([mand["min_amount"], mand["max_amount"]]
+                                     if mand.get("min_amount") is not None and mand.get("max_amount") is not None
+                                     else pick("amount")),
+                    "business_age_months": mand.get("min_business_age_months") or pick("business_age_months"),
+                    "routing_team_id": (version.capacity_limits or {}).get("routing_team_id")})
     return {"appetites": out}
 
 

@@ -17,17 +17,17 @@ export default function Audit() {
       <Tabs tabs={[["access", "Data access decisions"], ["consents", "Consents"], ["audit", "Audit trail"]]} value={tab} onChange={setTab} />
       {tab === "access" && (
         <Table head={["When", "Actor", "Resource", "Decision", "Fields disclosed"]}>
-          {d.access.map((x: any, i: number) => <tr key={i}><Td>{dateTime(x.at)}</Td><Td className="text-[12px]">{x.actor}</Td><Td className="text-[12px]">{x.resource}</Td><Td><Badge tone={x.result === "PERMIT" ? "success" : x.result === "DENY" ? "danger" : "warning"}>{x.result.replace(/_/g, " ").toLowerCase()}</Badge></Td><Td className="text-[12px] text-muted">{x.fields.join(", ") || "—"}</Td></tr>)}
+          {d.access.map((x: any, i: number) => <tr key={i}><Td className="whitespace-nowrap">{dateTime(x.at)}</Td><Td className="text-[12px]">{x.actor}</Td><Td className="text-[12px]">{x.resource}</Td><Td><Badge tone={x.result === "PERMIT" ? "success" : x.result === "DENY" ? "danger" : "warning"}>{x.result.replace(/_/g, " ").toLowerCase()}</Badge></Td><Td className="text-[12px] text-muted">{x.fields.join(", ") || "—"}</Td></tr>)}
         </Table>
       )}
       {tab === "consents" && (
         <Table head={["Granted", "Status", "Version", "Categories", "Withdrawn"]}>
-          {d.consents.map((c: any) => <tr key={c.id}><Td>{dateTime(c.granted_at)}</Td><Td><StateBadge state={c.status} /></Td><Td>{c.version}</Td><Td className="text-[12px]">{c.categories.join(", ").toLowerCase()}</Td><Td>{c.withdrawn_at ? dateTime(c.withdrawn_at) : "—"}</Td></tr>)}
+          {d.consents.map((c: any) => <tr key={c.id}><Td className="whitespace-nowrap">{dateTime(c.granted_at)}</Td><Td><StateBadge state={c.status} /></Td><Td>{c.version}</Td><Td className="text-[12px]">{c.categories.join(", ").toLowerCase()}</Td><Td>{c.withdrawn_at ? dateTime(c.withdrawn_at) : "—"}</Td></tr>)}
         </Table>
       )}
       {tab === "audit" && (
         <Table head={["When", "Actor", "Action", "Object", "Reason"]}>
-          {d.audit.map((x: any, i: number) => <tr key={i}><Td>{dateTime(x.at)}</Td><Td>{x.actor}</Td><Td><Badge tone="muted">{x.action}</Badge></Td><Td className="text-[12px]">{x.object}</Td><Td className="text-[12px] text-muted">{x.reason || "—"}</Td></tr>)}
+          {d.audit.map((x: any, i: number) => <tr key={i}><Td className="whitespace-nowrap">{dateTime(x.at)}</Td><Td>{x.actor}</Td><Td><Badge tone="muted">{x.action}</Badge></Td><Td className="text-[12px]">{x.object}</Td><Td className="text-[12px] text-muted">{x.reason || "—"}</Td></tr>)}
         </Table>
       )}
     </>

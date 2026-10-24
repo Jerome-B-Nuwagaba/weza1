@@ -23,9 +23,9 @@ function Chips({ options, value, onChange }: { options: [string, string][]; valu
 
 export function AppetiteEditor({ initial, onSave, saving, error }: { initial: AppetiteDraft; onSave: (d: AppetiteDraft) => void; saving: boolean; error?: ApiError | null }) {
   const [d, setD] = useState<AppetiteDraft>({ ...initial, routing_team_id: initial.routing_team_id ?? (initial.capacity_limits || {}).routing_team_id ?? null });
-  const [teams, setTeams] = useState<any[]>([]);
   const [products, setProducts] = useState<any[]>([]);
   const [cfg, setCfg] = useState<any>(null);
+  const [teams, setTeams] = useState<any[]>([]);
   useEffect(() => {
     api("/inst/products").then((r) => setProducts(r.products)).catch(() => undefined);
     api("/public/config").then(setCfg).catch(() => undefined);

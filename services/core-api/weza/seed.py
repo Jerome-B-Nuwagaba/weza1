@@ -274,6 +274,13 @@ def seed_institutions(db: Session) -> dict:
     return result
 
 
+def _demo_bank_state(db: Session, inst: Institution, users: dict | None = None) -> dict:
+    """The Demo Bank pieces a caller needs: the institution, its administrator, its SME desk and its people."""
+    admin = db.execute(select(User).where(User.email == "admin@demobank.demo")).scalar_one_or_none()
+    desk = db.execute(select(Team).where(Team.institution_id == inst.id).order_by(Team.name)).scalars().first()
+    return {"inst": inst, "admin": admin, "desk": desk, "users": users or {}}
+
+
 def seed_demo_bank(db: Session) -> dict:
     """Demo Bank — the institution the end-to-end demonstration runs through (Goal 1).
 
@@ -288,6 +295,9 @@ def seed_demo_bank(db: Session) -> dict:
     from weza.domains.identity.models import Membership
     from weza.domains.trust import roles as canon
 
+    existing = db.execute(select(Institution).where(Institution.display_name == "Demo Bank")).scalar_one_or_none()
+    if existing is not None:
+        return _demo_bank_state(db, existing)
     ops = Actor(kind="WEZA_USER", roles=frozenset({"WEZA_OPS"}), display="Tendo Operations (seed)")
     inst, admin = inst_svc.apply(db, {
         "legal_name": "Demo Bank Limited", "display_name": "Demo Bank", "institution_type": "Commercial Bank",
@@ -331,10 +341,11 @@ def seed_demo_bank(db: Session) -> dict:
                          "label": "Turnover UGX 1M+ a month"}],
               # The mandate, as first-class dimensions (Goal 1 §4).
               customer_types=["SME"],
-              sectors=["retail_trade", "wholesale_trade", "manufacturing", "services", "agriculture"],
+              sectors=["health_pharmacy", "retail_trade", "wholesale_trade", "manufacturing", "services", "agriculture"],
               regions=["Central", "Western"], min_amount=1_000_000, max_amount=50_000_000,
               min_business_age_months=6,
-              target_count=100, target_value=3_000_000_000, capacity_limits={"daily_count": 40},
+              target_count=100, target_value=3_000_000_000,
+              capacity_limits={"daily_count": 40, "routing_team_id": str(team.id)},
               campaign_from=str(date.today() - timedelta(days=30)), campaign_to=str(date.today() + timedelta(days=90)))
     inst_svc.save_routing(db, ad, inst.id, [
         {"name": "All SME requests → SME Desk", "conditions": {"customer_types": ["SME"]},
@@ -342,7 +353,7 @@ def seed_demo_bank(db: Session) -> dict:
         {"ack_within_minutes": 120, "first_contact_within_minutes": 480, "escalate_after_minutes": 1440})
     inst_svc.save_notification_prefs(db, ad, inst.id, inst_svc.default_notification_prefs())
     inst_svc.activate(db, ad, inst)
-    return {"inst": inst, "users": {**people, "admin": admin}}
+    return _demo_bank_state(db, inst, {**people, "admin": admin})
 
 
 def _journey_bank_state(db: Session, inst: Institution) -> dict:

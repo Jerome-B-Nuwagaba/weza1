@@ -15,9 +15,11 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from tests.helpers import login
+from tests.helpers import SME_ANSWERS, login
+from tests.helpers import idem as _k
 from weza.domains.appetite.models import Appetite
 from weza.domains.matching import engine
+from weza.domains.opportunity.models import Opportunity
 from weza.platform.db import session_scope
 
 API = "/api/v1/staff"
@@ -58,18 +60,31 @@ def _onboard_institution(client, staff) -> tuple[str, dict]:
     return inst_id, {"admin_email": admin_email, "headers": login(client, admin_email, "FlowAdmin!Initial2026")}
 
 
-def _build_supply(client, admin) -> None:
-    """The institution's own team builds its supply: a product, a mandate and a routing rule.
+def _build_supply(client, admin) -> dict:
+    """The institution's own team builds its supply: an officer, a product, a mandate and a routing rule.
 
     Two people are needed, not one: WEZA separates duties, so whoever authors a product or a mandate cannot
-    approve it. The administrator adds a business lead, and the two of them take opposite sides.
+    approve it. The administrator adds a business lead, and the two of them take opposite sides. The officer
+    sits on a desk, and routing sends the desk its work — a routing rule that targets nobody would leave every
+    opportunity in the Unassigned queue. Returns the officer's login headers.
     """
+    r = client.post("/api/v1/inst/teams", headers=admin["headers"], json={"name": "SME Desk"})
+    assert r.status_code == 201, r.text
+    team_id = r.json()["id"]
+
     business_email = f"flow-biz-{uuid.uuid4().hex[:8]}@flow.demo"
     r = client.post("/api/v1/inst/users", headers=admin["headers"],
                     json={"full_name": "Business Lead", "email": business_email,
                           "password": "FlowBiz!Initial2026", "roles": ["BUSINESS"]})
     assert r.status_code == 201, r.text
     business = login(client, business_email, "FlowBiz!Initial2026")
+
+    officer_email = f"flow-officer-{uuid.uuid4().hex[:8]}@flow.demo"
+    r = client.post("/api/v1/inst/users", headers=admin["headers"],
+                    json={"full_name": "Desk Officer", "email": officer_email,
+                          "password": "FlowOfficer!Initial2026", "roles": ["OFFICER"], "team_id": team_id})
+    assert r.status_code == 201, r.text
+    officer = login(client, officer_email, "FlowOfficer!Initial2026")
 
     r = client.post("/api/v1/inst/products", headers=business,
                     json={"name": "Working Capital", "family": "SME_WORKING_CAPITAL",
@@ -94,8 +109,9 @@ def _build_supply(client, admin) -> None:
     assert r.status_code == 200, r.text
 
     r = client.put("/api/v1/inst/routing", headers=admin["headers"],
-                   json={"rules": [{"name": "Default", "conditions": {}, "active": True}]})
+                   json={"rules": [{"name": "Default", "conditions": {}, "active": True, "target_team_id": team_id}]})
     assert r.status_code == 200, r.text
+    return officer
 
 
 def _appetite_status(inst_id: str) -> str:
@@ -124,7 +140,7 @@ def test_a_staff_created_institution_can_be_driven_all_the_way_to_trading(client
     r = client.post(f"{API}/institutions/{inst_id}/activate", headers=weza_admin,
                     json={"reason": "Too early."})
     assert r.status_code == 422, r.text
-    assert {d["missing"] for d in r.json()["error"]["details"]} == {"product", "appetite", "routing"}
+    assert {d["missing"] for d in r.json()["error"]["details"]} == {"officer", "product", "appetite", "routing"}
 
     # The institution's own team builds the supply.
     _build_supply(client, admin)
@@ -172,3 +188,48 @@ def test_a_mandate_approved_while_the_institution_is_active_is_already_live(clie
     assert readiness["ready"] is True
     assert next(c for c in readiness["conditions"] if c["key"] == "appetite")["done"] is True
     assert "1 active appetite(s)" == next(c for c in readiness["conditions"] if c["key"] == "appetite")["detail"]
+
+
+def test_a_staff_created_institutions_officer_works_an_opportunity_to_a_decision(client, weza_admin, journey, drain):
+    """The whole lifecycle, with every step through its real door: staff create the institution (a draft) and its
+    administrator -> the institution configures product, mandate and routing -> WEZA checks readiness ->
+    activates -> a customer is matched and consents -> the opportunity reaches the institution's own officer ->
+    the officer asks for information (with a deadline), then reports the institution's decision."""
+    inst_id, admin = _onboard_institution(client, weza_admin)
+    assert client.get(f"{API}/institutions/{inst_id}", headers=weza_admin).json()["status"] == "DRAFT"
+    officer = _build_supply(client, admin)
+    assert client.get(f"{API}/institutions/{inst_id}/readiness", headers=weza_admin).json()["ready"] is True
+    r = client.post(f"{API}/institutions/{inst_id}/activate", headers=weza_admin, json={"reason": "Verified."})
+    assert r.status_code == 200, r.text
+    assert _in_market(inst_id) is True
+
+    j = journey("I need UGX 30 million to expand my pharmacy")
+    j.send(action="confirm")
+    j.verify("0772400201")
+    j.answer_profile({**SME_ANSWERS, "identity.nin": "skip"})
+    option = next(o for o in j.cards("options")[0]["options"] if o["institution"] == "Flow Bank")
+    j.send(action="select", value=option["match_id"])
+    j.send(action="agree", value=j.cards("consent")[0]["template_id"])
+    reference = j.cards("submitted")[0]["reference"]
+    drain()
+
+    # The opportunity is in this officer's own queue, assigned by the desk routing the administrator configured.
+    feed = client.get("/api/v1/inst/opportunities?view=mine", headers=officer).json()
+    assert any(i["reference"] == reference for i in feed["items"]), feed["items"]
+    with session_scope() as db:
+        oid = db.execute(select(Opportunity).where(Opportunity.reference == reference)).scalar_one().id
+
+    asked = client.post(f"/api/v1/inst/opportunities/{oid}/info-requests", headers=_k(officer), json={
+        "kind": "DOCUMENT", "doc_type": "bank_statement", "message": "Please share 6 months of bank statements.",
+        "due_in_days": 5})
+    assert asked.status_code == 201, asked.text
+    more = client.post(f"/api/v1/inst/opportunities/{oid}/status", headers=_k(officer),
+                       json={"state": "INFORMATION_REQUESTED", "note": "Waiting for statements."})
+    assert more.status_code == 200, more.text
+    view = client.get(f"/api/v1/inst/opportunities/{oid}", headers=officer).json()
+    assert view["state"] == "INFORMATION_REQUESTED"
+
+    approved = client.post(f"/api/v1/inst/opportunities/{oid}/outcome", headers=_k(officer),
+                           json={"state": "REPORTED_APPROVED", "approved_amount": 30_000_000, "tenor_months": 12})
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["state"] == "REPORTED_APPROVED"
