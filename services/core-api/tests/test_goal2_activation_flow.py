@@ -18,7 +18,6 @@ from sqlalchemy import select
 from tests.helpers import SME_ANSWERS, login
 from tests.helpers import idem as _k
 from weza.domains.appetite.models import Appetite
-from weza.domains.institution.models import Institution
 from weza.domains.matching import engine
 from weza.domains.opportunity.models import Opportunity
 from weza.platform.db import session_scope

@@ -25,7 +25,7 @@ test("administrator manages roles, teams and passwords; a user changes their own
 
   // Edit roles
   await row.getByRole("button", { name: "Roles" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: "Compliance" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Compliance", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Save" }).click();
   await expect(row.getByText("Compliance")).toBeVisible();
 
