@@ -172,10 +172,16 @@ def readiness(db: Session, inst: Institution) -> dict:
         .where(Appetite.institution_id == inst.id, Appetite.lifecycle_status == "ACTIVE",
                AppetiteVersion.status == "APPROVED")
     ).scalar_one()
-    rules = db.execute(
-        select(func.count()).select_from(RoutingRule)
-        .where(RoutingRule.institution_id == inst.id, RoutingRule.active.is_(True))
-    ).scalar_one()
+    # A rule that names nobody leaves every opportunity in the Unassigned queue, so routing only counts when an
+    # active rule reaches someone who can work the opportunity: a named officer/manager, or a desk with an officer.
+    from weza.domains.opportunity.service import _can_receive_work, _least_loaded_officer
+    active_rules = db.execute(
+        select(RoutingRule).where(RoutingRule.institution_id == inst.id, RoutingRule.active.is_(True))
+    ).scalars().all()
+    rules = len(active_rules)
+    deliverable = sum(1 for rule in active_rules
+                      if _can_receive_work(db, inst.id, rule.target_user_id)
+                      or (rule.target_team_id and _least_loaded_officer(db, inst.id, rule.target_team_id)))
     appetite_detail = f"{live_appetites} active appetite(s)"
     if approved_appetites:
         appetite_detail += f" · {approved_appetites} approved, live on activation"
@@ -189,8 +195,8 @@ def readiness(db: Session, inst: Institution) -> dict:
          "detail": f"{products} active product(s)"},
         {"key": "appetite", "label": "At least one active appetite / mandate",
          "done": (live_appetites + approved_appetites) > 0, "detail": appetite_detail},
-        {"key": "routing", "label": "Routing configuration exists", "done": rules > 0,
-         "detail": f"{rules} active routing rule(s)"},
+        {"key": "routing", "label": "Routing sends opportunities to an officer", "done": deliverable > 0,
+         "detail": f"{rules} active routing rule(s), {deliverable} reaching an active officer"},
     ]
     missing = [c for c in conditions if not c["done"]]
     return {"ready": not missing, "conditions": conditions, "missing": [c["key"] for c in missing],
