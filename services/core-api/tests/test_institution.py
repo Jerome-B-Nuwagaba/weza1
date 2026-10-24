@@ -244,6 +244,14 @@ def test_command_centre_tiles_and_urgent_cases_are_real_counts(client, as_user):
     for case in (c for c in d["attention"] if c.get("id")):
         assert {"customer", "product", "issue", "owner", "updated_at", "severity", "reference"} <= set(case)
         assert "@" not in case["customer"]
+    assert len(d["priority"]) <= 5
+    assert all(p["match_status"] in ("HIGH", "GOOD", "UNDER_REVIEW") for p in d["priority"])
+
+
+def test_priority_opportunities_never_name_a_customer_to_a_role_without_identity_access(client, as_user):
+    """An executive may see the best matches, but the Disclosure Gateway withholds the business name."""
+    d = client.get("/api/v1/inst/command-centre", headers=as_user("exec@lakeside.demo")).json()
+    assert all(p["business_name"] is None and p["description"] for p in d["priority"])
 
 
 def test_assistant_answers_from_tools_read_only(client, as_user):

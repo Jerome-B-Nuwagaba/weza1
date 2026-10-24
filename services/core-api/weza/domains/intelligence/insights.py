@@ -110,11 +110,20 @@ def command_centre(db: Session, actor: Actor) -> dict:
     mandate_total = db.execute(select(func.count()).select_from(Appetite).where(
         Appetite.institution_id == actor.institution_id, Appetite.lifecycle_status != "ARCHIVED")).scalar_one()
     products_live, mandates_live = active_products(db, actor), active_mandates(db, actor)
+    priority = priority_opportunities(db, actor, open_, assign)
+    open_by_product = Counter(((o.snapshot or {}).get("product_version") or {}).get("name") for o in open_)
+    featured_product = max(products_live, key=lambda p: open_by_product.get(p["name"], 0)) if products_live else None
+    featured_mandate = mandates_live[0] if mandates_live else None
     # The four Command Centre tiles. Every figure is a count WEZA holds; nothing is estimated or trended.
     kpis = {"attention": len(attention), "attention_high": len([x for x in attention if x["severity"] == "high"]),
             "new_24h": len(new), "new_7d": len([o for o in opps if o.qualified_at >= week]),
             "active_products": len(products_live), "products_total": product_total,
-            "active_mandates": len(mandates_live), "mandates_total": mandate_total}
+            "active_mandates": len(mandates_live), "mandates_total": mandate_total,
+            "featured_product": {"id": featured_product["id"], "name": featured_product["name"],
+                                 "open_opportunities": open_by_product.get(featured_product["name"], 0)}
+            if featured_product else None,
+            "featured_mandate": {"id": featured_mandate["id"], "name": featured_mandate["name"],
+                                 "regions": featured_mandate["regions"]} if featured_mandate else None}
     funnel = Counter(o.state for o in opps)
     no_lead = None
     if not open_ and not new:
@@ -133,7 +142,7 @@ def command_centre(db: Session, actor: Actor) -> dict:
                                "Demand Intelligence to see where WEZA demand is growing.", "link": "/institution/demand"}
     return {"briefing": briefing, "cards": cards, "attention": attention[:10], "funnel": dict(funnel),
             "no_lead": no_lead, "roles": sorted(actor.roles), "generated_at": now.isoformat(),
-            "kpis": kpis, "active_products": products_live, "active_mandates": mandates_live,
+            "kpis": kpis, "priority": priority, "active_products": products_live, "active_mandates": mandates_live,
             "new_opportunities": new_opportunities(new),
             "insights_open": db.execute(select(func.count()).select_from(Insight).where(
                 Insight.institution_id == actor.institution_id, Insight.status == "OPEN")).scalar_one()}
@@ -154,6 +163,34 @@ def _case(o: Opportunity, a: Assignment | None, owners: dict, issue: str) -> dic
             "product": ((o.snapshot or {}).get("product_version") or {}).get("name"),
             "issue": issue, "owner": owners.get(a.user_id) if a and a.user_id else None,
             "updated_at": (o.updated_at or o.qualified_at).isoformat()}
+
+
+def priority_opportunities(db: Session, actor: Actor, open_: list, assign: dict, limit: int = 5) -> list[dict]:
+    """The best-matched open opportunities. The business name is shown only where the Disclosure Gateway
+    permits that field for this person (the same decision, logged, as the opportunity page); otherwise the
+    customer is described, never named."""
+    from weza.domains.consent.models import Consent
+    from weza.domains.customer.service import current_facts
+    rows = sorted((o for o in open_ if not o.integrity_hold), key=lambda o: (-float(o.match_score), -float(o.amount)))
+    out = []
+    for o in rows[:limit]:
+        a = assign.get(o.id)
+        decision = policy.decide_opportunity_access(db, actor, o, a, db.get(Consent, o.consent_id) if o.consent_id else None,
+                                                    purpose="COMMAND_CENTRE")
+        name = None
+        if decision.result == "PERMIT" and "business_name" in decision.fields:
+            fact = current_facts(db, o.customer_id).get("business.name")
+            name = fact.value.get("v") if fact else None
+        kind = {"SME": "Business", "SALARIED": "Salaried", "AGRICULTURE": "Farmer"}.get(o.customer_type or "", "Customer")
+        status = ("UNDER_REVIEW" if o.state in ("SUBMITTED_TO_INSTITUTION", "INFORMATION_REQUESTED")
+                  else "HIGH" if o.match_score >= 85 else "GOOD")
+        out.append({"id": str(o.id), "reference": o.reference, "amount": float(o.amount), "business_name": name,
+                    "description": " · ".join(x for x in (kind, o.district) if x),
+                    "need": (o.purpose_category or "").replace("_", " ").capitalize() or None,
+                    "sector": o.sector, "sector_label": UGANDA["sectors"].get(o.sector or "") if o.sector else None,
+                    "product": ((o.snapshot or {}).get("product_version") or {}).get("name"),
+                    "match_score": round(o.match_score), "match_status": status, "state": o.state})
+    return out
 
 
 def active_products(db: Session, actor: Actor) -> list[dict]:
@@ -186,6 +223,7 @@ def active_mandates(db: Session, actor: Actor) -> list[dict]:
                     "min_match_score": av.min_match_score if av else None,
                     "products": products, "criteria": (av.criteria if av else []) or [],
                     "target_count": av.target_count if av else None,
+                    "regions": list(((av.mandate if av else None) or {}).get("regions") or []),
                     "fulfilled_count": ap.fulfilled_count, "fulfilled_value": float(ap.fulfilled_value or 0)})
     return out
 
