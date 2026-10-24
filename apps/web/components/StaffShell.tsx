@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  BarChart3, Box, ChevronDown, ChevronRight, House, Landmark as Bank,
+  BarChart3, Box, ChevronDown, ChevronLeft, ChevronRight, House, Landmark as Bank,
   Bell, BookOpen, Building2, ClipboardCheck, Cpu, FileSearch, Gauge, Inbox, Landmark, LayoutDashboard, LifeBuoy,
   LogOut, Menu, MessageSquareText, Network, Package, Scale, Settings, ShieldAlert, Sliders, Users, Wrench, X,
 } from "lucide-react";
@@ -251,7 +251,8 @@ function InstitutionFrame({ me, items, target, active, section, open, setOpen, b
   }, [menu]);
   const live = !me.institution || me.institution.status === "ACTIVE";
   const first = me.full_name.split(/\s+/)[0] || me.full_name;
-  const rail = collapsed ? "lg:w-24" : "lg:w-[288px]";
+  // Collapsed, the rail is wide enough for an icon plus the chevron beside Command Centre.
+  const rail = collapsed ? "lg:w-[112px]" : "lg:w-[288px]";
 
   const navList = (labels: boolean) => (
     <ul className="space-y-2 px-3">
@@ -263,17 +264,19 @@ function InstitutionFrame({ me, items, target, active, section, open, setOpen, b
             <Link href={target(i) ?? i.href} aria-label={labels ? undefined : i.label} aria-current={on ? "page" : undefined}
               title={labels ? undefined : i.label}
               className={cx("flex h-12 items-center rounded-xl text-[16px] transition-colors",
-                labels ? cx("w-full gap-4 px-4", on && "pr-11") : "w-12 justify-center",
+                labels ? cx("w-full gap-4 px-4", i.section === "command" && "lg:pr-11") : "w-12 justify-center",
                 on ? "bg-blue-50 font-semibold text-ink" : "font-medium text-[#3c4744] hover:bg-blue-50/60 hover:text-ink dark:text-muted")}>
               <Icon className={cx("h-[22px] w-[22px] shrink-0", on ? "text-evergreen" : "text-[#4a5552] dark:text-muted")}
                 strokeWidth={2} fill={on && i.section === "command" ? "currentColor" : "none"} aria-hidden />
               {labels && <span className="min-w-0 flex-1 truncate">{i.label}</span>}
             </Link>
-            {on && (
+            {/* The collapse control always sits beside Command Centre, whichever section is open. */}
+            {i.section === "command" && (
               <button type="button" onClick={toggle} aria-label={collapsed ? "Expand menu" : "Collapse menu"} aria-expanded={!collapsed}
-                className={cx("hidden h-8 w-8 items-center justify-center rounded-lg text-ink hover:bg-blue-50 lg:flex",
+                title={collapsed ? "Expand menu" : "Collapse menu"}
+                className={cx("hidden h-8 w-8 items-center justify-center rounded-lg text-ink hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-evergreen lg:flex",
                   labels ? "absolute right-3" : "ml-1")}>
-                <ChevronRight className="h-5 w-5" strokeWidth={2} />
+                {collapsed ? <ChevronRight className="h-5 w-5" strokeWidth={2} /> : <ChevronLeft className="h-5 w-5" strokeWidth={2} />}
               </button>
             )}
           </li>
@@ -303,7 +306,7 @@ function InstitutionFrame({ me, items, target, active, section, open, setOpen, b
         </div>
       )}
 
-      <div className={cx("transition-[padding] duration-150", collapsed ? "lg:pl-24" : "lg:pl-[288px]")}>
+      <div className={cx("transition-[padding] duration-150", collapsed ? "lg:pl-[112px]" : "lg:pl-[288px]")}>
         <header className="sticky top-0 z-20 border-b border-line bg-surface">
           <div className="flex h-16 items-center gap-3 px-4 sm:h-20 sm:px-8">
             <button className="-ml-1 rounded-lg p-2 text-muted hover:bg-soft lg:hidden" onClick={() => setOpen(true)} aria-label="Open menu"><Menu className="h-5 w-5" /></button>
