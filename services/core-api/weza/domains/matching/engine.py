@@ -26,6 +26,7 @@ from weza.domains.matching.rules import evaluate, fmt, fmt_money, ruleset_hash
 from weza.domains.need.models import FinancialNeed
 from weza.domains.product.models import Product, ProductVersion
 from weza.domains.trust.service import record_decision
+from weza.platform import metrics
 from weza.platform.controls import routing_paused
 from weza.platform.db import utcnow
 from weza.platform.events import emit
@@ -246,6 +247,7 @@ def _excluded_institutions(db: Session, need: FinancialNeed) -> set[uuid.UUID]:
     return set(rows)
 
 
+@metrics.timed("weza_matching_seconds")
 def match_need(db: Session, need: FinancialNeed, *, trigger: str = "customer", clearing_run_id=None,
                supply: list[Supply] | None = None) -> dict:
     """Re-evaluate one need against current supply. Keeps still-valid matches (so a customer's selection survives a

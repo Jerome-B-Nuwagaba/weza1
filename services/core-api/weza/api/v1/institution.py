@@ -143,8 +143,8 @@ def _own_team(db: Session, actor: Actor, team_id: str | None) -> uuid.UUID | Non
         raise ValidationFailed("Unknown team.", code="UNKNOWN_TEAM") from None
     t = db.execute(select(Team).where(Team.id == tid,
                                      Team.institution_id == actor.institution_id)).scalar_one_or_none()
-    if t is None:  # another institution's team and a made-up id get the same answer: nothing is revealed
-        raise ValidationFailed("Unknown team.", code="UNKNOWN_TEAM")
+    if t is None:  # another institution's team and a made-up id get the same 404: nothing about other tenants is revealed
+        raise NotFound("Not found.")
     return tid
 
 

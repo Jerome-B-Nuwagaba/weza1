@@ -1,19 +1,24 @@
 """Staff authentication: password + TOTP MFA, rotating refresh tokens in an httpOnly cookie (TSD §13)."""
 
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Cookie, Depends, Request, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from weza.api.deps import DB, client_ip, staff_actor
 from weza.config import get_settings
+from weza.domains.identity import entra
 from weza.domains.identity import service as identity
 from weza.domains.identity.models import User
 from weza.domains.trust.policy import ROLE_LABELS, permissions_for
 from weza.platform.context import Actor
-from weza.platform.errors import Unauthorized
+from weza.platform.errors import Unauthorized, WezaError
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 COOKIE = "weza_rt"
+ENTRA_COOKIE = "weza_entra"
 
 
 def _set_cookie(resp: Response, token: str) -> None:
@@ -39,6 +44,51 @@ class LoginIn(BaseModel):
 @router.post("/login")
 def login(body: LoginIn, request: Request, response: Response, db: Session = DB):
     return _finish(response, identity.login(db, body.email, body.password, client_ip(request)))
+
+
+@router.get("/entra/config")
+def entra_config():
+    """Whether the login page should offer 'Sign in with Microsoft'."""
+    return {"enabled": entra.enabled()}
+
+
+@router.get("/entra/start")
+def entra_start(next: str | None = None):  # noqa: A002 — the query parameter is named `next`
+    url, state = entra.begin(next)
+    redirect = RedirectResponse(url, status_code=302)
+    s = get_settings()
+    redirect.set_cookie(ENTRA_COOKIE, state, httponly=True, secure=s.is_production or s.env != "local", samesite="lax",
+                        max_age=600, path="/api/v1/auth/entra")
+    return redirect
+
+
+@router.get("/entra/callback")
+def entra_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None,
+                   weza_entra: str | None = Cookie(None), db: Session = DB):
+    """Microsoft sends the browser back here. Every outcome is a redirect to the login page, never a JSON error."""
+    web = get_settings().public_web_url.rstrip("/")
+
+    def fail(code_: str) -> RedirectResponse:
+        out = RedirectResponse(f"{web}/login?{urlencode({'sso_error': code_})}", status_code=302)
+        out.delete_cookie(ENTRA_COOKIE, path="/api/v1/auth/entra")
+        return out
+    if error or not code or not state:
+        return fail("ENTRA_CANCELLED")
+    try:
+        result, next_path = entra.complete(db, code, state, weza_entra, client_ip(request))
+    except WezaError as exc:
+        db.commit()  # a recorded denial must survive
+        return fail(exc.code)
+    params = {"next": next_path} if next_path else {}
+    if "mfa_token" in result:  # Microsoft did not perform MFA and WEZA still requires it: continue on the login page
+        params.update(sso_mfa=result["mfa_token"], enrol="1" if result.get("mfa_enrolment_required") else "0")
+    else:
+        params["sso"] = "1"
+    out = RedirectResponse(f"{web}/login?{urlencode(params)}", status_code=302)
+    if "refresh_token" in result:
+        _set_cookie(out, result["refresh_token"])
+    out.delete_cookie(ENTRA_COOKIE, path="/api/v1/auth/entra")
+    return out
 
 
 class MfaIn(BaseModel):

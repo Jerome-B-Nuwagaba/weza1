@@ -32,7 +32,7 @@ from weza.domains.opportunity import service as opp_svc
 from weza.domains.opportunity.models import Assignment, Opportunity, Outcome
 from weza.domains.product import service as product_svc
 from weza.domains.product.models import Product
-from weza.domains.trust import policy
+from weza.domains.trust import policy, retention
 from weza.domains.trust.models import AuditEvent, Decision
 from weza.domains.trust.service import audit
 from weza.platform.context import Actor
@@ -445,12 +445,39 @@ def set_contract(inst_id: uuid.UUID, body: ContractIn, actor: Actor = W, db: Ses
     return commercial_overview(actor, db)
 
 
+# ------------------------------------------------------------------ retention (TSD §70)
+
+
+@router.get("/retention")
+def retention_preview(actor: Actor = W, db: Session = DB):
+    """What the retention engine would do right now. Changes nothing."""
+    policy.require(actor, "admin.config")
+    return retention.run(db, apply=False)
+
+
+class RetentionRun(BaseModel):
+    reason: str = Field(..., min_length=8, max_length=300)
+
+
+@router.post("/retention/run")
+def retention_run(body: RetentionRun, actor: Actor = W, db: Session = DB):
+    """Carry out the retention policy now (it also runs daily when RETENTION_ENABLED). Deletes data, so it needs MFA
+    step-up and a recorded reason."""
+    policy.require(actor, "admin.config")
+    require_step_up(actor)
+    report = retention.run(db, apply=True)
+    audit(db, actor, "retention.run_manual", "retention", "manual", reason=body.reason,
+          after={"customers_anonymised": report["customers"]["anonymise"],
+                 "rules": {k: v["done"] for k, v in report["rules"].items()}})
+    return report
+
+
 # ------------------------------------------------------------------ Graph Inspector (Skill §59)
 
 
 @router.get("/graph")
 def graph_inspector(q: str = Query(..., min_length=3, max_length=80), actor: Actor = W, db: Session = DB):
-    policy.require(actor, "admin.read")
+    policy.require(actor, "admin.engineering")
     audit(db, actor, "graph.inspected", "graph", q[:64])
     opp = need = None
     if q.upper().startswith("OPP-"):
@@ -590,7 +617,7 @@ def audit_log(action: str | None = None, object_id: str | None = None, limit: in
 
 @router.get("/deliveries")
 def deliveries(status: str = "DEAD", actor: Actor = W, db: Session = DB):
-    policy.require(actor, "admin.read")
+    policy.require(actor, "admin.engineering")
     rows = db.execute(select(EventDelivery, OutboxEvent).join(OutboxEvent, OutboxEvent.id == EventDelivery.event_id)
                       .where(EventDelivery.status == status).order_by(EventDelivery.next_attempt_at.desc()).limit(200)).all()
     failed_notes = db.execute(select(Notification).where(Notification.status.in_(["FAILED", "DEAD"]))
@@ -622,7 +649,7 @@ def my_notifications(actor: Actor = W, db: Session = DB):
 @router.get("/loops")
 def loops(actor: Actor = W, db: Session = DB):
     """Loop & graph observability (Skill §61; blueprint 08 §6)."""
-    policy.require(actor, "admin.read")
+    policy.require(actor, "admin.engineering")
     since = utcnow() - timedelta(days=30)
     node_entries = db.execute(select(GraphTransition.to_node, func.count()).where(GraphTransition.at >= since)
                               .group_by(GraphTransition.to_node)).all()

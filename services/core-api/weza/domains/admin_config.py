@@ -131,7 +131,23 @@ MATCH_WEIGHTS = {"product_fit": 0.30, "appetite_fit": 0.30, "preference_fit": 0.
 QUALITY_WEIGHTS = {"phone_verified": 20, "identity_captured": 15, "profile_complete": 30, "documents": 15,
                    "consistency": 10, "responsiveness": 10}
 
-DEFAULTS = {"country:UG": UGANDA, "question_paths:UG": QUESTION_PATHS, "match_weights": MATCH_WEIGHTS,
+# Retention policy (TSD §70-71): how long each kind of data is kept before the retention engine deletes or anonymises it.
+# Periods are days since creation, or since the customer's last activity for customer data. Audit events, the decision
+# ledger, commercial events and reported outcomes are NOT listed: they follow their own legal retention. `legal_holds`
+# lists customer ids whose data must be kept whatever the periods say. Production values need legal sign-off.
+RETENTION = {
+    "rules": {
+        "otp_challenge": {"action": "DELETE", "after_days": 2},
+        "rate_counter": {"action": "DELETE", "after_days": 2},
+        "channel_message": {"action": "ANONYMISE", "after_days": 90},
+        "conversation_message": {"action": "ANONYMISE", "after_days": 180},
+        "document_file": {"action": "DELETE", "after_days": 365},
+        "customer_identity": {"action": "ANONYMISE", "after_days": 730},
+    },
+    "legal_holds": [],
+}
+
+DEFAULTS = {"country:UG": UGANDA, "retention:UG": RETENTION, "question_paths:UG": QUESTION_PATHS, "match_weights": MATCH_WEIGHTS,
             "quality_weights": QUALITY_WEIGHTS}
 
 

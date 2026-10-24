@@ -41,6 +41,19 @@ class Settings(BaseSettings):
     # Sign-in attempts allowed per IP address per 15 minutes. Only the browser test suite (every test signs in from
     # one address) raises it; production must keep it at 100 or less.
     login_ip_limit: int = 50
+    # Daily retention run (TSD §70): deletes/anonymises data past the retention policy. Off by default because it destroys
+    # data: turn it on in production once the policy (country config `retention:UG`) has legal sign-off. Deliberately not
+    # a startup blocker; it is on the go-live checklist (docs/GO_LIVE_CHECKLIST.md).
+    retention_enabled: bool = False
+    # Bearer token that unlocks GET /metrics (Prometheus format, TSD §64). Unset = the endpoint does not exist.
+    metrics_token: str | None = None
+    # Microsoft Entra ID sign-in for staff (TSD §13). All four are needed, and the tenant must be one GUID: a multi-tenant
+    # authority is deliberately not supported. The redirect URI is the WEB app's /api/v1/auth/entra/callback, so the
+    # session cookie is set on the site users are on.
+    entra_tenant_id: str | None = None
+    entra_client_id: str | None = None
+    entra_client_secret: str | None = None
+    entra_redirect_uri: str | None = None
 
     # OTP (TSD §13)
     otp_delivery: str = "display"  # display | sms
