@@ -204,9 +204,10 @@ def test_an_inactive_mandate_never_produces_an_opportunity(journey, drain, demo_
     demo = _demo_option(j)
     j.send(action="select", value=demo["match_id"])
     assert j.node == "CONSENT", j.node
+    # The mandate behind the option the customer chose (Demo Bank may carry other mandates from other tests).
     with session_scope() as db:
-        appetite = db.execute(select(Appetite).where(
-            Appetite.institution_id == uuid.UUID(demo_bank["id"]))).scalar_one()
+        appetite_id = db.get(Match, uuid.UUID(demo["match_id"])).appetite_id
+        appetite = db.get(Appetite, appetite_id)
         admin = db.execute(select(User).where(User.email == "admin@demobank.demo")).scalar_one()
         actor = identity.actor_for_user(db, admin, mfa=True)
         appetite_svc.set_lifecycle(db, actor, appetite, "PAUSED", "Paused for the demo")
@@ -218,8 +219,7 @@ def test_an_inactive_mandate_never_produces_an_opportunity(journey, drain, demo_
             assert db.execute(select(Opportunity).where(Opportunity.need_id == need.id)).scalars().all() == []
     finally:
         with session_scope() as db:
-            appetite = db.execute(select(Appetite).where(
-                Appetite.institution_id == uuid.UUID(demo_bank["id"]))).scalar_one()
+            appetite = db.get(Appetite, appetite_id)
             admin = db.execute(select(User).where(User.email == "admin@demobank.demo")).scalar_one()
             actor = identity.actor_for_user(db, admin, mfa=True)
             appetite_svc.set_lifecycle(db, actor, appetite, "ACTIVE", "Resumed after the demo")
