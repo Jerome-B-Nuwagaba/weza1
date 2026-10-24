@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  Bell, Building2, Gauge, LogOut, Menu, Network, X,
+  Bell, Building2, ChevronsLeft, ChevronsRight, Gauge, LogOut, Menu, Network, X,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -35,6 +35,15 @@ const STAFF_NAV: [string, Item[]][] = [
 export function StaffShell({ area, children }: { area: "institution" | "admin" | "staff"; children: React.ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [open, setOpen] = useState(false);
+  // The desktop rail can be collapsed to icons; the choice is a per-browser convenience, so storage failing is harmless.
+  const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    try { setCompact(localStorage.getItem("weza.rail") === "compact"); } catch { /* storage unavailable */ }
+  }, []);
+  const toggleRail = () => setCompact((c) => {
+    try { localStorage.setItem("weza.rail", c ? "full" : "compact"); } catch { /* storage unavailable */ }
+    return !c;
+  });
   const [bell, setBell] = useState(false);
   const [connectionError, setConnectionError] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -102,38 +111,41 @@ export function StaffShell({ area, children }: { area: "institution" | "admin" |
   const home = area === "admin" ? "/admin" : area === "staff" ? "/staff/institutions" : "/institution";
   const active = (href: string) => (href === "/institution" || href === "/admin" ? pathname === href : pathname.startsWith(href));
 
-  const sidebar = (
-    <nav className="flex h-full flex-col gap-5 overflow-y-auto px-3 py-4 scroll-thin">
+  const railOf = (narrow: boolean) => (
+    <nav aria-label="Main" className={cx("flex h-full flex-col gap-5 overflow-y-auto py-4 scroll-thin", narrow ? "px-2" : "px-3")}>
       {nav.map(([group, items]) => {
         const visible = items.filter((i) => can(i.perm));
         if (!visible.length) return null;
         return (
           <div key={group}>
-            <div className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wider text-muted">{group}</div>
+            <div className={cx("mb-1 px-2 text-[11px] font-semibold uppercase tracking-wider text-muted", narrow && "sr-only")}>{group}</div>
             {visible.map((i) => (
-              <Link key={i.href} href={i.href} aria-current={(i.current ?? active(i.href)) ? "page" : undefined} className={cx("flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[14px]", (i.current ?? active(i.href)) ? "bg-blue-50 font-medium text-blue-800" : "text-ink hover:bg-canvas")}>
+              <Link key={i.href} href={i.href} aria-current={(i.current ?? active(i.href)) ? "page" : undefined} title={narrow ? i.label : undefined} aria-label={narrow ? i.label : undefined} className={cx("flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[14px]", narrow && "justify-center", (i.current ?? active(i.href)) ? "bg-blue-50 font-medium text-blue-800" : "text-ink hover:bg-canvas")}>
                 <i.icon className="h-4 w-4 shrink-0 opacity-80" />
-                {i.label}
+                {!narrow && i.label}
               </Link>
             ))}
           </div>
         );
       })}
+      <button type="button" onClick={toggleRail} aria-label={narrow ? "Expand menu" : "Collapse menu"} title={narrow ? "Expand menu" : "Collapse menu"} className="mt-auto hidden items-center justify-center gap-2 rounded-lg px-2 py-1.5 text-[13px] text-muted hover:bg-canvas lg:flex">
+        {narrow ? <ChevronsRight className="h-4 w-4" /> : <><ChevronsLeft className="h-4 w-4" /> Collapse</>}
+      </button>
     </nav>
   );
 
   return (
     <MeCtx.Provider value={{ me, can: (p) => can(p), refresh: load }}>
       <div className="flex min-h-screen">
-        <aside className="sticky top-0 hidden h-screen w-60 shrink-0 border-r border-line bg-surface lg:block">
-          <div className="flex h-14 items-center border-b border-line px-5"><Logo href={home} small /></div>
-          {sidebar}
+        <aside className={cx("sticky top-0 hidden h-screen shrink-0 border-r border-line bg-surface lg:block", compact ? "w-16" : "w-60")}>
+          <div className={cx("flex h-14 items-center border-b border-line", compact ? "justify-center px-2" : "px-5")}>{compact ? <Link href={home} aria-label="Home"><Gauge className="h-5 w-5 text-blue-800" /></Link> : <Logo href={home} small />}</div>
+          {railOf(compact)}
         </aside>
         {open && (
           <div className="fixed inset-0 z-40 bg-black/40 lg:hidden" onClick={() => setOpen(false)}>
             <aside className="h-full w-72 bg-surface" onClick={(e) => e.stopPropagation()}>
               <div className="flex h-14 items-center justify-between border-b border-line px-4"><Logo small /><button onClick={() => setOpen(false)} aria-label="Close menu"><X className="h-5 w-5" /></button></div>
-              {sidebar}
+              {railOf(false)}
             </aside>
           </div>
         )}
