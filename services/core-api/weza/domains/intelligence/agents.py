@@ -52,6 +52,7 @@ INSTITUTION_ASSISTANT = AgentSpec(
     frozenset({
         "search_opportunities", "get_demand_summary", "get_product_performance",
         "get_near_match_analysis", "simulate_appetite", "get_team_queue", "parse_institution_query",
+        "explain_match", "get_product_status",
     }),
     3,
 )

@@ -92,6 +92,35 @@ def get_team_queue(db: Session, actor: Actor) -> dict:
     return {"open": len(rows), "unassigned": unassigned, "by_owner": by_owner}
 
 
+def explain_match(db: Session, actor: Actor, reference: str | None = None) -> dict:
+    """Why an opportunity was matched, from the match explanation frozen at qualification. Without a reference,
+    the strongest open opportunity this user may see. Non-identifiable: the customer is never named."""
+    policy.require(actor, "opportunity.read_meta")
+    q = insights._scope(db, actor)
+    if reference:
+        q = q.where(Opportunity.reference == reference.strip().upper())
+    else:
+        q = q.where(Opportunity.state.in_(list(opp_svc.OPEN_STATES))).order_by(Opportunity.match_score.desc())
+    o = db.execute(q.limit(1)).scalars().first()
+    if o is None:
+        return {"error": f"No opportunity {reference.upper()} is visible to you." if reference
+                else "There are no open opportunities to explain right now."}
+    s = opp_svc.summary(db, o)
+    return {"id": s["id"], "reference": s["reference"], "match_score": s["match_score"], "product": s["product"],
+            "why_matched": s["why_matched"], "near_miss": s["near_miss"]}
+
+
+def get_product_status(db: Session, actor: Actor) -> dict:
+    """Which products are live, paused or in draft, and the live mandates that route customers to them."""
+    policy.require(actor, "product.read")
+    products = [{"id": str(p.id), "name": p.name, "status": p.status} for p in db.execute(
+        select(Product).where(Product.institution_id == actor.institution_id, Product.status != "ARCHIVED")
+        .order_by(Product.name)).scalars()]
+    mandates = [{"name": m["name"], "products": [p["name"] for p in m["products"]]}
+                for m in insights.active_mandates(db, actor)] if policy.has(actor, "appetite.read") else []
+    return {"products": products, "active_mandates": mandates}
+
+
 def simulate_appetite(db: Session, actor: Actor, field: str, op: str, value: Any) -> dict:
     """Dry-run: apply one criterion change to the first active appetite and compare. Never saves anything."""
     policy.require(actor, "appetite.simulate")
@@ -125,6 +154,11 @@ TOOLS = {
                                 "with the criteria most often missed.", {}),
     "get_product_performance": (get_product_performance, "Opportunities and reported outcomes per product.", {}),
     "get_team_queue": (get_team_queue, "Open opportunities by owner and unassigned count.", {}),
+    "explain_match": (explain_match, "Why an opportunity was matched (criteria met and near misses). Optional: "
+                      "reference such as OPP-AB12C; without it, the strongest open opportunity.",
+                      {"reference": {"type": "string"}}),
+    "get_product_status": (get_product_status, "The institution's products with their status (ACTIVE, PAUSED, "
+                           "DRAFT…) and the live mandates covering them.", {}),
     "simulate_appetite": (simulate_appetite, "Dry-run one appetite criterion change, e.g. field=business_age_months "
                           "op=gte value=24. Never saves.", {"field": {"type": "string"}, "op": {"type": "string"},
                                                             "value": {}}),
@@ -159,6 +193,11 @@ def _route_keywords(question: str) -> list[tuple[str, dict]] | None:
         if "turnover" in q and amt:
             return [("simulate_appetite", {"field": "monthly_turnover", "op": "gte", "value": float(amt)})]
         return [("get_near_match_analysis", {})]
+    if "match" in q and ("why" in q or "explain" in q) and "not" not in q and "no " not in q:
+        ref = re.search(r"\bopp-[a-z0-9]{4,}\b", q)
+        return [("explain_match", {"reference": ref.group(0).upper() if ref else None})]
+    if "product" in q and any(w in q for w in ("active", "live", "status", "paused", "available")):
+        return [("get_product_status", {})]
     if "outside" in q or "near" in q or ("why" in q and ("no " in q or "not" in q)):
         return [("get_near_match_analysis", {}), ("get_demand_summary", {})]
     if "where" in q and "demand" in q or "demand" in q:
@@ -226,6 +265,17 @@ def _render(name: str, r: dict) -> str:
     if name == "get_team_queue":
         owners = ", ".join(f"{k}: {v}" for k, v in r["by_owner"].items()) or "none assigned"
         return f"{r['open']} open opportunities; {r['unassigned']} unassigned. By owner: {owners}."
+    if name == "explain_match":
+        why = "\n".join(f"• {t}" for t in r["why_matched"]) or "• No criteria were recorded for this match."
+        near = ("\nJust missed: " + "; ".join(r["near_miss"]) + ".") if r["near_miss"] else ""
+        return (f"{r['reference']} matched {r['product'] or 'your product'} with a score of {r['match_score']} "
+                f"because:\n{why}{near}\nThe match score is not a credit decision.")
+    if name == "get_product_status":
+        if not r["products"]:
+            return "Your institution has no products on WEZA yet."
+        lines = "\n".join(f"• {p['name']}: {p['status'].lower().replace('_', ' ')}" for p in r["products"])
+        mandates = "\n".join(f"• {m['name']} → {', '.join(m['products']) or 'no product'}" for m in r["active_mandates"])
+        return f"Your products:\n{lines}" + (f"\n\nLive mandates:\n{mandates}" if mandates else "")
     if name == "simulate_appetite":
         c, s = r["current"], r["simulated"]
         return (f"Simulation for '{r['appetite']}' with {r['change']['field']} {r['change']['op']} "

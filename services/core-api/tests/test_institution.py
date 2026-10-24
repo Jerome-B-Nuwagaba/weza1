@@ -264,6 +264,26 @@ def test_assistant_answers_from_tools_read_only(client, as_user):
     assert r["tool_calls"][0]["tool"] == "get_near_match_analysis"
 
 
+def test_assistant_explains_a_match_and_reports_product_status(client, as_user):
+    """The Command Centre suggestions: why an opportunity matched, and which products are live — both read-only
+    and scoped to the asker's institution."""
+    h = as_user("manager@lakeside.demo")
+    r = client.post("/api/v1/inst/ask", json={"question": "Explain why this SME was matched"}, headers=h).json()
+    call = r["tool_calls"][0]
+    assert call["tool"] == "explain_match" and call["result"]["reference"] and "credit decision" in r["answer"]
+    ref = call["result"]["reference"]
+    again = client.post("/api/v1/inst/ask", json={"question": f"Why was {ref} matched?"}, headers=h).json()
+    assert again["tool_calls"][0]["result"]["reference"] == ref
+    # Another institution's user cannot read it by reference.
+    other = client.post("/api/v1/inst/ask", json={"question": f"Why was {ref} matched?"},
+                        headers=as_user("manager@pearl.demo")).json()
+    assert "error" in other["tool_calls"][0]["result"]
+    # An officer (no analytics access) can still ask which products are live.
+    p = client.post("/api/v1/inst/ask", json={"question": "Is our SME Working Capital product active?"},
+                    headers=as_user("officer@lakeside.demo")).json()
+    assert p["tool_calls"][0]["tool"] == "get_product_status" and "Your products" in p["answer"]
+
+
 def test_outcome_insight_exists_and_appetite_unchanged(client, as_user):
     """AT-40 / BR-004: mismatch insight raised; appetite not altered automatically."""
     h = as_user("credit@lakeside.demo")
