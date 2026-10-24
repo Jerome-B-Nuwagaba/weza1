@@ -231,6 +231,21 @@ def test_command_centre_is_role_personalised(client, as_user):
     assert sum(mgr["funnel"].values()) >= sum(off["funnel"].values())
 
 
+def test_command_centre_tiles_and_urgent_cases_are_real_counts(client, as_user):
+    """The four Command Centre tiles are counts WEZA holds, and every urgent case carries the columns the
+    Urgent cases table shows — without naming the customer."""
+    d = client.get("/api/v1/inst/command-centre", headers=as_user("manager@lakeside.demo")).json()
+    k = d["kpis"]
+    assert k["attention"] >= len(d["attention"]) and k["attention_high"] <= k["attention"]
+    assert k["new_24h"] >= len(d["new_opportunities"])
+    assert k["new_7d"] >= k["new_24h"]
+    assert k["active_products"] == len(d["active_products"]) <= k["products_total"]
+    assert k["active_mandates"] == len(d["active_mandates"]) <= k["mandates_total"]
+    for case in (c for c in d["attention"] if c.get("id")):
+        assert {"customer", "product", "issue", "owner", "updated_at", "severity", "reference"} <= set(case)
+        assert "@" not in case["customer"]
+
+
 def test_assistant_answers_from_tools_read_only(client, as_user):
     """AT-38: deterministic assistant routes to permitted tools and never mutates."""
     r = client.post("/api/v1/inst/ask", json={"question": "Show my best SME opportunities today"},

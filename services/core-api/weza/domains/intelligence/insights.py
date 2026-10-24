@@ -79,26 +79,42 @@ def command_centre(db: Session, actor: Actor) -> dict:
         "unassigned": {"label": "Unassigned", "value": len(unassigned)},
         "waiting": {"label": "Customers waiting >24h", "value": len(waiting)},
     }
+    owners = _owner_names(db, [a.user_id for a in assign.values() if a.user_id])
     attention = []
     for o in sorted(unassigned, key=lambda x: -float(x.amount))[:5]:
         attention.append({"kind": "UNASSIGNED", "id": str(o.id), "reference": o.reference,
                           "text": f"{fmt_money(o.amount)} · {o.purpose_category or ''} · {o.district or ''} · match "
-                                  f"{round(o.match_score)} — unassigned", "action": "Assign", "severity": "high"})
+                                  f"{round(o.match_score)} — unassigned", "action": "Assign", "severity": "high",
+                          **_case(o, assign.get(o.id), owners, "Not yet assigned to an officer")})
     for o in open_:
         a = assign.get(o.id)
         if a and a.breach_state in ("APPROACHING", "BREACHED", "ESCALATED") and a.first_contact_at is None:
+            overdue = a.breach_state != "APPROACHING"
             attention.append({"kind": "SERVICE_TARGET", "id": str(o.id), "reference": o.reference,
-                              "text": f"{o.reference} · first contact {'overdue' if a.breach_state != 'APPROACHING' else 'due soon'}",
-                              "action": "Contact", "severity": "high" if a.breach_state != "APPROACHING" else "medium"})
+                              "text": f"{o.reference} · first contact {'overdue' if overdue else 'due soon'}",
+                              "action": "Contact", "severity": "high" if overdue else "medium",
+                              **_case(o, a, owners, f"First contact {'overdue' if overdue else 'due soon'}")})
     for o in [x for x in open_ if x.integrity_hold][:3]:
         attention.append({"kind": "ON_HOLD", "id": str(o.id), "reference": o.reference,
-                          "text": f"{o.reference} on hold pending WEZA checks", "action": "View", "severity": "low"})
+                          "text": f"{o.reference} on hold pending WEZA checks", "action": "View", "severity": "low",
+                          **_case(o, assign.get(o.id), owners, "On hold pending WEZA checks")})
     stale = [o for o in open_ if o.freshness in ("STALE", "ATTENTION_REQUIRED")]
     if stale:
         attention.append({"kind": "STALE", "text": f"{len(stale)} opportunit{'ies' if len(stale) != 1 else 'y'} "
                           "need attention (no recent activity)", "action": "Review", "severity": "medium",
                           "link": "/institution/feed?freshness=STALE"})
     briefing = _briefing(cards, len(unassigned), high, new, waiting)
+    week = now - timedelta(days=7)
+    product_total = db.execute(select(func.count()).select_from(Product).where(
+        Product.institution_id == actor.institution_id, Product.status != "ARCHIVED")).scalar_one()
+    mandate_total = db.execute(select(func.count()).select_from(Appetite).where(
+        Appetite.institution_id == actor.institution_id, Appetite.lifecycle_status != "ARCHIVED")).scalar_one()
+    products_live, mandates_live = active_products(db, actor), active_mandates(db, actor)
+    # The four Command Centre tiles. Every figure is a count WEZA holds; nothing is estimated or trended.
+    kpis = {"attention": len(attention), "attention_high": len([x for x in attention if x["severity"] == "high"]),
+            "new_24h": len(new), "new_7d": len([o for o in opps if o.qualified_at >= week]),
+            "active_products": len(products_live), "products_total": product_total,
+            "active_mandates": len(mandates_live), "mandates_total": mandate_total}
     funnel = Counter(o.state for o in opps)
     no_lead = None
     if not open_ and not new:
@@ -117,10 +133,27 @@ def command_centre(db: Session, actor: Actor) -> dict:
                                "Demand Intelligence to see where WEZA demand is growing.", "link": "/institution/demand"}
     return {"briefing": briefing, "cards": cards, "attention": attention[:10], "funnel": dict(funnel),
             "no_lead": no_lead, "roles": sorted(actor.roles), "generated_at": now.isoformat(),
-            "active_products": active_products(db, actor), "active_mandates": active_mandates(db, actor),
+            "kpis": kpis, "active_products": products_live, "active_mandates": mandates_live,
             "new_opportunities": new_opportunities(new),
             "insights_open": db.execute(select(func.count()).select_from(Insight).where(
                 Insight.institution_id == actor.institution_id, Insight.status == "OPEN")).scalar_one()}
+
+
+def _owner_names(db: Session, user_ids: list) -> dict:
+    from weza.domains.identity.models import User
+    if not user_ids:
+        return {}
+    return {u.id: u.full_name for u in db.execute(select(User).where(User.id.in_(set(user_ids)))).scalars()}
+
+
+def _case(o: Opportunity, a: Assignment | None, owners: dict, issue: str) -> dict:
+    """The columns of an 'urgent case' row. Non-identifiable: the customer is described, never named."""
+    kind = {"SME": "Business", "SALARIED": "Salaried", "AGRICULTURE": "Farmer"}.get(o.customer_type or "", "Customer")
+    sector = UGANDA["sectors"].get(o.sector or "", (o.sector or "").replace("_", " ")) if o.sector else ""
+    return {"customer": " · ".join(x for x in (kind, sector, o.district) if x),
+            "product": ((o.snapshot or {}).get("product_version") or {}).get("name"),
+            "issue": issue, "owner": owners.get(a.user_id) if a and a.user_id else None,
+            "updated_at": (o.updated_at or o.qualified_at).isoformat()}
 
 
 def active_products(db: Session, actor: Actor) -> list[dict]:
