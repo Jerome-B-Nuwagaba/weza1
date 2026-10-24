@@ -50,6 +50,75 @@
   }
 }
 
+/* Institution workspace skin (2026-10 mockups): a vivid action blue, cool neutral greys and crisp 1px lines.
+   Scoped to [data-skin="institution"] so the staff and admin areas keep the brand look above. */
+[data-skin="institution"] {
+  --blue-50: #eef4ff;
+  --blue-100: #dce8ff;
+  --blue-400: #6f9cf3;
+  --blue-600: #1f63e8;
+  --blue-700: #1a55cc;
+  --blue-800: #1747a8;
+  --navy-900: #0b1b33;
+  --surface: #ffffff;
+  --canvas: #f6f8fb;
+  --border: #e4e9f0;
+  --muted: #64748b;
+  --text: #0f1b2d;
+  --success: #15803d;
+  --success-bg: #e8f6ee;
+  --warning: #b45309;
+  --warning-bg: #fdf1dc;
+  --danger: #d0312d;
+  --danger-bg: #fdeaea;
+  --violet: #7c3aed;
+  --violet-bg: #f1ebfe;
+  --teal: #0f9d6e;
+  --teal-bg: #e3f6ef;
+  --elev-xs: 0 1px 2px rgba(15, 27, 45, 0.05);
+  --elev-sm: 0 1px 3px rgba(15, 27, 45, 0.06), 0 1px 2px rgba(15, 27, 45, 0.04);
+  text-rendering: optimizeLegibility;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) [data-skin="institution"] {
+    --blue-50: #10203a;
+    --blue-100: #16305a;
+    --blue-400: #5b8def;
+    --blue-600: #7aa7ff;
+    --blue-700: #9dbcff;
+    --blue-800: #b9cfff;
+    --navy-900: #e8eef8;
+    --surface: #0d1626;
+    --canvas: #080f1b;
+    --border: #1d2a3d;
+    --muted: #93a3b8;
+    --text: #e8eef8;
+    --success: #4ade80;
+    --success-bg: #0f2a1c;
+    --warning: #f5b454;
+    --warning-bg: #2c2110;
+    --danger: #f87171;
+    --danger-bg: #2d1414;
+    --violet: #b794f6;
+    --violet-bg: #231a3d;
+    --teal: #4fd1a5;
+    --teal-bg: #0f2a22;
+    --elev-xs: none;
+    --elev-sm: none;
+  }
+}
+
+/* Form controls in the institution skin: a clear focus ring instead of a colour shift alone. */
+[data-skin="institution"] :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea):focus {
+  border-color: var(--blue-600);
+  box-shadow: 0 0 0 3px var(--blue-100);
+  outline: none;
+}
+[data-skin="institution"] input[type="checkbox"] {
+  accent-color: var(--blue-600);
+}
+
 @theme inline {
   --color-blue-50: var(--blue-50);
   --color-blue-100: var(--blue-100);
@@ -72,6 +141,12 @@
   --color-warning-bg: var(--warning-bg);
   --color-danger: var(--danger);
   --color-danger-bg: var(--danger-bg);
+  --color-violet: var(--violet);
+  --color-violet-bg: var(--violet-bg);
+  --color-teal: var(--teal);
+  --color-teal-bg: var(--teal-bg);
+  --shadow-xs: var(--elev-xs, 0 1px 2px rgba(15, 27, 45, 0.05));
+  --shadow-sm: var(--elev-sm, 0 1px 3px rgba(15, 27, 45, 0.06));
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-serif: var(--font-serif4), Georgia, serif;
 }

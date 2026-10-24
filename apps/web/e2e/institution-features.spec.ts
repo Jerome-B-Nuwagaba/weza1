@@ -28,9 +28,10 @@ test("radius what-if simulates a change without touching the live appetite", asy
 
 test("ask WEZA answers from read-only tools", async ({ page }) => {
   await signIn(page, "credit@lakeside.demo");
+  // Ask Weza lives on the Command Centre (/institution/ask redirects there).
   await page.goto("/institution/ask");
-  await page.getByLabel("Question").fill("What sits just outside our appetite?");
-  await page.getByRole("button", { name: "Ask" }).click();
+  await page.getByLabel("Ask Weza", { exact: true }).fill("What sits just outside our appetite?");
+  await page.getByRole("button", { name: "Send question" }).click();
   await expect(page.locator("main p.whitespace-pre-line").first()).not.toBeEmpty({ timeout: 30_000 });
   await noServerError(page);
 });

@@ -17,15 +17,15 @@ export function InstitutionWorkspaceTabs() {
   if (tabs.length < 2) return null;
 
   return (
-    <nav aria-label={`${area.label} sections`} className="mb-6 overflow-x-auto border-b border-line scroll-thin">
-      <ul className="flex min-w-max gap-1">
+    <nav aria-label={`${area.label} sections`} className="-mx-1 mb-5 overflow-x-auto px-1 pb-1 scroll-thin">
+      <ul className="flex min-w-max gap-2">
         {tabs.map((tab) => {
           const active = tabIsActive(area, tab, pathname);
           return (
             <li key={tab.href}>
               <Link href={tab.href} aria-current={active ? "page" : undefined}
-                className={cx("block whitespace-nowrap border-b-2 px-3 py-2 text-[13px] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-blue-600",
-                  active ? "border-blue-600 text-blue-800" : "border-transparent text-muted hover:border-blue-200 hover:text-ink")}>
+                className={cx("flex h-11 items-center whitespace-nowrap rounded-lg border px-5 text-[15px] font-medium transition-colors",
+                  active ? "border-blue-600 bg-surface text-blue-600 shadow-xs" : "border-transparent text-[#334155] hover:bg-surface hover:text-ink dark:text-muted")}>
                 {tab.label}
               </Link>
             </li>

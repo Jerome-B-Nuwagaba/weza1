@@ -1,146 +1,129 @@
 "use client";
 
 import Link from "next/link";
+import { Bell, Box, ChevronRight, Database, MoreVertical, Target } from "lucide-react";
 import { useApi } from "@/lib/hooks";
-import { money } from "@/lib/format";
+import { ago } from "@/lib/format";
 import { useMe } from "@/components/StaffShell";
 import { InstitutionAskPanel } from "@/components/InstitutionAskPanel";
-import { FIELD_META } from "@/components/RuleBuilder";
-import { Banner, Button, Card, EmptyState, ErrorState, Loading, PageHeader, StateBadge, Table, Td } from "@/components/ui";
+import { Badge, Banner, Button, Card, cx, ErrorState, Loading, Table, Td } from "@/components/ui";
 
-const CUSTOMER_TYPE: Record<string, string> = {
-  SME: "Business (SME)", SALARIED: "Salaried", AGRICULTURE: "Farmer",
-};
+const PRIORITY: Record<string, [string, string]> = { high: ["High", "danger"], medium: ["Medium", "warning"], low: ["Low", "neutral"] };
 
-const customerType = (v?: string | null) => (v ? CUSTOMER_TYPE[v] || v.replace(/_/g, " ").toLowerCase() : null);
+const initials = (name: string) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]!.toUpperCase()).join("");
 
-/** The Command Centre: what the institution can offer, what it is looking for, what just arrived and what
- * needs action. No dashboards, no charts — four lists an institution admin can act on. */
+function Tile({ href, icon: Icon, tint, label, value, sub }: {
+  href: string; icon: any; tint: string; label: string; value: number; sub: React.ReactNode;
+}) {
+  return (
+    <Link href={href} className="group flex items-center gap-5 rounded-2xl border border-line bg-surface p-6 shadow-xs transition-colors hover:border-blue-400">
+      <span className={cx("flex h-14 w-14 shrink-0 items-center justify-center rounded-full", tint)}>
+        <Icon className="h-6 w-6" strokeWidth={1.75} aria-hidden />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[16px] font-medium text-ink">{label}</span>
+        <span className="num mt-1 block text-[32px] font-bold leading-none tracking-[-0.02em] text-ink">{value}</span>
+        <span className="mt-2 block truncate text-[14px] text-muted">{sub}</span>
+      </span>
+      <ChevronRight className="h-5 w-5 shrink-0 text-muted transition-transform group-hover:translate-x-0.5" aria-hidden />
+    </Link>
+  );
+}
+
+/** The Command Centre (2026-10 mockup): a greeting, Ask Weza, four counts that open the work behind them, and
+ * the cases that need someone now. Every number is a count WEZA holds — nothing is projected. */
 export default function CommandCentre() {
-  const { me, can } = useMe();
+  const { me } = useMe();
   const cc = useApi<any>("/inst/command-centre");
+  const first = me.full_name.split(/\s+/)[0] || me.full_name;
+
+  const hero = (
+    <div className="pt-4 text-center sm:pt-8">
+      <h1 className="font-serif text-[40px] font-semibold leading-tight tracking-[-0.02em] text-ink sm:text-[52px]">
+        Hello, <span className="text-blue-600">{first}</span>
+      </h1>
+      <p className="mx-auto mt-3 max-w-2xl text-[16px] text-muted sm:text-[18px]">Manage credit opportunities, products and appetite across your institution.</p>
+    </div>
+  );
+
   if (me.institution && me.institution.status !== "ACTIVE")
     return (
-      <div className="space-y-4">
-        <Banner tone="gold" title="Your workspace isn't live yet">Complete the activation checklist to start receiving qualified opportunities.</Banner>
-        <Button href="/institution/onboarding">Open activation checklist</Button>
+      <div className="space-y-8">
+        {hero}
+        <Banner tone="gold" title="Your workspace isn't live yet" className="mx-auto max-w-3xl">Complete the activation checklist to start receiving qualified opportunities.</Banner>
+        <div className="text-center"><Button href="/institution/onboarding">Open activation checklist</Button></div>
       </div>
     );
-  if (cc.loading) return <Loading rows={6} />;
-  if (cc.error) return <ErrorState error={cc.error} onRetry={cc.reload} />;
+
   const d = cc.data;
-  const products: any[] = d.active_products || [];
-  const mandates: any[] = d.active_mandates || [];
-  const fresh: any[] = d.new_opportunities || [];
-  const attention: any[] = d.attention || [];
+  const k = d?.kpis;
+  const cases: any[] = d?.attention || [];
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="Command Centre"
-        subtitle={d.briefing}
-        actions={<>
-          {can("product.create") && <Button variant="secondary" href="/institution/products">Products</Button>}
-          {can("appetite.edit") && <Button href="/institution/appetite">Mandates</Button>}
-        </>}
-      />
-
-      {d.no_lead && (
-        <Banner tone="info" title="No opportunities in your queue right now">
-          {d.no_lead.text} <Link href={d.no_lead.link} className="font-medium underline">Explore</Link>
-        </Banner>
-      )}
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Active products" subtitle="What your institution can offer customers today."
-          action={<Link href="/institution/products" className="text-[13px] font-medium text-blue-800 hover:underline">All products</Link>}>
-          {products.length === 0 ? (
-            <EmptyState title="No active products">
-              {can("product.create") ? "Create a product so customers can be matched to it." : "Your administrator manages products."}
-            </EmptyState>
-          ) : (
-            <ul className="divide-y divide-line">
-              {products.map((p) => (
-                <li key={p.id} className="flex items-start justify-between gap-3 py-2.5">
-                  <div className="min-w-0">
-                    <Link href={`/institution/products/${p.id}`} className="font-medium text-blue-800 hover:underline">{p.name}</Link>
-                    <div className="text-[13px] text-muted">
-                      {customerType(p.customer_type) || p.family.replace(/_/g, " ").toLowerCase()} · {money(p.min_amount)} – {money(p.max_amount)} · {p.min_tenor_months}–{p.max_tenor_months} mo
-                    </div>
-                  </div>
-                  <StateBadge state={p.status} />
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-
-        <Card title="Active mandates" subtitle="The customers WEZA should be finding for you."
-          action={<Link href="/institution/appetite" className="text-[13px] font-medium text-blue-800 hover:underline">All mandates</Link>}>
-          {mandates.length === 0 ? (
-            <EmptyState title="No active mandates">
-              {can("appetite.edit") ? "Define a mandate so WEZA knows who you want to serve." : "Your administrator manages mandates."}
-            </EmptyState>
-          ) : (
-            <ul className="divide-y divide-line">
-              {mandates.map((m) => (
-                <li key={m.id} className="flex items-start justify-between gap-3 py-2.5">
-                  <div className="min-w-0">
-                    <Link href={`/institution/appetite/${m.id}`} className="font-medium text-blue-800 hover:underline">{m.name}</Link>
-                    <div className="text-[13px] text-muted">
-                      {m.products.length ? m.products.map((x: any) => x.name).join(", ") : "No products linked"}
-                      {m.criteria?.length ? ` · ${m.criteria.map((c: any) => FIELD_META[c.field]?.label || c.field).slice(0, 3).join(", ")}` : ""}
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 gap-1">
-                    <StateBadge state={m.status} />
-                    {m.capacity_state && m.capacity_state !== "ACTIVE" && <StateBadge state={m.capacity_state} label={`Capacity ${m.capacity_state.toLowerCase()}`} />}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-      </div>
-
-      <Card title="New opportunities" subtitle="Matched to your mandates in the last 24 hours."
-        action={<Link href="/institution/feed" className="text-[13px] font-medium text-blue-800 hover:underline">Open feed</Link>}>
-        {fresh.length === 0 ? (
-          <p className="text-[14px] text-muted">No new opportunities in the last 24 hours.</p>
-        ) : (
-          <Table head={["Reference", "Amount", "Match", "Customer", "Purpose", "Status"]}>
-            {fresh.map((o) => (
-              <tr key={o.id} className="hover:bg-canvas">
-                <Td><Link href={`/institution/opportunities/${o.id}`} className="font-medium text-blue-800 hover:underline">{o.reference}</Link></Td>
-                <Td className="num">{money(o.amount)}</Td>
-                <Td className="num">{o.match_score}%</Td>
-                <Td>{customerType(o.customer_type) || "—"}</Td>
-                <Td>{o.purpose_category ? o.purpose_category.replace(/_/g, " ").toLowerCase() : "—"}</Td>
-                <Td><StateBadge state={o.state} /></Td>
-              </tr>
-            ))}
-          </Table>
-        )}
-      </Card>
-
-      <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
-      <Card title="Needs attention" subtitle="Unassigned work, missed service targets and holds.">
-        {attention.length === 0 ? <p className="text-[14px] text-muted">Nothing urgent. Nicely done.</p> : (
-          <ul className="divide-y divide-line">
-            {attention.map((a: any, i: number) => (
-              <li key={i} className="flex items-center justify-between gap-3 py-2.5">
-                <span className="flex items-center gap-2 text-[14px]">
-                  <span className={`h-2 w-2 shrink-0 rounded-full ${a.severity === "high" ? "bg-danger" : a.severity === "medium" ? "bg-warning" : "bg-blue-400"}`} />
-                  {a.text}
-                </span>
-                <Button size="sm" variant="secondary" href={a.id ? `/institution/opportunities/${a.id}` : a.link}>{a.action}</Button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
+    <div className="space-y-8">
+      {hero}
       <InstitutionAskPanel />
-      </div>
+
+      {cc.loading && !d ? <Loading rows={4} /> : cc.error ? <ErrorState error={cc.error} onRetry={cc.reload} /> : (
+        <>
+          {d.no_lead && (
+            <Banner tone="info" title="No opportunities in your queue right now">
+              {d.no_lead.text} <Link href={d.no_lead.link} className="font-medium underline">Explore</Link>
+            </Banner>
+          )}
+
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <Tile href="#urgent-cases" icon={Bell} tint="bg-danger-bg text-danger" label="Needs attention" value={k.attention}
+              sub={k.attention_high ? `${k.attention_high} high priority` : "Nothing high priority"} />
+            <Tile href="/institution/feed" icon={Target} tint="bg-blue-50 text-blue-600" label="New opportunities" value={k.new_24h}
+              sub={<><span className="font-medium text-success">+{k.new_7d}</span> this week</>} />
+            <Tile href="/institution/products" icon={Box} tint="bg-violet-bg text-violet" label="Active product" value={k.active_products}
+              sub={`of ${k.products_total} product${k.products_total === 1 ? "" : "s"}`} />
+            <Tile href="/institution/appetite" icon={Database} tint="bg-teal-bg text-teal" label="Active appetite" value={k.active_mandates}
+              sub={`of ${k.mandates_total} mandate${k.mandates_total === 1 ? "" : "s"}`} />
+          </div>
+
+          <div id="urgent-cases" className="scroll-mt-24">
+            <Card title="Urgent cases" action={<Button variant="secondary" size="sm" href="/institution/feed">View all <ChevronRight className="h-4 w-4" /></Button>}>
+              {cases.length === 0 ? (
+                <p className="py-6 text-center text-[15px] text-muted">Nothing urgent. Nicely done.</p>
+              ) : (
+                <div className="-mx-6 -mb-6 overflow-hidden rounded-b-2xl border-t border-line">
+                  <Table bare head={["Ref", "Customer", "Product", "Issue", "Priority", "Assigned to", "Updated", ""]}>
+                    {cases.map((c, i) => {
+                      const [label, tone] = PRIORITY[c.severity] || PRIORITY.low;
+                      const href = c.id ? `/institution/opportunities/${c.id}` : c.link;
+                      return (
+                        <tr key={c.id || `${c.kind}-${i}`}>
+                          <Td><Link href={href} className="num font-medium text-blue-600 hover:underline">{c.reference ? `#${c.reference}` : "—"}</Link></Td>
+                          <Td className="text-ink">{c.customer || "—"}</Td>
+                          <Td className="text-ink">{c.product || "—"}</Td>
+                          <Td className="text-ink">{c.issue || c.text}</Td>
+                          <Td><Badge tone={tone}>{label}</Badge></Td>
+                          <Td>
+                            {c.owner ? (
+                              <span className="flex items-center gap-2.5 whitespace-nowrap text-ink">
+                                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#5b7bb5] text-[12px] font-semibold text-white">{initials(c.owner)}</span>
+                                {c.owner}
+                              </span>
+                            ) : <span className="text-muted">Unassigned</span>}
+                          </Td>
+                          <Td className="whitespace-nowrap text-muted">{c.updated_at ? ago(c.updated_at) : "—"}</Td>
+                          <Td className="w-12 text-right">
+                            <Link href={href} aria-label={`Open ${c.reference || "case"}`} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted hover:bg-canvas hover:text-ink">
+                              <MoreVertical className="h-4 w-4" />
+                            </Link>
+                          </Td>
+                        </tr>
+                      );
+                    })}
+                  </Table>
+                </div>
+              )}
+            </Card>
+          </div>
+        </>
+      )}
     </div>
   );
 }
