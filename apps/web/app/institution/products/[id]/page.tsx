@@ -46,7 +46,7 @@ export default function ProductDetail({ params }: { params: Promise<{ id: string
   return (
     <>
       {node}
-      <PageHeader eyebrow="Product Studio" title={d.name} subtitle={`${d.family.replace(/_/g, " ").toLowerCase()} · live version ${active ? "v" + active.version : "none"}`}
+      <PageHeader eyebrow="Products" title={d.name} subtitle={`${d.family.replace(/_/g, " ").toLowerCase()} · live version ${active ? "v" + active.version : "none"}`}
         actions={<>
           <StateBadge state={d.status} />
           {can("product.create") && !pending && <Button variant="secondary" onClick={() => setEditing(!editing)}>{editing ? "Close editor" : draft ? "Edit draft" : "Edit (new version)"}</Button>}
@@ -71,7 +71,7 @@ export default function ProductDetail({ params }: { params: Promise<{ id: string
         <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
           <div className="space-y-4">
             <Card title={`Version ${shown.version}`} action={<StateBadge state={shown.status} />}>
-              <KV items={[["Amount", `${money(shown.terms.min_amount)} – ${money(shown.terms.max_amount)}`], ["Tenor", `${shown.terms.min_tenor_months}–${shown.terms.max_tenor_months} months`], ["Pricing shown", shown.terms.pricing_display || "—"], ["Collateral", shown.terms.collateral_required ? "Required" : "Not required"], ["Digital process", shown.terms.digital_journey ? "Yes" : "No"], ["Ruleset", shown.ruleset_hash?.slice(0, 12)]]} />
+              <KV items={[["Amount", `${money(shown.terms.min_amount)} – ${money(shown.terms.max_amount)}`], ["Tenor", `${shown.terms.min_tenor_months}–${shown.terms.max_tenor_months} months`], ["Customer type", shown.terms.customer_type ? ({ SME: "Business (SME)", SALARIED: "Salaried", AGRICULTURE: "Farmer" } as Record<string, string>)[shown.terms.customer_type] || shown.terms.customer_type : "—"], ["Pricing shown", shown.terms.pricing_display || "—"], ["Collateral", shown.terms.collateral_required ? "Required" : "Not required"], ["Digital process", shown.terms.digital_journey ? "Yes" : "No"], ["Ruleset", shown.ruleset_hash?.slice(0, 12)]]} />
             </Card>
             <Card title="Eligibility rules">
               {shown.rules.length === 0 ? <p className="text-[14px] text-muted">Amount range only.</p> : (

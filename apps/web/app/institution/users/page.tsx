@@ -51,7 +51,7 @@ export default function Users() {
           <tr key={x.id}>
             <Td><div className="font-medium">{x.name}</div><div className="text-[12px] text-muted">{x.email}</div></Td>
             <Td><div className="flex flex-wrap gap-1">{x.roles.map((r: string) => <Badge key={r} tone="muted">{d.role_labels[r]}</Badge>)}</div></Td>
-            <Td>{can("users.manage") ? <Select value={x.team_id || ""} onChange={(e) => run(() => api(`/inst/users/${x.id}`, { method: "PATCH", body: { team_id: e.target.value } }))} options={[["", "—"], ...d.teams.map((t: any) => [t.id, t.name])]} className="!h-8 !w-40" /> : x.team || "—"}</Td>
+            <Td>{can("users.manage") ? <Select aria-label={`Team for ${x.name || x.email}`} value={x.team_id || ""} onChange={(e) => run(() => api(`/inst/users/${x.id}`, { method: "PATCH", body: { team_id: e.target.value } }))} options={[["", "—"], ...d.teams.map((t: any) => [t.id, t.name])]} className="!h-9 !w-40 !text-[14px]" /> : x.team || "—"}</Td>
             <Td>{x.mfa_enrolled ? <Badge tone="success">On</Badge> : <Badge tone="muted">Off</Badge>}</Td>
             <Td><StateBadge state={x.status} /></Td>
             <Td>
@@ -126,4 +126,9 @@ const ROLE_HELP: Record<string, string> = {
   MANAGER: "queues, assignment, service targets, team identity access",
   OFFICER: "assigned opportunities, contact, outcomes",
   COMPLIANCE: "consent and access logs",
+  // The canonical WEZA V1 names. Each grants exactly the permissions of the working role above it.
+  INSTITUTION_ADMIN: "users, settings, activation; approves products/appetite",
+  INSTITUTION_MANAGER: "queues, assignment, service targets, team identity access",
+  INSTITUTION_OFFICER: "assigned opportunities, contact, outcomes",
+  COMPLIANCE_VIEWER: "consent and access logs",
 };

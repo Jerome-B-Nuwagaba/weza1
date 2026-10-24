@@ -24,7 +24,8 @@ from weza.platform.db import session_scope
 from weza.platform.events import drain
 
 PW = "Str0ng-Passw0rd!"
-PROFILE = ["Grace Nakato", "skip", "Nakato Traders", "Kampala", "3 years", "12 million", "yes", "0", "12 months"]
+# name, NIN (skipped), the licences (none to send), then the business questions
+PROFILE = ["Grace Nakato", "skip", "skip", "Nakato Traders", "Kampala", "3 years", "12 million", "yes", "0", "12 months"]
 
 
 def _onboard(client, as_user, suffix: str) -> dict:
@@ -80,7 +81,7 @@ def test_new_institution_receives_a_whatsapp_customers_opportunity(client, as_us
     verified_journey(client, phone)
     for answer in PROFILE:
         text_msg(client, phone, answer)
-        if journeys_for(phone)[0][1] != "ASK_PROFILE":
+        if journeys_for(phone)[0][1] not in ("ASK_PROFILE", "REQUEST_BUSINESS_DOCS"):
             break
     assert journeys_for(phone)[0][1] == "PRESENT_OPTIONS"
     options = next(m.body for m in reversed(_bot(phone)) if f"E2E Lender {suffix}" in m.body)
@@ -92,6 +93,14 @@ def test_new_institution_receives_a_whatsapp_customers_opportunity(client, as_us
     send(client, __import__("scripts.replay_whatsapp_webhook", fromlist=["x"]).build(
         "button", phone=phone, button_id=f"agree:{agree['value']}"))
     drain()
+    # the number that receives the money: proven by an SMS code typed back into the chat
+    assert journeys_for(phone)[0][1] == "PAYOUT_NUMBER"
+    send(client, __import__("scripts.replay_whatsapp_webhook", fromlist=["x"]).build(
+        "button", phone=phone, button_id="payout_this"))
+    # it is the chat number, so the code arrives in the chat itself (any other number would get an SMS)
+    sent = next(m.body for m in reversed(out_messages(phone)) if (m.payload or {}).get("kind") == "otp")
+    code = re.search(r"\b(\d{6})\b", sent).group(1)
+    text_msg(client, phone, code)
     assert journeys_for(phone)[0][1] == "TRACKING"
     assert "OPP-" in " ".join(m.body for m in _bot(phone))  # the customer is told the reference
 
@@ -104,6 +113,7 @@ def test_new_institution_receives_a_whatsapp_customers_opportunity(client, as_us
     assert detail["customer"]["fields"]["full_name"] == "Grace Nakato"
     assert detail["customer"]["fields"]["phone"].endswith(phone[-9:])
     assert detail["customer"]["fields"]["contact_channel"] == "whatsapp"  # reach them where they are
+    assert detail["customer"]["fields"]["payout_phone"].endswith(phone[-9:])
     assert detail["consent"]["status"] == "GRANTED"
     assert detail["state"] in ("ASSIGNED", "ROUTED", "RECEIVED")
 

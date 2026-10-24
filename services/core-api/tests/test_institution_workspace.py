@@ -54,10 +54,10 @@ def test_team_and_user_ids_are_tenant_checked(client, as_user):
     r = client.post("/api/v1/inst/users", headers=w["admin"], json={
         "full_name": "Xavier", "email": f"x@w{w['s']}.co.ug", "roles": ["OFFICER"], "team_id": pearl_team,
         "password": PW})
-    assert r.status_code == 422 and r.json()["error"]["code"] == "UNKNOWN_TEAM"
+    assert r.status_code == 404
     off = w["users"]["off"]["id"]
     r = client.patch(f"/api/v1/inst/users/{off}", headers=w["admin"], json={"team_id": pearl_team})
-    assert r.json()["error"]["code"] == "UNKNOWN_TEAM"
+    assert r.status_code == 404
     r = client.patch(f"/api/v1/inst/users/{off}", headers=w["admin"], json={"roles": []})
     assert r.json()["error"]["code"] == "ROLES_REQUIRED"
     # Another institution's user is invisible
@@ -65,7 +65,7 @@ def test_team_and_user_ids_are_tenant_checked(client, as_user):
                         json={"status": "DISABLED"}).status_code == 404
     assert client.post(f"/api/v1/inst/users/{pearl_user}/password", headers=w["admin"],
                        json={"new_password": "Another-Str0ng-Pw!"}).status_code == 404
-    assert client.patch(f"/api/v1/inst/teams/{pearl_team}", headers=w["admin"], json={"name": "Hijack"}).status_code == 422
+    assert client.patch(f"/api/v1/inst/teams/{pearl_team}", headers=w["admin"], json={"name": "Hijack"}).status_code == 404
 
 
 def test_roles_can_be_edited_and_teams_renamed_or_removed_safely(client, as_user):

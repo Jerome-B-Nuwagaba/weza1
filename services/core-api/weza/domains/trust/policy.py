@@ -6,20 +6,25 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
+from weza.domains.trust import roles as canon
 from weza.domains.trust.models import PolicyDecisionLog
 from weza.platform.context import Actor
 from weza.platform.errors import Forbidden, NotFound
 
 POLICY_VERSION = "policies_v1"
 
-INST_ROLES = ["INST_ADMIN", "EXECUTIVE", "BUSINESS", "CREDIT_RISK", "MANAGER", "OFFICER", "COMPLIANCE"]
-WEZA_ROLES = ["WEZA_OPS", "WEZA_COMMERCIAL", "WEZA_SUPER"]
+# The canonical vocabulary (Goal 1 §2) is accepted everywhere the working vocabulary is, and grants
+# the same permissions: a membership holding "INSTITUTION_ADMIN" is an administrator, exactly like
+# one holding "INST_ADMIN". See weza.domains.trust.roles for the mapping.
+INST_ROLES = ["INST_ADMIN", "EXECUTIVE", "BUSINESS", "CREDIT_RISK", "MANAGER", "OFFICER", "COMPLIANCE",
+              canon.INSTITUTION_ADMIN, canon.INSTITUTION_MANAGER, canon.INSTITUTION_OFFICER, canon.COMPLIANCE_VIEWER]
+WEZA_ROLES = ["WEZA_OPS", "WEZA_COMMERCIAL", "WEZA_SUPER", canon.WEZA_ADMIN]
 
 ROLE_LABELS = {
     "INST_ADMIN": "Administrator", "EXECUTIVE": "Executive", "BUSINESS": "Business / Product lead",
     "CREDIT_RISK": "Credit / Risk lead", "MANAGER": "Team manager", "OFFICER": "Relationship officer",
     "COMPLIANCE": "Compliance", "WEZA_OPS": "WEZA Operations", "WEZA_COMMERCIAL": "WEZA Commercial",
-    "WEZA_SUPER": "WEZA Super-admin",
+    "WEZA_SUPER": "WEZA Super-admin", **canon.CANONICAL_LABELS,
 }
 
 PERMISSIONS: dict[str, set[str]] = {
@@ -30,9 +35,9 @@ PERMISSIONS: dict[str, set[str]] = {
                      "WEZA_OPS", "WEZA_SUPER"},
     "product.create": {"BUSINESS", "CREDIT_RISK", "INST_ADMIN"},
     "product.approve": {"INST_ADMIN", "EXECUTIVE", "BUSINESS", "CREDIT_RISK"},
-    "appetite.read": {"INST_ADMIN", "EXECUTIVE", "BUSINESS", "CREDIT_RISK", "MANAGER", "COMPLIANCE", "WEZA_OPS",
-                      "WEZA_SUPER"},
-    "appetite.edit": {"BUSINESS", "CREDIT_RISK"},
+    "appetite.read": {"INST_ADMIN", "EXECUTIVE", "BUSINESS", "CREDIT_RISK", "MANAGER", "OFFICER", "COMPLIANCE",
+                      "WEZA_OPS", "WEZA_SUPER"},
+    "appetite.edit": {"INST_ADMIN", "BUSINESS", "CREDIT_RISK"},
     "appetite.simulate": {"BUSINESS", "CREDIT_RISK", "EXECUTIVE", "INST_ADMIN"},
     "appetite.activate": {"INST_ADMIN", "EXECUTIVE", "CREDIT_RISK"},
     "routing.manage": {"INST_ADMIN", "MANAGER"},
@@ -54,13 +59,29 @@ PERMISSIONS: dict[str, set[str]] = {
     "consent.audit": {"COMPLIANCE", "INST_ADMIN", "WEZA_OPS", "WEZA_SUPER"},
     "admin.verify_institution": {"WEZA_OPS", "WEZA_SUPER"},
     "admin.network_control": {"WEZA_OPS", "WEZA_SUPER"},
+    # Goal 2: WEZA staff bring an institution into the marketplace — create it, record its primary contact,
+    # give it an administrator, then activate or pause it once it is ready to trade.
+    "admin.institution_onboard": {"WEZA_ADMIN", "WEZA_SUPER"},
+    "admin.institution_activate": {"WEZA_ADMIN", "WEZA_SUPER"},
     "admin.config": {"WEZA_SUPER"},
     "admin.dispute_decide": {"WEZA_COMMERCIAL", "WEZA_SUPER"},
     "admin.vault_lookup": {"WEZA_OPS", "WEZA_SUPER"},
     "admin.read": {"WEZA_OPS", "WEZA_COMMERCIAL", "WEZA_SUPER"},
     "admin.review": {"WEZA_OPS", "WEZA_SUPER"},
+    # Diagnostic pages (Graph Inspector, Loops & AI, Events & delivery): for the people who run the platform, not for
+    # business staff (21 Oct review). Commercial staff keep every commercial, billing and audit page.
+    "admin.engineering": {"WEZA_OPS", "WEZA_SUPER"},
     "admin.commercial": {"WEZA_COMMERCIAL", "WEZA_SUPER"},
 }
+
+# A canonical role grants exactly the permissions of the working role it stands for: INSTITUTION_ADMIN
+# is an administrator, COMPLIANCE_VIEWER is compliance. Derived, not hand-maintained, so the two
+# vocabularies can never drift apart.
+for _roles_allowed in PERMISSIONS.values():
+    for _canonical, _members in canon.ROLE_MEMBERSHIP.items():
+        if _roles_allowed & _members:
+            _roles_allowed.add(_canonical)
+del _roles_allowed, _canonical, _members
 
 
 def has(actor: Actor, permission: str) -> bool:

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from tests.helpers import opp_for
 from weza.consumers import preview_payload
@@ -160,7 +160,8 @@ def test_audit_is_append_only(database):
 
 def test_zero_core_integration_boundary():
     """AT-49 / FR-039: the only outbound HTTP calls are the customer channels (WhatsApp, SMS), the AI provider, the
-    identity registry used to verify applicants and the credit bureau (gnuGRID) — there is no connector to any institution core banking,
+    identity registry used to verify applicants, the credit bureau (gnuGRID), Microsoft Entra ID sign-in for staff and the
+    Teams channel an institution chooses for its own alerts — there is no connector to any institution core banking,
     CRM, LOS or database."""
     root = Path(__file__).resolve().parents[1] / "weza"
     offenders = []
@@ -168,7 +169,8 @@ def test_zero_core_integration_boundary():
         src = f.read_text(encoding="utf8")
         if re.search(r"httpx\.(get|post|put|request|Client)|requests\.|urllib\.request", src):
             offenders.append(f.relative_to(root).as_posix())
-    assert sorted(offenders) == ["domains/notification/service.py", "domains/verification/adapters.py",
+    assert sorted(offenders) == ["domains/identity/entra.py", "domains/notification/service.py",
+                                 "domains/notification/teams.py", "domains/verification/adapters.py",
                                  "integrations/gnugrid.py"], offenders
     assert "graph.facebook.com" in (root / "domains/notification/service.py").read_text(encoding="utf8")
 
@@ -184,6 +186,8 @@ def test_every_network_touchpoint_is_known():
         "domains/notification/whatsapp_media.py": "customer channel: media customers send on WhatsApp (Meta Graph)",
         "domains/verification/adapters.py": "identity registry (gnuGRID)",
         "integrations/gnugrid.py": "credit bureau (gnuGRID CRB), Just-In-Time at lender selection",
+        "domains/identity/entra.py": "Microsoft Entra ID sign-in for staff (token exchange and published signing keys)",
+        "domains/notification/teams.py": "Microsoft Teams alerts to a channel the institution connects (Microsoft hosts only)",
         "domains/intelligence/ai.py": "AI provider (Anthropic)",
     }
     pattern = (r"\bsocket\.(create_connection|socket)\b|create_engine\(|\bpsycopg2?\.connect|\b(pyodbc|pymssql|cx_Oracle|"
@@ -202,3 +206,25 @@ def test_tests_never_use_real_channel_credentials_or_network():
     assert not (s.whatsapp_send_ready or s.whatsapp_webhook_ready or s.sms_ready)
     with pytest.raises(AssertionError, match="real network call"):
         httpx.post("https://graph.facebook.com/v25.0/x/messages", json={})
+
+
+def test_sign_in_attempts_per_address_are_capped_and_the_cap_is_configurable(client, monkeypatch):
+    """50 a quarter-hour by default; the browser-test container raises it, and production refuses a high value."""
+    from weza.config import Settings, get_settings
+    from weza.domains.identity import service as identity
+    from weza.platform.errors import RateLimited
+    ip = "203.0.113.77"
+    monkeypatch.setattr(get_settings(), "login_ip_limit", 3)
+    with session_scope() as db:
+        db.execute(text("DELETE FROM platform.rate_counter WHERE bucket LIKE 'login:%'"))
+    for i in range(3):
+        with session_scope() as db, pytest.raises(Exception) as err:
+            identity.login(db, f"nobody{i}@example.invalid", "x" * 12, ip=ip)
+        assert not isinstance(err.value, RateLimited)  # refused for the password, not for the address
+    with pytest.raises(RateLimited), session_scope() as db:
+        identity.login(db, "nobody9@example.invalid", "x" * 12, ip=ip)
+    with session_scope() as db:
+        db.execute(text("DELETE FROM platform.rate_counter WHERE bucket LIKE 'login:%'"))
+    assert Settings().login_ip_limit == 50
+    assert any("LOGIN_IP_LIMIT" in p for p in Settings(login_ip_limit=1000).production_problems())
+    assert not any("LOGIN_IP_LIMIT" in p for p in Settings(login_ip_limit=50).production_problems())

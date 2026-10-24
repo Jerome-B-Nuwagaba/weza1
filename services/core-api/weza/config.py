@@ -38,6 +38,22 @@ class Settings(BaseSettings):
     seed_demo: bool = False
     demo_mode: bool = True  # shows demo banners, allows OTP display delivery
     mfa_enforced: bool = False  # production: True (blueprint §10.6)
+    # Sign-in attempts allowed per IP address per 15 minutes. Only the browser test suite (every test signs in from
+    # one address) raises it; production must keep it at 100 or less.
+    login_ip_limit: int = 50
+    # Daily retention run (TSD §70): deletes/anonymises data past the retention policy. Off by default because it destroys
+    # data: turn it on in production once the policy (country config `retention:UG`) has legal sign-off. Deliberately not
+    # a startup blocker; it is on the go-live checklist (docs/GO_LIVE_CHECKLIST.md).
+    retention_enabled: bool = False
+    # Bearer token that unlocks GET /metrics (Prometheus format, TSD §64). Unset = the endpoint does not exist.
+    metrics_token: str | None = None
+    # Microsoft Entra ID sign-in for staff (TSD §13). All four are needed, and the tenant must be one GUID: a multi-tenant
+    # authority is deliberately not supported. The redirect URI is the WEB app's /api/v1/auth/entra/callback, so the
+    # session cookie is set on the site users are on.
+    entra_tenant_id: str | None = None
+    entra_client_id: str | None = None
+    entra_client_secret: str | None = None
+    entra_redirect_uri: str | None = None
 
     # OTP (TSD §13)
     otp_delivery: str = "display"  # display | sms
@@ -51,12 +67,16 @@ class Settings(BaseSettings):
     ai_model: str = "claude-opus-5-5"
     ai_timeout_seconds: float = 20.0
     ai_server_fallbacks: bool = True
+    # Reading National ID and licence photos with the AI provider (only after the malware scan). Needs a privacy
+    # sign-off before production: set AI_DOCUMENT_EXTRACTION=false and customers type their details instead.
+    ai_document_extraction: bool = True
 
     # Channels. A value that is empty, unset or the template placeholder (REPLACE_ME) means NOT CONFIGURED:
     # the app then stays in simulator/console mode and never calls Meta or an SMS provider.
     # >>> USER INPUT REQUIRED: real WhatsApp Cloud API values (Meta developer dashboard → WhatsApp → API Setup,
     # and App settings → Basic for the app secret). Put them ONLY in services/core-api/.env (untracked).
     whatsapp_token: str | None = None  # permanent/system-user access token
+    whatsapp_required: bool = False  # hosted WhatsApp service: refuse silent simulator fallback
     whatsapp_phone_number_id: str | None = None  # "Phone number ID" (not the phone number itself)
     whatsapp_app_secret: str | None = None  # signs inbound webhooks (X-Hub-Signature-256)
     whatsapp_verify_token: str | None = None  # any string you choose; must match the Meta webhook form
@@ -134,6 +154,8 @@ class Settings(BaseSettings):
             problems.append("development secrets (SECRET_KEY / VAULT_MASTER_KEY / BLIND_INDEX_KEY)")
         if not self.mfa_enforced:
             problems.append("MFA_ENFORCED is not true")
+        if self.login_ip_limit > 100:
+            problems.append("LOGIN_IP_LIMIT is above 100 (it is only for test environments)")
         if self.otp_delivery != "sms":
             problems.append("OTP_DELIVERY must be sms")
         if self.sms_provider == "africastalking":
@@ -170,6 +192,15 @@ class Settings(BaseSettings):
     @property
     def whatsapp_send_ready(self) -> bool:
         return is_configured(self.whatsapp_token) and is_configured(self.whatsapp_phone_number_id)
+
+    @property
+    def whatsapp_missing(self) -> list[str]:
+        return [name for name, value in {
+            "WHATSAPP_TOKEN": self.whatsapp_token,
+            "WHATSAPP_PHONE_NUMBER_ID": self.whatsapp_phone_number_id,
+            "WHATSAPP_APP_SECRET": self.whatsapp_app_secret,
+            "WHATSAPP_VERIFY_TOKEN": self.whatsapp_verify_token,
+        }.items() if not is_configured(value)]
 
     @property
     def whatsapp_webhook_ready(self) -> bool:

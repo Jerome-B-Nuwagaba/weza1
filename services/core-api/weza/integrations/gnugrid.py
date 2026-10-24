@@ -25,14 +25,14 @@ secrets, and the raw credit report (photo, contacts, addresses) is reduced to a 
   (dev, staging, CI, demos). Production refuses it.
 """
 
-import logging
 import asyncio
-from abc import ABC, abstractmethod
+import logging
 import re
 import threading
 import time
 import unicodedata
 import uuid
+from abc import ABC, abstractmethod
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -143,7 +143,29 @@ def parse_enquiry(data: dict) -> CrbEnquiry:
     return out
 
 
-def parse_report(data: dict, reference: str) -> CRBSummaryReport:
+def phone_on_record(details, phone: str | None) -> bool | None:
+    """Is `phone` among the contact numbers of the bureau record? None when there is no number to compare. Numbers
+    are compared on their last 9 digits (a Ugandan mobile without 0 / +256); the record's numbers are never kept."""
+    if not phone:
+        return None
+    found: list[str] = []
+
+    def walk(v, contact: bool) -> None:
+        if isinstance(v, dict):
+            for k, x in v.items():
+                walk(x, contact or any(w in str(k).lower() for w in ("contact", "phone", "mobile", "tel")))
+        elif isinstance(v, list):
+            for x in v:
+                walk(x, contact)
+        elif contact and v is not None:
+            found.extend(re.sub(r"\D", "", m)[-9:] for m in re.findall(r"\+?\d[\d\s-]{7,16}\d", str(v)))
+    walk(details, False)
+    if not found:
+        return None
+    return re.sub(r"\D", "", phone)[-9:] in found
+
+
+def parse_report(data: dict, reference: str, phone: str | None = None) -> CRBSummaryReport:
     """Reduce the JSON credit report to the summary WEZA keeps. The raw report is never stored or logged."""
     ci = data.get("credit_information")
     if not isinstance(ci, dict) and isinstance(data.get("data"), dict):
@@ -165,7 +187,8 @@ def parse_report(data: dict, reference: str) -> CRBSummaryReport:
         probability_of_default=(str(scoring.get("Probability_of_Default") or "").strip()[:12] or None),
         active_loans_count=_int(accounts.get("Open_Accounts")) or 0, adverse_accounts=adverse,
         worst_days_in_arrears=_int(accounts.get("Worst_Days_in_Arreas", accounts.get("Worst_Days_in_Arrears"))),
-        has_active_defaults=adverse > 0 or overdue > 0, total_outstanding_balance_ugx=float(outstanding))
+        has_active_defaults=adverse > 0 or overdue > 0, total_outstanding_balance_ugx=float(outstanding),
+        phone_on_record=phone_on_record(ci.get("customer_details"), phone))
 
 
 # ------------------------------------------------------------------ token cache
@@ -193,8 +216,9 @@ class AbstractGNUGridClient(ABC):
         """Create a chargeable enquiry after the service has verified lender-bound consent."""
 
     @abstractmethod
-    def credit_report(self, enquiry_id: str, individual_id: str, *, reference: str) -> CRBSummaryReport:
-        """Reduce an existing enquiry to a non-identifying credit summary."""
+    def credit_report(self, enquiry_id: str, individual_id: str, *, reference: str,
+                      phone: str | None = None) -> CRBSummaryReport:
+        """Reduce an existing enquiry to a non-identifying credit summary (`phone`: checked against the record)."""
 
 
 class GNUGridClient(AbstractGNUGridClient):
@@ -288,12 +312,13 @@ class GNUGridClient(AbstractGNUGridClient):
                                                         "matches": enquiry.matches}})
         return enquiry
 
-    def credit_report(self, enquiry_id: str, individual_id: str, *, reference: str) -> CRBSummaryReport:
+    def credit_report(self, enquiry_id: str, individual_id: str, *, reference: str,
+                      phone: str | None = None) -> CRBSummaryReport:
         """CreditReport (format=json) for a profile returned by the enquiry, reduced to a summary."""
         data = self._call("/v1/credit-enquiries/individual/credit-report",
                           {"enquiry_id": enquiry_id, "individual_id": _int(individual_id) or individual_id,
                            "format": "json"}, chargeable=False)
-        return parse_report(data, reference)
+        return parse_report(data, reference, phone)
 
 
 # ------------------------------------------------------------------ offline bureau (spec-shaped JSON)
@@ -307,6 +332,9 @@ class _Resp:
 
     def json(self) -> dict:
         return self._data
+
+
+MOCK_RECORD_PHONE = "0772 123 456"  # the offline bureau's contact number for every record
 
 
 class MockBureau:
@@ -372,7 +400,7 @@ class MockBureau:
                     {"Credit_Accounts": [{"Currency": "UGX", "Loan_Amount": 9000000,
                                           "Loan_Balance": "6500000.00" if poor else "1200000.00",
                                           "Amount_Overdue": "850000.00" if poor else "0.00"}]}],
-                "customer_details": {"Photo": "<never stored>", "Name": "", "Contact": "<never stored>"}}
+                "customer_details": {"Photo": "<never stored>", "Name": "", "Contact": MOCK_RECORD_PHONE}}
             return _Resp(200, {"message": "success", "status": 200, "count": 1, "credit_information": info})
         return _Resp(405, {"status": "error", "data": None, "message": "Method is not allowed for the requested route",
                            "code": 405})
@@ -421,8 +449,9 @@ class MockGNUGridClient(GNUGridClient):
         finally:
             self._post_fn = real
 
-    def credit_report(self, enquiry_id: str, individual_id: str, *, reference: str) -> CRBSummaryReport:
-        report = super().credit_report(enquiry_id, individual_id, reference=reference)
+    def credit_report(self, enquiry_id: str, individual_id: str, *, reference: str,
+                      phone: str | None = None) -> CRBSummaryReport:
+        report = super().credit_report(enquiry_id, individual_id, reference=reference, phone=phone)
         if self.simulate_defaults:
             return report.model_copy(update={"credit_score_band": "POOR", "numeric_score": 410,
                                               "has_active_defaults": True, "adverse_accounts": 1})

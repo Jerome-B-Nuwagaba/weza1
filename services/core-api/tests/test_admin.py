@@ -58,15 +58,32 @@ def _review_item(kind: str = "FACT_CONFLICT") -> str:
 # ------------------------------------------------------------------ access
 
 
+ENGINEERING = ("/deliveries", "/loops", "/graph?q=OPP-NONE")
+
+
 def test_admin_read_open_to_all_weza_roles_only(client, as_user):
     for email in ("admin@weza.demo", "ops@weza.demo", "commercial@weza.demo"):
         h = as_user(email)
         for path in ("/overview", "/institutions", "/market", "/review", "/integrity", "/disputes", "/commercial",
-                     "/audit", "/deliveries", "/loops", "/config", "/users"):
+                     "/audit", "/config", "/users"):
             assert client.get(API + path, headers=h).status_code == 200, (email, path)
     assert client.get(API + "/overview").status_code == 401
     r = client.get(API + "/overview", headers=as_user("admin@lakeside.demo"))
     assert r.status_code == 403  # institution administrators never reach WEZA admin
+
+
+def test_engineering_pages_are_for_the_people_who_run_the_platform(client, as_user):
+    """Graph Inspector, Loops & AI and Events & delivery are hidden from business staff (21 Oct review, 48:01)."""
+    for email in ("admin@weza.demo", "ops@weza.demo"):
+        for path in ENGINEERING:
+            assert client.get(API + path, headers=as_user(email)).status_code in (200, 404), (email, path)
+    commercial = as_user("commercial@weza.demo")
+    for path in ENGINEERING:
+        r = client.get(API + path, headers=commercial)
+        assert r.status_code == 403, path
+    me = client.get("/api/v1/auth/me", headers=commercial).json()
+    assert "admin.engineering" not in me["permissions"] and "admin.commercial" in me["permissions"]
+    assert "admin.engineering" in client.get("/api/v1/auth/me", headers=as_user("ops@weza.demo")).json()["permissions"]
 
 
 def test_role_separation_on_writes(client, as_user):
@@ -170,6 +187,26 @@ def test_contract_replaces_previous_and_rejects_unknown_institution(client, as_u
     row = next(x for x in r.json()["institutions"] if x["institution_id"] == lakeside["id"])
     assert row["contract"]["plan"] == "GROWTH" and row["contract"]["included_opportunities"] == 40
     assert client.put(f"{API}/contracts/{uuid.uuid4()}", json=body, headers=comm).status_code == 404
+
+
+def test_editing_a_contract_keeps_its_billing_threshold_and_other_rules(client, as_user):
+    """Changing only the price must not reset what counts as billable (the editor used to send 60 every time)."""
+    from weza.domains.commercial import service as commercial
+    comm = as_user("commercial@weza.demo")
+    row = lambda r: next(x for x in r.json()["institutions"] if x["institution"] == "Kijani Microfinance")  # noqa: E731
+    kijani = row(client.get(f"{API}/commercial", headers=comm))
+    inst_id = uuid.UUID(kijani["institution_id"])
+    with session_scope() as db:
+        c = commercial.active_contract(db, inst_id)
+        original = dict(c.qualified_definition or {})
+        c.qualified_definition = {**original, "min_match_score": 71, "min_verification": "IDENTITY"}
+    shown = row(client.get(f"{API}/commercial", headers=comm))["contract"]
+    assert shown["min_match_score"] == 71  # the editor starts from the real value
+    r = client.put(f"{API}/contracts/{inst_id}", json={**shown, "opportunity_price": 31_000}, headers=comm)
+    assert r.status_code == 200 and row(r)["contract"]["min_match_score"] == 71
+    with session_scope() as db:
+        assert commercial.active_contract(db, inst_id).qualified_definition["min_verification"] == "IDENTITY"
+        commercial.active_contract(db, inst_id).qualified_definition = original  # leave the seed as it was
 
 
 # ------------------------------------------------------------------ customer support (A-05)

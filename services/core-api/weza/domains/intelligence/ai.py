@@ -5,6 +5,7 @@ budget check → PII minimisation → untrusted-content wrapping → provider ca
 → deterministic fallback → ai_call_log. AI output is always a proposal; deterministic services decide.
 """
 
+import json
 import logging
 import time
 from datetime import timedelta
@@ -60,12 +61,59 @@ class ProfileAnswerV1(BaseModel):
     confidence: float = 0.0
 
 
+class NationalIdV1(BaseModel):
+    is_national_id: bool = Field(False, description="True only for a Ugandan National ID card (front side)")
+    surname: str | None = None
+    given_names: str | None = None
+    nin: str | None = Field(None, description="The 14-character NIN exactly as printed")
+    date_of_birth: str | None = Field(None, description="YYYY-MM-DD")
+    expiry_date: str | None = Field(None, description="Card expiry, YYYY-MM-DD")
+    confidence: float = 0.0
+
+
+class BusinessDocumentV1(BaseModel):
+    kind: str | None = Field(None, description="business_registration, trading_licence or other")
+    business_name: str | None = None
+    registration_number: str | None = Field(None, description="URSB registration or licence number as printed")
+    expiry_date: str | None = Field(None, description="YYYY-MM-DD, for a licence")
+    confidence: float = 0.0
+
+
+class DocumentClassificationV1(BaseModel):
+    doc_type: str = Field("other", description="One of the document types WEZA accepts")
+    legible: bool = True
+    confidence: float = 0.0
+
+
+class MatchExplanationV1(BaseModel):
+    summary: str = Field("", description="One or two plain sentences, at most 280 characters")
+    highlights: list[str] = []
+
+
+class InstitutionQueryV1(BaseModel):
+    """A question from an institution's staff, turned into ONE read-only tool call (TSD §9). The AI only proposes; WEZA
+    validates every field and runs the tool itself, under the user's permissions."""
+    tool: str = Field(..., description="The tool that answers the question")
+    sector: str | None = None
+    customer_type: str | None = None
+    min_match: int | None = None
+    limit: int | None = None
+    field: str | None = None
+    op: str | None = None
+    value: float | str | None = None
+    confidence: float = 0.0
+
+
 class ProductRuleV1(BaseModel):
     field: str
     op: str
     value: Any
     label: str
     source_quote: str | None = None
+
+
+class NarrativeV1(BaseModel):
+    text: str = Field(..., min_length=1, max_length=1200)
 
 
 class ProductRuleExtractionV1(BaseModel):
@@ -101,11 +149,20 @@ class AnthropicProvider:
         self.model = s.ai_model
         self.fallbacks = s.ai_server_fallbacks
 
-    def parse(self, system: str, user: str, schema: type[BaseModel], max_tokens: int = 2048):
+    def parse(self, system: str, user: str, schema: type[BaseModel], max_tokens: int = 2048,
+              attachment: tuple[str, bytes] | None = None):
         a = self._anthropic
+        content: str | list = user
+        if attachment:
+            import base64
+            mime, data = attachment
+            block = "document" if mime == "application/pdf" else "image"
+            content = [{"type": block, "source": {"type": "base64", "media_type": mime,
+                                                  "data": base64.b64encode(data).decode()}},
+                       {"type": "text", "text": user}]
         try:
             kwargs = dict(model=self.model, max_tokens=max_tokens, system=system,
-                          messages=[{"role": "user", "content": user}], output_format=schema,
+                          messages=[{"role": "user", "content": content}], output_format=schema,
                           output_config={"effort": "low"})
             if self.fallbacks:
                 resp = self.client.beta.messages.parse(**kwargs, betas=["server-side-fallback-2026-07-01"],
@@ -161,7 +218,8 @@ def _budget_ok(db: Session, subject: str | None) -> bool:
 
 
 def _call(db: Session, capability: str, schema: type[BaseModel], system: str, user: str, *, subject: str | None,
-          allowed_modes: tuple[str, ...] = ("AVAILABLE", "DEGRADED"), max_tokens: int = 2048):
+          allowed_modes: tuple[str, ...] = ("AVAILABLE", "DEGRADED"), max_tokens: int = 2048,
+          attachment: tuple[str, bytes] | None = None):
     """Returns validated model output or None (caller then uses its deterministic path)."""
     mode = effective_mode(db)
     entry = AiCallLog(capability=capability, prompt_version=PROMPT_VERSION, schema_version="v1",
@@ -179,7 +237,8 @@ def _call(db: Session, capability: str, schema: type[BaseModel], system: str, us
     result = None
     for attempt in range(2):  # one repair retry, then fallback (TSD §9)
         try:
-            parsed, tin, tout = p.parse(system, user, schema, max_tokens=max_tokens)
+            parsed, tin, tout = (p.parse(system, user, schema, max_tokens=max_tokens, attachment=attachment)
+                                 if attachment else p.parse(system, user, schema, max_tokens=max_tokens))
             entry.input_tokens += tin
             entry.output_tokens += tout
             result = schema.model_validate(parsed.model_dump() if hasattr(parsed, "model_dump") else parsed)
@@ -259,6 +318,146 @@ def interpret_answer(db: Session, question: dict, text: str, subject: str | None
     if ai is None or ai.value is None:
         return None, 0.0
     return ai.value, ai.confidence
+
+
+def narrate_aggregate(db: Session, capability: str, evidence: dict, fallback: str,
+                       *, subject: str | None = None) -> str:
+    """Narrate already-aggregated evidence. The model may rephrase numbers, never invent or mutate business state."""
+    allowed = {"narrate_insight", "narrate_briefing"}
+    if capability not in allowed:
+        raise ValueError("Unsupported narrative capability")
+    system = (
+        SYSTEM_BASE.format(country="Uganda")
+        + " You are narrating aggregated WEZA marketplace evidence for institution staff. "
+          "Use only facts and numbers present in <aggregate>. Do not infer customer identities, creditworthiness or "
+          "approval likelihood. Do not recommend changing policy as an instruction; frame possible actions as review "
+          "or simulation. Keep the answer under 120 words."
+    )
+    raw = _wrap("aggregate", __import__("json").dumps(evidence, default=str, sort_keys=True)[:12_000])
+    out = _call(db, capability, NarrativeV1, system, raw, subject=subject,
+                allowed_modes=("AVAILABLE",), max_tokens=500)
+    return out.text.strip() if out is not None and out.text.strip() else fallback
+
+
+def can_read_documents(db: Session) -> bool:
+    """Whether ID and licence photos can be read for the customer (otherwise they type the details)."""
+    return get_settings().ai_document_extraction and effective_mode(db) == "AVAILABLE"
+
+
+def read_national_id(db: Session, mime: str, data: bytes, subject: str | None = None) -> dict | None:
+    """National ID v1: name and NIN from a scanned, stored ID image. Returns None unless both read cleanly — the
+    customer then confirms the values before they are saved."""
+    if not get_settings().ai_document_extraction:
+        return None
+    system = SYSTEM_BASE.format(country="Uganda") + (
+        " Read the attached Ugandan National ID card. Copy the surname, given names, NIN (14 characters, "
+        "starting CM or CF, e.g. CM12345678ABCD), date of birth and card expiry date exactly as printed. If it is not a National ID, or any of these is "
+        "unreadable, set is_national_id false or return null for that value. Confidence is 0..1.")
+    ai = _call(db, "read_national_id", NationalIdV1, system, "Read this document.", subject=subject,
+               allowed_modes=("AVAILABLE",), attachment=(mime, data))
+    if ai is None or not ai.is_national_id or ai.confidence < 0.85:
+        return None
+    nin = parsing.parse_nin(ai.nin or "")
+    name = parsing.parse_name(f"{ai.given_names or ''} {ai.surname or ''}".strip())
+    if not nin or not name:
+        return None
+    return {"full_name": name, "nin": nin, "date_of_birth": _plausible_date(ai.date_of_birth, born=True),
+            "expiry_date": _plausible_date(ai.expiry_date, born=False)}
+
+
+def _plausible_date(value: str | None, *, born: bool) -> str | None:
+    """An ISO date, or None when it is missing, malformed or implausible (a birth date must make the holder 16 to
+    110 years old; an expiry date within 15 years either way). The rest of the ID is still used without it."""
+    from datetime import date
+    try:
+        d = date.fromisoformat((value or "")[:10])
+    except ValueError:
+        return None
+    years = (date.today() - d).days / 365.25
+    ok = 16 <= years <= 110 if born else -15 <= years <= 15
+    return d.isoformat() if ok else None
+
+
+def read_business_document(db: Session, mime: str, data: bytes, subject: str | None = None) -> dict | None:
+    """Business document v1: type, business name, registration/licence number and expiry. Proposals only."""
+    if not get_settings().ai_document_extraction:
+        return None
+    system = SYSTEM_BASE.format(country="Uganda") + (
+        " The attached document should be a business registration certificate (URSB) or a trading licence. Set kind "
+        "to business_registration, trading_licence or other, and copy the business name, the registration or "
+        "licence number and (for a licence) the expiry date exactly as printed. Confidence is 0..1.")
+    ai = _call(db, "read_business_document", BusinessDocumentV1, system, "Read this document.", subject=subject,
+               allowed_modes=("AVAILABLE",), attachment=(mime, data))
+    if ai is None or ai.confidence < 0.7:
+        return None
+    return {"kind": ai.kind if ai.kind in ("business_registration", "trading_licence") else "other",
+            "business_name": (ai.business_name or "").strip()[:120] or None,
+            "registration_number": (ai.registration_number or "").strip()[:40] or None,
+            "expiry_date": (ai.expiry_date or "")[:10] or None}
+
+
+def classify_document(db: Session, mime: str, data: bytes, subject: str | None = None) -> dict | None:
+    """DocumentClassification v1: which kind of document a stored, scanned upload is. Only called after the malware scan
+    (TSD §42) and only when the customer's caption and filename did not say. A proposal: the caller keeps it only when
+    confident."""
+    from weza.domains.customer.documents import DOC_TYPES
+    if not get_settings().ai_document_extraction:
+        return None
+    system = SYSTEM_BASE.format(country="Uganda") + (
+        " Classify the attached document. doc_type must be exactly one of: " + ", ".join(DOC_TYPES) + ". Use "
+        "national_id for a National ID card, business_registration for a business registration certificate, "
+        "trading_licence for a trading licence, payslip, bank_statement, mobile_money_statement, employment_letter, "
+        "farm_records for land or farm documents, otherwise other. Set legible false if it cannot be read.")
+    out = _call(db, "classify_document", DocumentClassificationV1, system, "Classify this document.", subject=subject,
+                allowed_modes=("AVAILABLE",), attachment=(mime, data))
+    if out is None or out.doc_type not in DOC_TYPES or out.doc_type == "product_document":
+        return None
+    return {"doc_type": out.doc_type, "legible": out.legible, "confidence": out.confidence}
+
+
+def explain_match(db: Session, explanation: dict, fallback: str, subject: str | None = None) -> str:
+    """MatchExplanation v1: phrase the match reasons in plain words. The reasons are already decided by WEZA's rules;
+    the model may only reword them, never add a reason, a number or a promise. Falls back to `fallback` (TSD §76)."""
+    facts = {k: [x.get("text") if isinstance(x, dict) else str(x) for x in explanation.get(k, [])][:6]
+             for k in ("matched", "near_miss", "outstanding")}
+    if not any(facts.values()):
+        return fallback
+    system = SYSTEM_BASE.format(country="Uganda") + (
+        " Rewrite these match reasons as one or two friendly, plain sentences (at most 280 characters). Use only the "
+        "reasons given. Do not add facts or numbers, and never say or imply that credit is approved, likely or "
+        "guaranteed: the match shows fit with an institution's criteria, not a decision.")
+    out = _call(db, "explain_match", MatchExplanationV1, system, _wrap("customer_text", json.dumps(facts)),
+                subject=subject, allowed_modes=("AVAILABLE",))
+    text = (out.summary if out else "").strip()
+    banned = ("approved", "guarantee", "will get", "definitely", "certain")
+    return text[:280] if text and not any(w in text.lower() for w in banned) else fallback
+
+
+def parse_institution_query(db: Session, question: str, tools: dict[str, set[str]],
+                            subject: str | None = None) -> dict | None:
+    """InstitutionQuery v1: choose ONE tool and its arguments for a staff question the keyword router did not recognise.
+    `tools` maps each approved tool to the argument names it accepts; anything else is dropped. Returns
+    {"tool", "args"} or None (the caller then uses its deterministic default)."""
+    system = SYSTEM_BASE.format(country="Uganda") + (
+        " Choose the one read-only tool that best answers the institution staff member's question. tool must be one of: "
+        + ", ".join(sorted(tools)) + ". Only fill the fields that tool needs. sector must be one of: "
+        + ", ".join(UGANDA["sectors"]) + ". customer_type is SME, SALARIED or AGRICULTURE.")
+    out = _call(db, "parse_institution_query", InstitutionQueryV1, system, _wrap("customer_text", redact_text(question)),
+                subject=subject, allowed_modes=("AVAILABLE", "DEGRADED"))
+    if out is None or out.tool not in tools or out.confidence < 0.6:
+        return None
+    args: dict = {}
+    if out.sector in UGANDA["sectors"]:
+        args["sector"] = out.sector
+    if out.customer_type in ("SME", "SALARIED", "AGRICULTURE"):
+        args["customer_type"] = out.customer_type
+    if out.min_match is not None and 0 <= out.min_match <= 100:
+        args["min_match"] = out.min_match
+    if out.limit is not None and 1 <= out.limit <= 20:
+        args["limit"] = out.limit
+    if out.field and out.op and out.value is not None:
+        args.update(field=out.field, op=out.op, value=out.value)
+    return {"tool": out.tool, "args": {k: v for k, v in args.items() if k in tools[out.tool]}}
 
 
 def extract_product_rules(db: Session, document_text: str, subject: str | None = None) -> dict:

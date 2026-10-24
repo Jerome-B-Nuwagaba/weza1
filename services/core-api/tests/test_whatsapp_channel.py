@@ -10,6 +10,10 @@ import hmac
 import itertools
 import json
 import logging
+import re
+import threading
+import time
+import uuid
 from datetime import timedelta
 
 import httpx
@@ -21,7 +25,7 @@ from weza.config import DEFAULT_GRAPH_API_VERSION, get_settings, is_configured
 from weza.domains.customer import documents as docs
 from weza.domains.customer.models import Document
 from weza.domains.intelligence.parsing import parse_phone
-from weza.domains.misc_models import ChannelMessage, WhatsappInbox
+from weza.domains.misc_models import ChannelMessage, WhatsappInbox, WhatsappStatusReceipt
 from weza.domains.need.models import ConversationMessage
 from weza.domains.notification import service as notify
 from weza.domains.notification import whatsapp_inbound as wa_in
@@ -203,6 +207,140 @@ def test_placeholder_outbound_stays_in_simulator_and_never_calls_meta(monkeypatc
     assert http.calls == []  # un-mocked behaviour would also have raised
     (m,) = out_messages(phone)
     assert m.provider == "simulator" and m.status == "SENT"
+
+
+def test_hosted_whatsapp_refuses_missing_credentials(monkeypatch):
+    from weza.main import create_app
+    monkeypatch.setattr(get_settings(), "whatsapp_required", True)
+    monkeypatch.setattr(get_settings(), "whatsapp_token", "REPLACE_ME")
+    with pytest.raises(RuntimeError, match="WHATSAPP_TOKEN"):
+        create_app(start_worker=False)
+
+
+def test_readiness_rejects_a_dead_reply_worker(client, monkeypatch):
+    monkeypatch.setattr(client.app.state, "start_worker", True)
+    monkeypatch.setattr(client.app.state, "worker_thread", threading.Thread(), raising=False)
+    r = client.get("/readyz")
+    assert r.status_code == 503 and r.json()["component"] == "worker"
+
+
+def test_readiness_checks_database(client, monkeypatch):
+    from weza import main
+
+    def unavailable():
+        raise RuntimeError("secret-database-url")
+    assert client.get("/readyz").status_code == 200
+    monkeypatch.setattr(main, "session_scope", unavailable)
+    r = client.get("/readyz")
+    assert r.status_code == 503 and r.json()["component"] == "database"
+    assert "secret-database-url" not in r.text
+
+
+def test_readiness_detects_stale_whatsapp_backlog(client):
+    with session_scope() as db:
+        db.add(WhatsappInbox(provider_message_id=f"wamid.STALE_{uuid.uuid4()}", msg_type="text",
+                             phone_index="stale-test", payload_enc="encrypted",
+                             received_at=utcnow() - timedelta(minutes=6), status="PENDING"))
+    r = client.get("/readyz")
+    assert r.status_code == 503
+    assert r.json()["component"] == "whatsapp_inbox" and r.json()["stale_messages"] >= 1
+    with session_scope() as db:
+        for row in db.execute(select(WhatsappInbox).where(WhatsappInbox.phone_index == "stale-test")).scalars():
+            db.delete(row)
+    assert client.get("/readyz").status_code == 200
+
+
+def test_hosted_worker_answers_without_manual_event_drain(wa_live, monkeypatch, http):
+    from fastapi.testclient import TestClient
+
+    from weza.main import create_app
+    monkeypatch.setattr(get_settings(), "whatsapp_required", True)
+    monkeypatch.setattr(get_settings(), "worker_poll_seconds", 0.05)
+    phone = fake_phone()
+    with TestClient(create_app(start_worker=True)) as hosted:
+        thread = hosted.app.state.worker_thread
+        assert hosted.get("/readyz").status_code == 200
+        assert text_msg(hosted, phone, "I need 20 million for my pharmacy", process=False).status_code == 200
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if any(m.provider == "whatsapp_cloud" for m in out_messages(phone)):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("Hosted worker did not answer the signed webhook")
+        assert http.calls and all(c["json"]["to"] == phone for c in http.calls)
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("consent", ["yes", "no"])
+def test_whatsapp_crb_consent_code_and_bureau_check_stay_in_chat(client, wa_live, monkeypatch, http, consent):
+    from tests.helpers import SME_ANSWERS
+    from weza.domains.consent.models import CrbCheck
+    from weza.domains.need import service as journeys_svc
+    from weza.integrations import gnugrid
+
+    monkeypatch.setattr(get_settings(), "crb_jit_enabled", True)
+    monkeypatch.setattr(get_settings(), "identity_provider", "gnugrid")
+    gnugrid.MOCK_BUREAU.calls.clear()
+    phone = fake_phone()
+    text_msg(client, phone, "I need UGX 20 million to buy stock for my pharmacy")
+    send(client, rw.build("button", phone=phone, button_id="confirm"))
+    ((jid, _),) = journeys_for(phone)
+
+    def view():
+        with session_scope() as db:
+            state = journeys_svc.view(db, uuid.UUID(jid))
+            messages = state["messages"]
+            last_in = max(i for i, m in enumerate(messages) if m["direction"] == "IN")
+            state["outputs"] = [m for m in messages[last_in + 1:] if m["direction"] == "OUT"]
+            return state
+
+    for _ in range(30):
+        state = view()
+        if state["node"] == "REQUEST_BUSINESS_DOCS":  # a business is asked for its licences; this customer has none
+            text_msg(client, phone, "skip")
+            continue
+        if state["node"] != "ASK_PROFILE":
+            break
+        question = next(o["data"] for o in state["outputs"] if o.get("card") == "question")
+        answer = {**SME_ANSWERS, "identity.nin": f"CM{phone[-10:]}AB"}[question["key"]]
+        text_msg(client, phone, answer)
+    state = view()
+    assert state["node"] == "PRESENT_OPTIONS"
+    options = next(o["data"]["options"] for o in state["outputs"] if o.get("card") == "options")
+    match = next(o for o in options if o["institution"] == "Lakeside Bank")
+    send(client, rw.build("button", phone=phone, button_id=f"select:{match['match_id']}"))
+    state = view()
+    template = next(o["data"]["template_id"] for o in state["outputs"] if o.get("card") == "consent")
+    send(client, rw.build("button", phone=phone, button_id=f"agree:{template}"))
+    assert view()["node"] == "CRB_CHECK" and not gnugrid.MOCK_BUREAU.enquiries
+    send(client, rw.build("button", phone=phone, button_id=f"crb_consent:{consent}"))
+    # Either way the customer is next asked which number should receive the money; the chat number is one tap
+    assert view()["node"] == "PAYOUT_NUMBER" and not gnugrid.MOCK_BUREAU.enquiries
+    send(client, rw.build("button", phone=phone, button_id="payout_this"))
+    if consent == "yes":
+        # one code proves the number AND authorises the bureau check; it goes into the chat because it is the chat number
+        otp_message = next(m for m in reversed(out_messages(phone)) if m.payload.get("kind") == "otp")
+        assert otp_message.channel == "whatsapp" and otp_message.provider == "whatsapp_cloud"
+        assert not gnugrid.MOCK_BUREAU.enquiries
+        code = next(re.search(r"\b\d{10}\b", c["json"].get("text", {}).get("body", "")).group()
+                    for c in reversed(http.calls) if "Your WEZA consent code" in c["json"].get("text", {}).get("body", ""))
+        text_msg(client, phone, code)
+        assert len(gnugrid.MOCK_BUREAU.enquiries) == 1
+        with session_scope() as db:
+            cid = db.get(GraphInstance, uuid.UUID(jid)).customer_id
+            check = db.execute(select(CrbCheck).where(CrbCheck.customer_id == cid,
+                                                       CrbCheck.status == "VERIFIED")).scalar_one()
+            assert check.consent_channel == "whatsapp"
+    else:
+        # no bureau consent: the payout number is still proven with an ordinary 6-digit code, and no bureau call is made
+        assert not gnugrid.MOCK_BUREAU.enquiries
+        code = next(re.search(r"\b\d{6}\b", c["json"].get("text", {}).get("body", "")).group()
+                    for c in reversed(http.calls) if "Your WEZA verification code" in c["json"].get("text", {}).get("body", ""))
+        text_msg(client, phone, code)
+        assert not gnugrid.MOCK_BUREAU.enquiries
+    assert view()["node"] == "TRACKING"
 
 
 def test_sms_placeholder_provider_is_console(monkeypatch):
@@ -413,12 +551,23 @@ def test_outbound_buttons_become_interactive_message(wa_live, http):
     assert all(len(b["reply"]["title"]) <= 20 for b in buttons)
 
 
-def test_outbound_more_than_three_buttons_falls_back_to_text(wa_live, http):
-    qr = [{"label": f"Option {i}", "action": "pick", "value": str(i)} for i in range(4)]
+def test_outbound_four_to_ten_options_become_a_tap_to_pick_list(wa_live, http):
+    qr = [{"label": f"Option {i} with a long label", "action": "pick", "value": str(i)} for i in range(4)]
     with session_scope() as db:
         notify.send_customer_message(db, "+" + fake_phone(), "Choose", channel="whatsapp", payload={"quick_replies": qr})
     msg = http.calls[0]["json"]
-    assert msg["type"] == "text" and "Reply with: Option 0 / Option 1 / Option 2 / Option 3" in msg["text"]["body"]
+    assert msg["type"] == "interactive" and msg["interactive"]["type"] == "list"
+    rows = msg["interactive"]["action"]["sections"][0]["rows"]
+    assert [r["id"] for r in rows] == ["pick:0", "pick:1", "pick:2", "pick:3"]  # same ids as buttons: replies parse alike
+    assert all(len(r["title"]) <= 24 for r in rows)
+
+
+def test_outbound_more_than_ten_options_fall_back_to_text(wa_live, http):
+    qr = [{"label": f"Option {i}", "action": "pick", "value": str(i)} for i in range(11)]
+    with session_scope() as db:
+        notify.send_customer_message(db, "+" + fake_phone(), "Choose", channel="whatsapp", payload={"quick_replies": qr})
+    msg = http.calls[0]["json"]
+    assert msg["type"] == "text" and "Reply with: Option 0 / Option 1" in msg["text"]["body"]
 
 
 @pytest.mark.parametrize("behaviour", ["http500", "timeout"])
@@ -440,6 +589,20 @@ def test_provider_success_is_recorded_as_sent(client, wa_live, http):
     outs = out_messages(phone)
     assert outs and all(m.provider == "whatsapp_cloud" and m.status == "SENT" for m in outs)
     assert http.calls, "configured outbound should call the (mocked) Graph API"
+
+
+def test_logical_send_key_prevents_duplicate_committed_whatsapp_send(wa_live, http):
+    phone = fake_phone()
+    key = f"test:logical-send:{phone}"
+    with session_scope() as db:
+        assert notify.send_customer_message(db, "+" + phone, "one logical reply", channel="whatsapp",
+                                            idempotency_key=key)
+    with session_scope() as db:
+        assert notify.send_customer_message(db, "+" + phone, "one logical reply", channel="whatsapp",
+                                            idempotency_key=key)
+    rows = out_messages(phone)
+    assert len(rows) == 1 and rows[0].idempotency_key == key
+    assert len(http.calls) == 1
 
 
 # ------------------------------------------------------------------ delivery status callbacks (step b)
@@ -491,8 +654,22 @@ def test_failed_status_does_not_override_delivered(client, wa_live):
     assert got.provider_status == "delivered" and got.error_code is None
 
 
-def test_status_for_unknown_message_is_ignored(client, wa_inbound):
-    assert send(client, rw.status_payload("wamid.FAKE_UNKNOWN", "delivered")).status_code == 200
+def test_status_for_unknown_message_is_retained_then_reconciled(client, wa_inbound):
+    wamid = "wamid.FAKE_EARLY_RECEIPT"
+    assert send(client, rw.status_payload(wamid, "delivered")).status_code == 200
+    with session_scope() as db:
+        receipt = db.get(WhatsappStatusReceipt, wamid)
+        assert receipt is not None and receipt.provider_status == "delivered"
+        msg = ChannelMessage(channel="whatsapp", to_index="blind", body="already sent",
+                             payload={"kind": "test"}, provider="whatsapp_cloud", status="SENT",
+                             provider_message_id=wamid)
+        db.add(msg)
+    with session_scope() as db:
+        assert notify.reconcile_whatsapp_status_receipts(db) >= 1
+    with session_scope() as db:
+        msg = db.execute(select(ChannelMessage).where(ChannelMessage.provider_message_id == wamid)).scalar_one()
+        assert msg.provider_status == "delivered" and msg.status_at is not None
+        assert db.get(WhatsappStatusReceipt, wamid) is None
 
 
 def test_unknown_status_value_is_ignored(client, wa_live):

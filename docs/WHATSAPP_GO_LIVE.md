@@ -1,10 +1,99 @@
 # Connecting the organisation's existing WhatsApp Business number — status and go-live
 
-Checkpoint document for connecting the existing number to the WEZA agent. It records what was verified, what the code
-now does, the coexistence plan, the Meta-side steps, and the live acceptance checklist. Nothing has been
-deployed, registered, migrated or sent. **Live integration is not yet verified.**
+## Hosted cutover — 2026-10-19
 
-## 1. Verified status (2026-10-16)
+The public `https://weza-api.onrender.com/healthz` was checked again on 2026-10-19 and returned
+**Service Suspended**. The callback last recorded below points to ngrok on a laptop. The current Meta callback
+and Render settings cannot be established from Git; inspect them in the owning accounts before declaring this live.
+
+The branch now prepares an always-on Render web service (`starter`, a paid instance), explicitly deploys
+`test/e2e-integration`, runs its inbox/outbox worker inside the API, and uses `/readyz` to check PostgreSQL and
+the worker thread. `WHATSAPP_REQUIRED=true` refuses startup when any of the four essential channel secrets/IDs
+is missing instead of silently writing simulator replies. These repository changes do not unsuspend a service,
+change its billing plan, upload credentials or update Meta's callback by themselves.
+
+To finish the cutover in the hosting accounts:
+
+1. Restore the suspended Render service. Confirm its repository branch is `test/e2e-integration`. Select an
+   always-on instance; applying the prepared `starter` plan incurs Render charges. Keep `RUN_WORKER_INPROCESS=true`.
+2. Put the existing permanent `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET` and
+   `WHATSAPP_VERIFY_TOKEN` in **Render environment settings**, along with `WHATSAPP_BUSINESS_ACCOUNT_ID` and
+   `WHATSAPP_BUSINESS_NUMBER`. Local `.env` files are not uploaded by the Docker build.
+3. Use a persistent PostgreSQL database. The prepared Blueprint selects paid `basic-256mb`; free databases expire
+   after 30 days. Upgrade the existing database or set `DATABASE_URL` to a persistent hosted database. Preserve the
+   existing vault/blind-index keys so existing customer data remains readable.
+4. Deploy this branch and require `GET <actual Render API URL>/readyz` to return 200. Inspect Render logs for
+   `worker_started`. A healthy process cannot establish Meta delivery or permissions on its own.
+5. In Meta → WhatsApp → Configuration, replace the **ngrok callback** with
+   `<actual Render API URL>/api/v1/channels/whatsapp/webhook`, using the same verify token as Render. Subscribe
+   `messages` and `account_update`. Confirm the app remains subscribed to the correct WABA. Run
+   `python scripts/whatsapp_account_check.py` in the hosted environment to inspect token, number and callback.
+6. With local API/tunnel processes stopped, send a new message from a test customer's WhatsApp. Confirm Render
+   logs show `whatsapp_webhook`, an inbox row completes, and an outbound Meta message is delivered. Repeat after
+   20 minutes idle and after a Render restart. No laptop process should be needed.
+
+**CRB:** the shared WhatsApp journey includes lender selection → separate bureau consent → a 10-digit consent
+code → the gnuGRID enquiry/report. WhatsApp now sends this code through the WhatsApp channel; web/app journeys
+continue through SMS. Automated tests exercise signed webhooks with a fake Meta sender and offline bureau, including
+consent refusal. This verifies application wiring, not the live bureau account. The Blueprint is still deliberately
+`ENV=dev` / `GNGRID_USE_MOCK=true`: it does **not** establish a real gnuGRID connection. Real calls require
+`ENV=production`, `GNGRID_USE_MOCK=false`, `IDENTITY_PROVIDER=gnugrid`, real `GNUGRID_*` credentials and all production
+prerequisites described in [CRB_VERIFICATION.md](CRB_VERIFICATION.md). Check authentication in the hosted environment
+with `python scripts/crb_connection_check.py` (no enquiry or customer data). Run a real paid enquiry only with an
+authorised applicant's explicit consent; never use one as a connectivity probe.
+
+The historical checkpoint below describes the earlier local setup and is not a current live verification.
+
+Validation for this change: 187 tests passed across `test_whatsapp_channel.py`, `test_gnugrid_integration.py`
+and `test_whatsapp_onboarding.py`; Ruff passed for `weza` and `tests`. The new tests run an actual in-process
+worker without manually draining events and drive signed WhatsApp webhooks through lender consent, WhatsApp
+code delivery, bureau consent/refusal and submission. Meta and the bureau are fake in these tests. No live
+customer message or paid enquiry was sent, and no Render/Meta settings were changed.
+
+Checkpoint document for connecting the existing number to the WEZA agent. It records what was verified, what the code
+now does, the coexistence plan, the Meta-side steps, and the live acceptance checklist. The historical local setup
+below is separate from the Render connection. **The Render WhatsApp connection is pending verification.**
+
+## Current branch target (2026-10-20)
+
+The API target for `test/e2e-integration` is `https://weza-api-go6e.onrender.com`. Configure the existing Cloud API
+number with this callback:
+
+```text
+https://weza-api-go6e.onrender.com/api/v1/channels/whatsapp/webhook
+```
+
+1. Deploy this branch to that existing Render service. Set `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`,
+   `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_BUSINESS_ACCOUNT_ID`, `WHATSAPP_BUSINESS_NUMBER` and
+   the verified `WHATSAPP_API_VERSION` in Render's environment. Use the existing Meta app and number; no new number
+   registration or Embedded Signup is required. Keep credential values out of source control and logs.
+2. Keep `RUN_WORKER_INPROCESS=true`, as in `render.yaml`, or run `python -m weza.worker` separately against the same
+   database. The API saves incoming messages immediately; the worker advances the existing customer journey and
+   sends replies. Container startup runs database migrations before serving requests.
+3. Before switching Meta's callback, check `/healthz` and `/api/v1/health`, then verify the callback handshake:
+   GET the callback with `hub.mode=subscribe`, `hub.verify_token` set from the configured secret and a chosen
+   `hub.challenge`. Expect HTTP 200 with the exact challenge; a wrong token must return 403. Load secrets locally
+   without printing them or putting them in shell history.
+4. Check signature validation without creating a customer or sending a message: POST the exact UTF-8 bytes of
+   `{"object":"whatsapp_business_account","entry":[]}` with `Content-Type: application/json` and
+   `X-Hub-Signature-256: sha256=<hex HMAC-SHA256 of those bytes using WHATSAPP_APP_SECRET>`.
+   Expect HTTP 200 and `{"ok":true}`; missing or incorrect signatures must return 403. This empty event validates
+   configuration only; it does not prove delivery or worker processing. The local replay helper intentionally
+   refuses public URLs and must not be used for this preflight.
+5. In the existing Meta app, set the callback above and the matching verify token, subscribe to `messages` and
+   `account_update`, and confirm the app is subscribed to the existing WABA. Re-run
+   `scripts/whatsapp_account_check.py` with the same configuration to inspect the callback, subscription and token.
+6. From a phone you control, message the business number with a financing request. Confirm one inbox record reaches
+   `DONE`, the reply reaches the phone, and delivery receipts reach `delivered`/`read`. Continue the conversation and
+   confirm answers update the same journey and its system records. Use the acceptance checklist in §7 to record
+   the result before marking the Render connection live.
+
+An HTTP health response, configured credential flags or a successful handshake alone does not establish a live
+WhatsApp connection. `AI mode: UNAVAILABLE` still permits the existing deterministic journey to collect information
+and reply; configuring `ANTHROPIC_API_KEY` enables the optional conversational AI. The Render free plan can sleep,
+so continuous low-latency replies need an always-on service. A paid-plan change is a separate hosting decision.
+
+## 1. Historical verified status (2026-10-16; local API behind ngrok)
 
 | Item | Status | How it was established |
 |---|---|---|
@@ -154,18 +243,41 @@ app, and the number's registration and coexistence status (`is_on_biz_app`, `pla
 WABA's numbers, subscribed apps, templates and the app's webhook callback URL and fields. Phone numbers are masked;
 the token and secret are never printed.
 
+The connection helper checks the target API against the same local settings before changing Meta. From
+`services/core-api`, inspect the plan first:
+
+```powershell
+.venv\Scripts\python scripts\connect_whatsapp_webhook.py --api-base-url https://weza-api-go6e.onrender.com
+```
+
+It checks API/database health, outbound readiness, the business number, good and bad verification tokens and
+signatures, the Meta token/app secret, WABA ownership, and existing callback overrides. Its only API POST probes
+contain an empty webhook; no customer message is created or sent. It reports safe check names and proposed changes.
+With the Render environment ready, apply the checked connection:
+
+```powershell
+.venv\Scripts\python scripts\connect_whatsapp_webhook.py --api-base-url https://weza-api-go6e.onrender.com --apply
+```
+
+`--apply` preserves existing WhatsApp subscription fields, adds `messages` and `account_update`, updates the app's
+callback, and subscribes the app to the WABA only if absent. Conflicting WABA/phone callback overrides stop the
+operation for review. Meta changes are read back before reporting `connected`; `attempted` and `applied` distinguish
+an uncertain/partial update from a completed one. This verifies configuration, not customer delivery: keep the worker
+running and complete the live acceptance checklist below.
+
 ## 5. Hosting the webhook
 
 The API must be reachable over public HTTPS with a valid certificate. Options:
 - **Render** (`render.yaml`): fill the `WHATSAPP_*` variables in the Render dashboard. The free plan sleeps after
   ~15 min idle, and the first webhook after sleeping can take about a minute. Meta then retries, and WEZA
-  deduplicates those retries, but replies are slow. Use a paid instance for live customers. The current
-  `weza-api.onrender.com` answers *Service Suspended*: check who owns it before relying on it.
+  deduplicates those retries, but replies are slow. The current branch targets `weza-api-go6e.onrender.com`;
+  follow the current-target section above. The older suspended URL in §1 is historical.
 - **Temporary test**: run the API locally and expose it with `ngrok http 8000` or
   `cloudflared tunnel --url http://localhost:8000`.
 - Keep `RUN_WORKER_INPROCESS=true` (or run `python -m weza.worker`): without the worker, messages are stored but
   never answered.
-- Deploying and changing production configuration were **not** done; they need your go-ahead.
+- Record deployment and callback verification against the current target; the historical ngrok result does not
+  establish readiness on Render.
 
 ## 6. What the code does now
 

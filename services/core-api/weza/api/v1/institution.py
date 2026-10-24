@@ -21,10 +21,18 @@ from weza.domains.customer.models import Document
 from weza.domains.identity import service as identity
 from weza.domains.identity.models import Membership, User
 from weza.domains.institution import service as inst_svc
-from weza.domains.institution.models import Institution, NotificationPref, RoutingRule, ServiceTarget, Team
-from weza.domains.intelligence import ai, assistant, insights
+from weza.domains.institution.models import (
+    Contact,
+    Institution,
+    NotificationPref,
+    RoutingRule,
+    ServiceTarget,
+    Team,
+)
+from weza.domains.intelligence import agents, assistant, insights
 from weza.domains.matching import engine
 from weza.domains.misc_models import Notification
+from weza.domains.notification import teams
 from weza.domains.opportunity import service as opp_svc
 from weza.domains.opportunity.models import (
     Assignment,
@@ -42,7 +50,7 @@ from weza.domains.trust.models import AuditEvent, PolicyDecisionLog
 from weza.domains.trust.service import audit
 from weza.domains.verification import service as verification
 from weza.platform.context import Actor
-from weza.platform.controls import flag, idempotent
+from weza.platform.controls import flag, idempotent, idempotent_optional, rate_limit
 from weza.platform.db import utcnow
 from weza.platform.errors import NotFound, ValidationFailed
 
@@ -60,16 +68,28 @@ def _inst(db: Session, actor: Actor) -> Institution:
 @router.get("/workspace")
 def workspace(actor: Actor = A, db: Session = DB):
     inst = _inst(db, actor)
-    return {"institution": {"id": str(inst.id), "legal_name": inst.legal_name, "display_name": inst.display_name,
-                            "type": inst.institution_type, "status": inst.status, "licence_no": inst.licence_no,
-                            "regulator": inst.regulator, "profile": inst.profile, "terms_version": inst.terms_version,
-                            "verified_at": inst.verified_at.isoformat() if inst.verified_at else None,
-                            "status_reason": inst.status_reason},
+    return {"institution": {**inst_svc.summary(inst), "profile": inst.profile,
+                            "status_reason": inst.status_reason,
+                            "primary_contact": inst_svc.primary_contact(db, inst)},
             "onboarding": inst_svc.checklist(db, inst),
             "permissions": policy.permissions_for(actor.roles),
             "teams": [{"id": str(t.id), "name": t.name} for t in db.execute(select(Team).where(
                 Team.institution_id == inst.id)).scalars()],
             "features": {"preview": flag(db, "marketplace.preview", False)}}
+
+
+@router.get("/contacts")
+def contacts(actor: Actor = A, db: Session = DB):
+    inst = _inst(db, actor)
+    rows = db.execute(select(Contact).where(Contact.institution_id == inst.id).order_by(Contact.kind, Contact.name)).scalars()
+    return {"contacts": [inst_svc.contact_summary(c) for c in rows],
+            "primary_contact": inst_svc.primary_contact(db, inst)}
+
+
+@router.put("/contacts/{contact_id}/primary")
+def set_primary_contact(contact_id: uuid.UUID, actor: Actor = A, db: Session = DB):
+    inst = _inst(db, actor)
+    return inst_svc.set_primary_contact(db, actor, inst, contact_id)
 
 
 @router.post("/activate")
@@ -124,13 +144,14 @@ def _own_team(db: Session, actor: Actor, team_id: str | None) -> uuid.UUID | Non
         raise ValidationFailed("Unknown team.", code="UNKNOWN_TEAM") from None
     t = db.execute(select(Team).where(Team.id == tid,
                                      Team.institution_id == actor.institution_id)).scalar_one_or_none()
-    if t is None:
+    if t is None:  # another institution's team and a made-up id get the same 404: nothing about other tenants is revealed
         raise NotFound("Not found.")
     return tid
 
 
 @router.post("/users", status_code=201)
 def add_user(body: UserIn, actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:add_user:{actor.id}", 100, 3600)
     policy.require(actor, "users.manage")
     roles = [r for r in body.roles if r in policy.INST_ROLES]
     if not roles:
@@ -181,6 +202,7 @@ class PasswordResetIn(BaseModel):
 def reset_user_password(user_id: uuid.UUID, body: PasswordResetIn, actor: Actor = A, db: Session = DB):
     """Institution administrator sets a new password for a colleague (e.g. forgotten password). Their sessions end;
     share the new password with them securely."""
+    rate_limit(db, f"institution:reset_user_password:{actor.id}", 10, 900)
     policy.require(actor, "users.manage")
     m = db.execute(select(Membership).where(Membership.user_id == user_id,
                                                   Membership.institution_id == actor.institution_id)).scalar_one_or_none()
@@ -198,11 +220,37 @@ class PasswordChangeIn(BaseModel):
     new_password: str = Field(..., min_length=12, max_length=200)
 
 
+class PhoneIn(BaseModel):
+    phone: str = Field("", max_length=32)  # empty removes it
+
+
+@router.get("/me/phone")
+def my_phone(actor: Actor = A, db: Session = DB):
+    phone = (db.get(User, actor.id).preferences or {}).get("phone")
+    return {"set": bool(phone), "masked": identity.mask_phone(phone) if phone else None}
+
+
+@router.put("/me/phone")
+def set_my_phone(body: PhoneIn, actor: Actor = A, db: Session = DB):
+    """A mobile number on your own account, so the institution can send you SMS alerts (BRD §20). Never shown to
+    customers or to anyone else in the institution."""
+    from weza.domains.intelligence.parsing import parse_phone
+    user = db.get(User, actor.id)
+    prefs = {k: v for k, v in (user.preferences or {}).items() if k != "phone"}
+    if body.phone.strip():
+        phone = parse_phone(body.phone)
+        if not phone:
+            raise ValidationFailed("Enter a valid Ugandan mobile number, e.g. 0772 123 456.", code="INVALID_PHONE")
+        prefs["phone"] = phone
+    user.preferences = prefs
+    audit(db, actor, "users.phone_saved", "user", user.id, after={"set": "phone" in prefs})
+    return my_phone(actor, db)
+
+
 @router.post("/password")
 def change_my_password(body: PasswordChangeIn, actor: Actor = A, db: Session = DB):
     """Any institution user changes their own password. All their other sessions are signed out."""
     from weza.platform import crypto
-    from weza.platform.controls import rate_limit
     rate_limit(db, f"pwchange:{actor.id}", 5, 900, "Too many attempts. Try again in 15 minutes.")
     user = db.get(User, actor.id)
     if not crypto.verify_password(body.current_password, user.password_hash):
@@ -219,6 +267,7 @@ class TeamIn(BaseModel):
 
 @router.post("/teams", status_code=201)
 def add_team(body: TeamIn, actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:add_team:{actor.id}", 100, 3600)
     policy.require(actor, "team.manage")
     t = Team(institution_id=actor.institution_id, name=body.name)
     db.add(t)
@@ -310,9 +359,13 @@ class ProductIn(BaseModel):
 
 
 @router.post("/products", status_code=201)
-def create_product(body: ProductIn, actor: Actor = A, db: Session = DB):
-    pv = product_svc.create(db, actor, body.model_dump(), provenance=body.provenance)
-    return {"product_id": str(pv.product_id), "version": _pv_dict(pv)}
+def create_product(body: ProductIn, idempotency_key: str | None = Header(None), actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:create_product:{actor.id}", 200, 3600)
+
+    def run() -> dict:
+        pv = product_svc.create(db, actor, body.model_dump(), provenance=body.provenance)
+        return {"product_id": str(pv.product_id), "version": _pv_dict(pv)}
+    return idempotent_optional(db, idempotency_key, f"create_product:{actor.id}", body.model_dump(mode="json"), run)
 
 
 @router.put("/products/{product_id}")
@@ -388,7 +441,7 @@ async def extract_product(file: UploadFile = File(...), actor: Actor = A, db: Se
             raise ValidationFailed("Upload a PDF or a plain-text document.") from exc
     if len(text.strip()) < 40:
         raise ValidationFailed("The document has too little readable text.")
-    proposal = ai.extract_product_rules(db, text, subject=f"extract:{actor.institution_id}")
+    proposal = agents.product_rules(db, text, subject=f"extract:{actor.institution_id}")
     audit(db, actor, "product.ai_extraction", "institution", actor.institution_id,
           after={"source": proposal.get("source"), "rules": len(proposal.get("rules") or [])})
     return {"proposal": proposal, "filename": file.filename,
@@ -407,7 +460,8 @@ def _av_dict(av: AppetiteVersion) -> dict:
             "campaign_to": av.campaign_to.isoformat() if av.campaign_to else None,
             "simulation_run_id": str(av.simulation_run_id) if av.simulation_run_id else None,
             "author_id": str(av.author_id) if av.author_id else None, "review_note": av.review_note,
-            "approved_at": av.approved_at.isoformat() if av.approved_at else None}
+            "approved_at": av.approved_at.isoformat() if av.approved_at else None,
+            "mandate": av.mandate}
 
 
 @router.get("/appetites")
@@ -419,13 +473,37 @@ def appetites(actor: Actor = A, db: Session = DB):
         latest = db.execute(select(AppetiteVersion).where(AppetiteVersion.appetite_id == ap.id)
                             .order_by(AppetiteVersion.version.desc()).limit(1)).scalar_one()
         cur = db.get(AppetiteVersion, ap.active_version_id) if ap.active_version_id else None
+        version = cur or latest
+        crit = version.criteria or []
+        mand = version.mandate or {}
+
+        def pick(field, criteria=crit):
+            for c in criteria:
+                if c.get("field") == field:
+                    return c.get("value")
+            return None
+
+        products = []
+        if version.product_ids:
+            products = [{"id": str(x.id), "name": x.name} for x in db.execute(
+                select(Product).where(Product.id.in_(list(version.product_ids)))).scalars()]
         out.append({"id": str(ap.id), "name": ap.name, "lifecycle_status": ap.lifecycle_status,
+                    "demand": appetite_svc.demand_state(db, ap),
                     "capacity_state": ap.capacity_state, "capacity_override": ap.capacity_override,
                     "fulfilled_count": ap.fulfilled_count, "fulfilled_value": float(ap.fulfilled_value or 0),
                     "active_version": cur.version if cur else None, "latest_version": latest.version,
                     "latest_status": latest.status, "target_count": (cur or latest).target_count,
                     "target_value": float((cur or latest).target_value) if (cur or latest).target_value else None,
-                    "min_match_score": (cur or latest).min_match_score, "criteria": len((cur or latest).criteria)})
+                    "min_match_score": (cur or latest).min_match_score, "criteria": len((cur or latest).criteria),
+                    "mandate": (cur or latest).mandate, "products": products,
+                    "customer_type": mand.get("customer_types") or pick("customer_type"),
+                    "sector": mand.get("sectors") or pick("sector"),
+                    "region": mand.get("regions") or pick("region"),
+                    "amount_range": ([mand["min_amount"], mand["max_amount"]]
+                                     if mand.get("min_amount") is not None and mand.get("max_amount") is not None
+                                     else pick("amount")),
+                    "business_age_months": mand.get("min_business_age_months") or pick("business_age_months"),
+                    "routing_team_id": (version.capacity_limits or {}).get("routing_team_id")})
     return {"appetites": out}
 
 
@@ -457,12 +535,24 @@ class AppetiteIn(BaseModel):
     capacity_limits: dict = {}
     campaign_from: str | None = None
     campaign_to: str | None = None
+    # The mandate dimensions (Goal 1 §4). Each is optional; an empty list or null means the
+    # institution is not restricted on that dimension.
+    customer_types: list[str] = []
+    sectors: list[str] = []
+    regions: list[str] = []
+    min_amount: float | None = None
+    max_amount: float | None = None
+    min_business_age_months: int | None = None
 
 
 @router.post("/appetites", status_code=201)
-def create_appetite(body: AppetiteIn, actor: Actor = A, db: Session = DB):
-    av = appetite_svc.create(db, actor, body.model_dump())
-    return {"appetite_id": str(av.appetite_id), "version": _av_dict(av)}
+def create_appetite(body: AppetiteIn, idempotency_key: str | None = Header(None), actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:create_appetite:{actor.id}", 200, 3600)
+
+    def run() -> dict:
+        av = appetite_svc.create(db, actor, body.model_dump())
+        return {"appetite_id": str(av.appetite_id), "version": _av_dict(av)}
+    return idempotent_optional(db, idempotency_key, f"create_appetite:{actor.id}", body.model_dump(mode="json"), run)
 
 
 @router.put("/appetites/{appetite_id}")
@@ -482,6 +572,7 @@ def _draftish(db: Session, appetite_id) -> AppetiteVersion:
 
 @router.post("/appetites/{appetite_id}/simulate")
 def simulate_appetite(appetite_id: uuid.UUID, actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:simulate_appetite:{actor.id}", 30, 600)
     appetite_svc.get_owned(db, actor, appetite_id)
     return appetite_svc.simulate_version(db, actor, _draftish(db, appetite_id))
 
@@ -523,6 +614,7 @@ class WhatIfIn(BaseModel):
 
 @router.post("/simulate")
 def what_if(body: WhatIfIn, actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:what_if:{actor.id}", 30, 600)
     return appetite_svc.simulate_adhoc(db, actor, body.model_dump())
 
 
@@ -531,6 +623,7 @@ def what_if(body: WhatIfIn, actor: Actor = A, db: Session = DB):
 
 @router.post("/sandbox/runs")
 def sandbox(actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:sandbox:{actor.id}", 20, 600)
     policy.require(actor, "sandbox.run")
     from weza.domains.intelligence.sandbox import run_sandbox
     return run_sandbox(db, actor)
@@ -588,6 +681,44 @@ def put_prefs(body: PrefsIn, actor: Actor = A, db: Session = DB):
     policy.require(actor, "institution.settings")
     inst_svc.save_notification_prefs(db, actor, actor.institution_id, body.prefs)
     return get_prefs(actor, db)
+
+
+class ChannelsIn(BaseModel):
+    teams_webhook_url: str | None = Field(None, max_length=600)  # empty or null disconnects Teams
+
+
+@router.get("/notification-channels")
+def get_channels(actor: Actor = A, db: Session = DB):
+    """Which delivery channels beyond in-app and email are connected. The Teams address itself is never returned."""
+    inst = db.get(Institution, actor.institution_id)
+    return {"teams_configured": teams.configured(inst.profile if inst else None)}
+
+
+@router.put("/notification-channels")
+def put_channels(body: ChannelsIn, actor: Actor = A, db: Session = DB):
+    policy.require(actor, "institution.settings")
+    inst = db.get(Institution, actor.institution_id)
+    inst.profile = teams.set_webhook(inst.profile, body.teams_webhook_url)
+    audit(db, actor, "notifications.channels_saved", "institution", inst.id,
+          after={"teams": bool((body.teams_webhook_url or "").strip())})
+    return get_channels(actor, db)
+
+
+@router.post("/notification-channels/teams/test")
+def test_teams(actor: Actor = A, db: Session = DB):
+    """Post a test card to the connected Teams channel, so the administrator sees it work before relying on it."""
+    policy.require(actor, "institution.settings")
+    rate_limit(db, f"teams:test:{actor.institution_id}", 6, 600, "Too many test messages. Try again in a few minutes.")
+    inst = db.get(Institution, actor.institution_id)
+    url = teams.webhook(inst.profile)
+    if not url:
+        raise ValidationFailed("Connect a Teams channel first.", code="TEAMS_NOT_CONNECTED")
+    try:
+        teams.post(url, "WEZA test message", f"{inst.display_name} is connected to Microsoft Teams. WEZA alerts you choose "
+                   "Teams for will appear here.", "/institution/notifications")
+    except teams.TeamsError as exc:
+        raise ValidationFailed(str(exc), code="TEAMS_FAILED") from exc
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ command centre, my day, feed
@@ -663,7 +794,7 @@ def my_day(actor: Actor = A, db: Session = DB):
     items = [opp_svc.summary(db, o, open_requests=pending, identity_statuses=ids) for o in rows]
     sections = {
         "new": [i for i in items if i["state"] in ("ROUTED", "RECEIVED", "ASSIGNED")],
-        "follow_up": [i for i in items if i["state"] in ("CONTACTED", "PROCEEDING")],
+        "follow_up": [i for i in items if i["state"] in ("CONTACTED", "INFORMATION_REQUESTED", "PROCEEDING")],
         "awaiting_outcome": [i for i in items if i["state"] in ("SUBMITTED_TO_INSTITUTION", "REPORTED_APPROVED")],
     }
     for k in sections:
@@ -682,8 +813,8 @@ def opportunity(opp_id: uuid.UUID, actor: Actor = A, db: Session = DB):
     from weza.domains.customer.service import EDITABLE, FIELD_LABELS
     consented = set(out["consent"]["categories"] or [])
     out["fact_fields"] = {k: FIELD_LABELS[k] for k in sorted(EDITABLE) if policy.fact_category(k) in consented}
-    out["members"] = [m for m in opp_svc.team_members(db, actor.institution_id) if "OFFICER" in m["roles"]
-                      or "MANAGER" in m["roles"]]
+    out["members"] = [m for m in opp_svc.team_members(db, actor.institution_id)
+                      if {"OFFICER", "MANAGER"} & set(m["role_set"])]
     return out
 
 
@@ -721,6 +852,22 @@ def update_status(opp_id: uuid.UUID, body: StatusUpdateIn, idempotency_key: str 
         opp_svc.update_status(db, actor, o, body.state, body.note)
         return {"state": o.state}
     idempotent(db, idempotency_key, f"status:{opp_id}", body.model_dump(), run)
+    return opportunity(opp_id, actor, db)
+
+
+class NoteIn(BaseModel):
+    note: str = Field(..., min_length=1, max_length=1000)
+
+
+@router.post("/opportunities/{opp_id}/note")
+def add_note(opp_id: uuid.UUID, body: NoteIn, actor: Actor = A, db: Session = DB):
+    """An internal note on a routed opportunity — the institution's own record. It is never shown to the customer."""
+    o = db.execute(select(Opportunity).where(Opportunity.id == opp_id,
+                                             Opportunity.institution_id == actor.institution_id)).scalar_one_or_none()
+    if o is None:
+        raise NotFound("Not found.")
+    policy.require_tenant(actor, o.institution_id)
+    opp_svc.add_internal_note(db, actor, o, body.note)
     return opportunity(opp_id, actor, db)
 
 
@@ -863,7 +1010,7 @@ def interest(preview_id: uuid.UUID, body: InterestIn, actor: Actor = A, db: Sess
     if body.state == "NOT_INTERESTED" and body.reason not in opp_svc.REASON_SIGNALS:
         raise ValidationFailed("Tell us why you're passing — it feeds your near-match intelligence.",
                                code="REASON_REQUIRED")
-    p.interest_state, p.interest_by = body.state, actor.id
+    previous, p.interest_state, p.interest_by = p.interest_state, body.state, actor.id
     signal = db.execute(select(ReasonSignal).where(ReasonSignal.preview_id == p.id)).scalar_one_or_none()
     if body.state == "NOT_INTERESTED":
         if signal is None:
@@ -875,19 +1022,20 @@ def interest(preview_id: uuid.UUID, body: InterestIn, actor: Actor = A, db: Sess
         db.delete(signal)  # the institution changed its mind; the pass reason no longer applies
     audit(db, actor, "preview.interest", "preview", p.id,
           after={"state": body.state, "reason": body.reason if body.state == "NOT_INTERESTED" else None})
-    if body.state in ("INTERESTED", "NEED_MORE_INFORMATION"):
+    if body.state in ("INTERESTED", "NEED_MORE_INFORMATION") and body.state != previous:  # not on every repeat click
         from weza.domains.need.models import FinancialNeed
         from weza.domains.notification.service import notify_customer
         need = db.get(FinancialNeed, p.need_id)
         if need and need.customer_id and body.state == "INTERESTED":
             notify_customer(db, need.customer_id, "InstitutionInterest", title="An institution is interested",
-                            body="A participating institution is interested in your request. Open WEZA to review your "
-                                 "options — nothing is shared unless you choose to.", link="/start")
+                            body="A participating institution is interested in your request. Nothing is shared with "
+                                 "it unless you choose to.", link="/start",
+                            quick_replies=[{"label": "Show my options", "action": "show_options", "value": None}])
         elif need and need.customer_id:
             # Pre-consent: the institution is not named and receives nothing; the customer may strengthen the request.
             notify_customer(db, need.customer_id, "InstitutionNeedsMore", title="Your request could go further",
                             body="A participating institution would like more detail before it can consider your "
-                                 "request. Adding documents or completing your profile in WEZA may open more options.",
+                                 "request. Sending a document or completing your profile may open more options.",
                             link="/c/documents")
     return {"ok": True, "note": "Interest is not approval and does not disclose the customer's identity."}
 
@@ -990,6 +1138,7 @@ class AskIn(BaseModel):
 
 @router.post("/ask")
 def ask(body: AskIn, actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:ask:{actor.id}", 30, 600)
     return assistant.ask(db, actor, body.question)
 
 
@@ -999,8 +1148,8 @@ def report_outcomes(actor: Actor = A, db: Session = DB):
     opps = db.execute(select(Opportunity).where(Opportunity.institution_id == actor.institution_id)).scalars().all()
     outs = db.execute(select(Outcome).where(Outcome.institution_id == actor.institution_id)).scalars().all()
     from collections import Counter
-    stage_order = ["ROUTED", "RECEIVED", "ASSIGNED", "CONTACTED", "PROCEEDING", "SUBMITTED_TO_INSTITUTION",
-                   "REPORTED_APPROVED", "REPORTED_DISBURSED"]
+    stage_order = ["ROUTED", "RECEIVED", "ASSIGNED", "CONTACTED", "INFORMATION_REQUESTED", "PROCEEDING",
+                   "SUBMITTED_TO_INSTITUTION", "REPORTED_APPROVED", "REPORTED_DISBURSED"]
     reached = Counter()
     from weza.domains.opportunity.models import Activity
     acts = db.execute(select(Activity.opportunity_id, Activity.kind).where(

@@ -12,9 +12,10 @@ from sqlalchemy.orm import Session
 
 from weza.config import get_settings
 from weza.domains.identity.models import Membership, User
-from weza.domains.institution.models import NotificationPref
-from weza.domains.misc_models import ChannelMessage, Notification
-from weza.domains.notification import retry_queue
+from weza.domains.institution.models import Institution, NotificationPref
+from weza.domains.misc_models import ChannelMessage, Notification, WhatsappStatusReceipt
+from weza.domains.notification import retry_queue, teams
+from weza.domains.trust import roles as canon
 from weza.platform import crypto
 from weza.platform.controls import channel_disabled
 from weza.platform.db import utcnow
@@ -71,9 +72,13 @@ def classify_graph_error(http_status: int, code: int | str | None) -> str:
 
 
 def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: str = "sms", kind: str = "info",
-                          payload: dict | None = None) -> bool:
-    """SMS/WhatsApp to a customer. Without provider credentials, messages go to the simulator inbox
-    (demo/test) — the raw phone number is never stored, only its blind index."""
+                          payload: dict | None = None, idempotency_key: str | None = None) -> bool:
+    """Send to a customer; a stable idempotency key makes committed replays harmless."""
+    if idempotency_key:
+        existing = db.execute(select(ChannelMessage).where(
+            ChannelMessage.idempotency_key == idempotency_key[:180])).scalar_one_or_none()
+        if existing is not None:
+            return existing.status == "SENT"
     s = get_settings()
     if channel_disabled(db, channel):
         log.warning("channel_disabled", extra={"data": {"channel": channel}})
@@ -127,9 +132,16 @@ def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: s
                 log.warning("sms_send_failed", extra={"data": {"err": res.error_code}})
     if kind == "otp" and provider != "simulator":
         body = "[one-time code redacted]"  # only the simulator inbox needs it; never keep a real one-time code
-    db.add(ChannelMessage(channel=channel, to_index=crypto.blind_index("phone", phone_e164), body=body,
-                          payload={"kind": kind, **(payload or {})}, provider=provider, status=status,
-                          provider_message_id=wamid, error_code=error_code))
+    elif kind == "sensitive" and provider != "simulator":
+        body = "[identity details redacted]"  # e.g. the name and NIN read from an ID, shown back for confirmation
+    msg = ChannelMessage(channel=channel, to_index=crypto.blind_index("phone", phone_e164), body=body,
+                         payload={"kind": kind, **(payload or {})}, provider=provider, status=status,
+                         provider_message_id=wamid, error_code=error_code,
+                         idempotency_key=idempotency_key[:180] if idempotency_key else None)
+    db.add(msg)
+    db.flush()
+    if wamid:
+        _reconcile_receipt_for_message(db, msg)
     return status == "SENT"
 
 
@@ -269,19 +281,28 @@ def retry_failed_channel_messages(db: Session, now: datetime | None = None) -> i
     return n
 
 
+def _reply_id(b: dict) -> str:
+    return (f"{b['action']}:{b['value']}" if b.get("value") else (b.get("action") or b["label"]))[:256]
+
+
 def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> SendResult:
+    """Up to 3 options are buttons, 4 to 10 a tap-to-pick list, more than that plain text the customer answers by
+    typing. Replies come back through the same id format ("action:value") whichever way they were shown."""
     buttons = (payload or {}).get("quick_replies") or []
+    to = phone_e164.lstrip("+")
     if buttons and len(buttons) <= 3:
-        msg = {"messaging_product": "whatsapp", "to": phone_e164.lstrip("+"), "type": "interactive",
+        msg = {"messaging_product": "whatsapp", "to": to, "type": "interactive",
                "interactive": {"type": "button", "body": {"text": body[:1024]}, "action": {"buttons": [
-                   {"type": "reply", "reply": {"id": (f"{b['action']}:{b['value']}" if b.get("value")
-                                                      else (b.get("action") or b["label"]))[:256],
-                                               "title": b["label"][:20]}} for b in buttons]}}}
+                   {"type": "reply", "reply": {"id": _reply_id(b), "title": b["label"][:20]}} for b in buttons]}}}
+    elif buttons and len(buttons) <= 10:
+        msg = {"messaging_product": "whatsapp", "to": to, "type": "interactive",
+               "interactive": {"type": "list", "body": {"text": body[:1024]},
+                               "action": {"button": "Choose", "sections": [{"title": "Options", "rows": [
+                                   {"id": _reply_id(b), "title": b["label"][:24]} for b in buttons]}]}}}
     else:
         if buttons:
             body = body + "\n\nReply with: " + " / ".join(b["label"] for b in buttons)
-        msg = {"messaging_product": "whatsapp", "to": phone_e164.lstrip("+"), "type": "text",
-               "text": {"body": body[:4096]}}
+        msg = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": body[:4096]}}
     return _graph_post(msg)
 
 
@@ -342,15 +363,9 @@ def _graph_post(msg: dict) -> SendResult:
 _STATUS_RANK = {"sent": 1, "failed": 2, "delivered": 3, "read": 4}
 
 
-def apply_delivery_status(db: Session, wamid: str, status: str, at: datetime | None = None,
-                          error_code: str | None = None) -> bool:
-    """Record a provider delivery status on the outbound ChannelMessage. Returns True if it changed anything."""
+def _apply_status_to_message(msg: ChannelMessage, status: str, at: datetime | None, error_code: str | None) -> bool:
     new = _STATUS_RANK.get(status)
-    if not wamid or new is None:
-        return False
-    msg = db.execute(select(ChannelMessage).where(ChannelMessage.provider_message_id == wamid)
-                     .with_for_update()).scalars().first()
-    if msg is None or new <= _STATUS_RANK.get(msg.provider_status or "", 0):
+    if new is None or new <= _STATUS_RANK.get(msg.provider_status or "", 0):
         return False
     msg.provider_status = status
     msg.status_at = at or utcnow()
@@ -362,6 +377,57 @@ def apply_delivery_status(db: Session, wamid: str, status: str, at: datetime | N
         msg.error_code = None
     return True
 
+
+def _store_early_receipt(db: Session, wamid: str, status: str, at: datetime | None, error_code: str | None) -> bool:
+    row = db.get(WhatsappStatusReceipt, wamid)
+    if row is None:
+        db.add(WhatsappStatusReceipt(provider_message_id=wamid, provider_status=status,
+                                     status_at=at or utcnow(), error_code=(error_code or "")[:32] or None))
+        return True
+    if _STATUS_RANK.get(status, 0) <= _STATUS_RANK.get(row.provider_status, 0):
+        return False
+    row.provider_status, row.status_at = status, at or utcnow()
+    row.error_code = (error_code or "")[:32] or None
+    return True
+
+
+def _reconcile_receipt_for_message(db: Session, msg: ChannelMessage) -> bool:
+    if not msg.provider_message_id:
+        return False
+    receipt = db.get(WhatsappStatusReceipt, msg.provider_message_id)
+    if receipt is None:
+        return False
+    changed = _apply_status_to_message(msg, receipt.provider_status, receipt.status_at, receipt.error_code)
+    db.delete(receipt)
+    return changed
+
+
+def apply_delivery_status(db: Session, wamid: str, status: str, at: datetime | None = None,
+                          error_code: str | None = None) -> bool:
+    """Record a Meta receipt; persist it when it races ahead of the outbound row."""
+    if not wamid or _STATUS_RANK.get(status) is None:
+        return False
+    msg = db.execute(select(ChannelMessage).where(ChannelMessage.provider_message_id == wamid)
+                     .with_for_update()).scalars().first()
+    if msg is None:
+        return _store_early_receipt(db, wamid, status, at, error_code)
+    return _apply_status_to_message(msg, status, at, error_code)
+
+
+def reconcile_whatsapp_status_receipts(db: Session, limit: int = 200) -> int:
+    """Attach early Meta receipts once their outbound rows are committed."""
+    rows = db.execute(select(WhatsappStatusReceipt).order_by(WhatsappStatusReceipt.received_at).limit(limit)
+                      .with_for_update(skip_locked=True)).scalars().all()
+    n = 0
+    for receipt in rows:
+        msg = db.execute(select(ChannelMessage).where(
+            ChannelMessage.provider_message_id == receipt.provider_message_id).with_for_update()).scalars().first()
+        if msg is None:
+            continue
+        _apply_status_to_message(msg, receipt.provider_status, receipt.status_at, receipt.error_code)
+        db.delete(receipt)
+        n += 1
+    return n
 
 def parse_status_time(ts) -> datetime | None:
     try:
@@ -381,9 +447,26 @@ def _recipients(db: Session, institution_id: uuid.UUID, roles: list[str] | None,
     for u, m in db.execute(q).all():
         if user_ids and u.id in user_ids:
             out.append(u)
-        elif roles and set(m.roles) & set(roles) and (team_id is None or m.team_id in (team_id, None)):
+        elif roles and set(canon.expand(m.roles)) & set(canon.expand(roles)) and \
+                (team_id is None or m.team_id in (team_id, None)):
             out.append(u)
     return out
+
+
+def channel_usable(db: Session, institution_id, user: User, channel: str) -> bool:
+    """Whether a message on this channel can actually reach this person. A channel that cannot is not chosen at all,
+    rather than being recorded as sent: in-app and email always work; Teams needs the institution's connected channel;
+    SMS needs a mobile number on the person's account. Push and WhatsApp for staff are not set up."""
+    if channel == "in_app":
+        return True
+    if channel == "email":
+        return bool(user.email)
+    if channel == "teams":
+        inst = db.get(Institution, institution_id)
+        return bool(inst and teams.configured(inst.profile))
+    if channel == "sms":
+        return bool((user.preferences or {}).get("phone"))
+    return False
 
 
 def _channels_for(db: Session, institution_id, user: User, event_type: str, priority: str) -> list[str]:
@@ -396,7 +479,7 @@ def _channels_for(db: Session, institution_id, user: User, event_type: str, prio
             channels = list(dict.fromkeys(["in_app", *pref.channels]))
     elif priority in ("HIGH", "URGENT"):
         channels = ["in_app", "email"]
-    return channels
+    return [c for c in channels if channel_usable(db, institution_id, user, c)]
 
 
 def notify_institution(db: Session, institution_id: uuid.UUID, event_type: str, *, title: str, body: str = "",
@@ -463,8 +546,23 @@ def deliver(db: Session, note: Notification, user: User | None = None) -> None:
             user = user or db.get(User, note.recipient_id)
             _send_email(user.email if user else "", note.title, note.body)
             note.status = "SENT"
-        else:
+        elif note.channel == "teams":
+            inst = db.get(Institution, note.institution_id) if note.institution_id else None
+            url = teams.webhook(inst.profile) if inst else None
+            if not url:
+                raise teams.TeamsError("this institution has no Teams channel connected")
+            teams.post(url, note.title, note.body, note.link)
             note.status = "SENT"
+        elif note.channel == "sms":
+            user = user or db.get(User, note.recipient_id)
+            phone = (user.preferences or {}).get("phone") if user else None
+            if not phone:
+                raise ValueError("no mobile number on this account")
+            if not send_customer_message(db, phone, f"WEZA: {note.title}", channel="sms", kind="staff_alert"):
+                raise RuntimeError("the SMS provider did not accept the message")
+            note.status = "SENT"
+        else:  # never claim a delivery that did not happen: an unknown channel fails visibly and is dead-lettered
+            raise ValueError(f"no delivery method for channel '{note.channel}'")
         note.next_attempt_at = None
     except Exception as exc:  # noqa: BLE001 — retried with backoff by the worker, then dead-lettered
         retry_queue.record_failure(note, exc)

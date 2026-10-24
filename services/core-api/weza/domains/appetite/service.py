@@ -2,14 +2,15 @@
 approval is human (HUMAN_APPROVE_APPETITE_CHANGE, maker-checker); WEZA never changes appetite autonomously."""
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from weza.domains.appetite.mandate import dimensions, validate_mandate
 from weza.domains.appetite.models import Appetite, AppetiteVersion
-from weza.domains.institution.models import Institution
+from weza.domains.institution.models import Institution, Team
 from weza.domains.matching import engine
 from weza.domains.matching.rules import OPS, ruleset_hash
 from weza.domains.product.models import Product, ProductVersion
@@ -41,13 +42,34 @@ def _validate(db: Session, actor: Actor, p: dict) -> dict:
         raise ValidationFailed("Minimum match must be between 0 and 100.")
     limits = {k: int(v) for k, v in (p.get("capacity_limits") or {}).items()
               if k in ("daily_count", "weekly_count", "monthly_count", "monthly_value") and v not in (None, "", 0)}
+    # Routing destination: the desk that receives opportunities matched by this mandate.
+    routing_team_id = (p.get("capacity_limits") or {}).get("routing_team_id") or None
+    if routing_team_id:
+        try:
+            team_id = uuid.UUID(str(routing_team_id))
+        except (ValueError, AttributeError) as exc:
+            raise ValidationFailed("Unknown routing destination.", details=[{"field": "routing_team_id"}]) from exc
+        owned = db.execute(select(func.count()).select_from(Team).where(
+            Team.id == team_id, Team.institution_id == actor.institution_id)).scalar_one()
+        if not owned:
+            raise ValidationFailed("Unknown routing destination.", details=[{"field": "routing_team_id"}])
+        limits["routing_team_id"] = str(team_id)
 
     def d(x):
         return date.fromisoformat(x) if x else None
+    mandate = validate_mandate(db, p)
     return {"name": p["name"].strip()[:160], "product_ids": pids, "criteria": crit, "min_match_score": mm,
             "target_count": int(p["target_count"]) if p.get("target_count") else None,
             "target_value": Decimal(str(p["target_value"])) if p.get("target_value") else None,
-            "capacity_limits": limits, "campaign_from": d(p.get("campaign_from")), "campaign_to": d(p.get("campaign_to"))}
+            "capacity_limits": limits, "campaign_from": d(p.get("campaign_from")), "campaign_to": d(p.get("campaign_to")),
+            **mandate}
+
+
+def _ruleset(av) -> str:
+    """The ruleset hash covers the criteria *and* the mandate: changing either changes the rules the
+    demand was matched against, so a stored hash can always be compared with the live rules."""
+    return ruleset_hash(av.criteria, av.min_match_score, av.customer_types, av.sectors, av.regions,
+                        av.min_amount, av.max_amount, av.min_business_age_months)
 
 
 def create(db: Session, actor: Actor, payload: dict) -> AppetiteVersion:
@@ -58,7 +80,7 @@ def create(db: Session, actor: Actor, payload: dict) -> AppetiteVersion:
     db.flush()
     av = AppetiteVersion(appetite_id=ap.id, institution_id=ap.institution_id, version=1, status="DRAFT",
                          author_id=actor.id, **v)
-    av.ruleset_hash = ruleset_hash(av.criteria, av.min_match_score)
+    av.ruleset_hash = _ruleset(av)
     db.add(av)
     db.flush()
     audit(db, actor, "appetite.created", "appetite", ap.id, after={"version": 1})
@@ -75,12 +97,12 @@ def new_version(db: Session, actor: Actor, ap: Appetite, payload: dict) -> Appet
         for k, val in v.items():
             setattr(draft, k, val)
         draft.status, draft.simulation_run_id, draft.author_id = "DRAFT", None, actor.id  # edits require re-simulation
-        draft.ruleset_hash = ruleset_hash(draft.criteria, draft.min_match_score)
+        draft.ruleset_hash = _ruleset(draft)
         return draft
     n = db.execute(select(func.max(AppetiteVersion.version)).where(AppetiteVersion.appetite_id == ap.id)).scalar_one() or 0
     av = AppetiteVersion(appetite_id=ap.id, institution_id=ap.institution_id, version=n + 1, status="DRAFT",
                          author_id=actor.id, **v)
-    av.ruleset_hash = ruleset_hash(av.criteria, av.min_match_score)
+    av.ruleset_hash = _ruleset(av)
     db.add(av)
     db.flush()
     audit(db, actor, "appetite.version_drafted", "appetite", ap.id, after={"version": av.version})
@@ -101,9 +123,11 @@ def simulate_version(db: Session, actor: Actor, av: AppetiteVersion) -> dict:
     policy.require(actor, "appetite.simulate")
     policy.require_tenant(actor, av.institution_id)
     result = engine.simulate(db, av.institution_id, product_versions=_product_versions(db, av.product_ids),
-                             criteria=av.criteria, min_match_score=av.min_match_score)
+                             criteria=av.criteria, min_match_score=av.min_match_score,
+                             mandate=dimensions(av))
     run = engine.record_simulation(db, av.institution_id, "APPETITE", {"appetite_version_id": str(av.id),
-                                   "criteria": av.criteria, "min_match_score": av.min_match_score}, result,
+                                   "criteria": av.criteria, "min_match_score": av.min_match_score,
+                                   "mandate": dimensions(av)}, result,
                                    actor.id, av.id)
     if av.status == "DRAFT":
         av.status = "SIMULATED"
@@ -123,8 +147,15 @@ def simulate_adhoc(db: Session, actor: Actor, payload: dict) -> dict:
     policy.require(actor, "appetite.simulate")
     v = _validate(db, actor, {**payload, "name": payload.get("name") or "what-if"})
     result = engine.simulate(db, actor.institution_id, product_versions=_product_versions(db, v["product_ids"]),
-                             criteria=v["criteria"], min_match_score=v["min_match_score"])
-    engine.record_simulation(db, actor.institution_id, "WHAT_IF", {"criteria": v["criteria"]}, result, actor.id)
+                             criteria=v["criteria"], min_match_score=v["min_match_score"],
+                             mandate={k: v[k] for k in ("customer_types", "sectors", "regions", "min_amount",
+                                                       "max_amount", "min_business_age_months")})
+    engine.record_simulation(db, actor.institution_id, "WHAT_IF",
+                             {"criteria": v["criteria"], "mandate": {k: v[k] for k in ("customer_types", "sectors",
+                                                                                       "regions", "min_amount",
+                                                                                       "max_amount",
+                                                                                       "min_business_age_months")}},
+                             result, actor.id)
     return result
 
 
@@ -203,6 +234,31 @@ def set_lifecycle(db: Session, actor: Actor, ap: Appetite, to: str, reason: str)
           reason=reason)
     emit(db, "AppetiteActivated" if to == "ACTIVE" else "AppetitePaused", topic="institution",
          aggregate_type="appetite", aggregate_id=ap.id, institution_id=ap.institution_id, data={"status": to})
+
+
+WAITING_DAYS = 7  # no opportunity for this long and the mandate is shown as waiting for demand
+
+
+def demand_state(db: Session, ap: Appetite) -> dict:
+    """Where a mandate stands in the two-sided market (FSD-WAIT-002): an active mandate with too little demand right now
+    is WAITING, not idle or broken. It stays eligible for future matching until it is paused, full or expired."""
+    from weza.domains.opportunity.models import Opportunity
+    if ap.lifecycle_status == "PAUSED" or ap.capacity_state == "PAUSED":
+        return {"state": "PAUSED", "message": "Paused: it receives no opportunities until it is resumed."}
+    if ap.lifecycle_status == "EXPIRED":
+        return {"state": "EXPIRED", "message": "Expired: its campaign period has ended."}
+    if ap.lifecycle_status != "ACTIVE":
+        return {"state": ap.lifecycle_status, "message": ""}
+    if ap.capacity_state == "FULL":
+        return {"state": "FULL", "message": "At its capacity limit: it receives opportunities again when the limit resets "
+                                            "or is raised."}
+    last = db.execute(select(func.max(Opportunity.qualified_at)).where(Opportunity.appetite_id == ap.id)).scalar_one()
+    if last is not None and last >= utcnow() - timedelta(days=WAITING_DAYS):
+        days = (utcnow() - last).days
+        return {"state": "RECEIVING", "message": "Receiving opportunities" + (" (latest today)" if days == 0 else
+                                                                            f" (latest {days} day{'s' if days != 1 else ''} ago)")}
+    return {"state": "WAITING", "message": "Waiting for demand: it stays active and will receive matching opportunities "
+                                           "as they arrive, until it is paused, full or expired."}
 
 
 def expiry_sweep(db: Session) -> int:

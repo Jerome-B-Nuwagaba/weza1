@@ -220,10 +220,15 @@ def _opp_for_customer(db: Session, o: Opportunity) -> dict:
     c = db.get(Consent, o.consent_id)
     outs = db.execute(select(Outcome).where(Outcome.opportunity_id == o.id).order_by(Outcome.reported_at)).scalars()
     from weza.domains.opportunity.models import Activity
-    timeline = [{"state": a.kind, "label": journey.status_label(a.kind), "at": a.at.isoformat()} for a in
-                db.execute(select(Activity).where(Activity.opportunity_id == o.id).order_by(Activity.at)).scalars()
-                if a.kind in ("QUALIFIED", "ROUTED", "ASSIGNED", "CONTACTED", "PROCEEDING", "SUBMITTED_TO_INSTITUTION",
-                              "REPORTED_APPROVED", "REPORTED_DECLINED", "REPORTED_DISBURSED", "WITHDRAWN", "EXPIRED")]
+    # One entry per milestone: the same status is not shown twice when it is both asked for and recorded.
+    timeline, seen = [], set()
+    for a in db.execute(select(Activity).where(Activity.opportunity_id == o.id).order_by(Activity.at)).scalars():
+        if a.kind not in ("QUALIFIED", "ROUTED", "ASSIGNED", "CONTACTED", "INFORMATION_REQUESTED", "PROCEEDING",
+                          "SUBMITTED_TO_INSTITUTION", "REPORTED_APPROVED", "REPORTED_DECLINED",
+                          "REPORTED_DISBURSED", "WITHDRAWN", "EXPIRED") or a.kind in seen:
+            continue
+        seen.add(a.kind)
+        timeline.append({"state": a.kind, "label": journey.status_label(a.kind), "at": a.at.isoformat()})
     return {"id": str(o.id), "reference": o.reference, "institution": inst.display_name, "state": o.state,
             "status_label": journey.status_label(o.state), "amount": float(o.amount),
             "product": (o.snapshot.get("product_version") or {}).get("name"), "qualified_at": o.qualified_at.isoformat(),

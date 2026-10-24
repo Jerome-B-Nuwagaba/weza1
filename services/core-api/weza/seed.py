@@ -274,6 +274,156 @@ def seed_institutions(db: Session) -> dict:
     return result
 
 
+def _demo_bank_state(db: Session, inst: Institution, users: dict | None = None) -> dict:
+    """The Demo Bank pieces a caller needs: the institution, its administrator, its SME desk and its people."""
+    admin = db.execute(select(User).where(User.email == "admin@demobank.demo")).scalar_one_or_none()
+    desk = db.execute(select(Team).where(Team.institution_id == inst.id).order_by(Team.name)).scalars().first()
+    return {"inst": inst, "admin": admin, "desk": desk, "users": users or {}}
+
+
+def seed_demo_bank(db: Session) -> dict:
+    """Demo Bank — the institution the end-to-end demonstration runs through (Goal 1).
+
+    One active SME Working Capital product, one active appetite carrying a full mandate, and one
+    user for each canonical role (plus the product lead the maker-checker rule needs), so the
+    demonstration exercises role isolation for real rather than in theory.
+
+    Unlike the other demo institutions, Demo Bank's people hold the canonical role names
+    (INSTITUTION_ADMIN, INSTITUTION_MANAGER, INSTITUTION_OFFICER, COMPLIANCE_VIEWER) — which is
+    what makes it the demonstration of the Goal 1 role vocabulary.
+    """
+    from weza.domains.identity.models import Membership
+    from weza.domains.trust import roles as canon
+
+    existing = db.execute(select(Institution).where(Institution.display_name == "Demo Bank")).scalar_one_or_none()
+    if existing is not None:
+        return _demo_bank_state(db, existing)
+    ops = Actor(kind="WEZA_USER", roles=frozenset({"WEZA_OPS"}), display="Tendo Operations (seed)")
+    inst, admin = inst_svc.apply(db, {
+        "legal_name": "Demo Bank Limited", "display_name": "Demo Bank", "institution_type": "Commercial Bank",
+        "licence_no": "BOU/CB/0000-DEMO", "regulator": "Bank of Uganda",
+        "description": "Demo institution for the WEZA V1 end-to-end demonstration.",
+        "accept_terms": True,
+        "representative": {"name": "Demo Bank Representative", "email": "rep@demobank.demo",
+                           "phone": "+256700000001", "title": "Head of SME"},
+        "compliance": {"name": "Demo Bank Compliance", "email": "compliance@demobank.demo"},
+        "admin_name": "Demo Bank Administrator", "admin_email": "admin@demobank.demo",
+        "admin_password": DEMO_PASSWORD})
+    inst.profile = {**inst.profile, "regions_served": ["Central", "Western"]}
+    inst_svc.verify(db, ops, inst, True, "Licence and representative verified (demo)")
+    # The administrator created at application time takes the canonical administrator role.
+    db.execute(select(Membership).where(Membership.user_id == admin.id)).scalar_one().roles = \
+        [canon.INSTITUTION_ADMIN]
+    team = Team(institution_id=inst.id, name="SME Desk")
+    db.add(team)
+    db.flush()
+    people = _staff(db, inst, "demobank.demo", [
+        ("manager", "Erasmus Byaruhanga", [canon.INSTITUTION_MANAGER], "SME Desk"),
+        ("officer", "Sarah Namazzi", [canon.INSTITUTION_OFFICER], "SME Desk"),
+        ("compliance", "Geoffrey Ssekandi", [canon.COMPLIANCE_VIEWER], None),
+        # The product lead drafts; the administrator approves (maker-checker: two different people).
+        ("business", "Miriam Auma", ["BUSINESS"], None),
+    ], {"SME Desk": team.id})
+    biz, ad = _actor(db, people["business"]), _actor(db, admin)
+    p1 = _product(db, biz, ad, name="SME Working Capital", family="SME_WORKING_CAPITAL",
+                  terms={"min_amount": 1_000_000, "max_amount": 50_000_000, "min_tenor_months": 3,
+                         "max_tenor_months": 24, "pricing_display": "From 20% p.a. (indicative)",
+                         "collateral_required": False, "digital_journey": True, "typical_response_hours": 24,
+                         "description": "Working capital for established small and medium businesses."},
+                  rules=[{"field": "customer_type", "op": "in", "value": ["SME"], "label": "Business owner"},
+                         {"field": "business_age_months", "op": "gte", "value": 6,
+                          "label": "Operating for at least 6 months"}],
+                  requirements=[{"doc_type": "business_registration", "label": "Business registration certificate",
+                                 "required": False},
+                                {"doc_type": "bank_statement", "label": "6-month bank statement", "required": False}])
+    _appetite(db, biz, ad, name="SME Working Capital Mandate", product_ids=[str(p1)], min_match_score=60,
+              criteria=[{"field": "monthly_turnover", "op": "gte", "value": 1_000_000, "weight": 1,
+                         "label": "Turnover UGX 1M+ a month"}],
+              # The mandate, as first-class dimensions (Goal 1 §4).
+              customer_types=["SME"],
+              sectors=["health_pharmacy", "retail_trade", "wholesale_trade", "manufacturing", "services", "agriculture"],
+              regions=["Central", "Western"], min_amount=1_000_000, max_amount=50_000_000,
+              min_business_age_months=6,
+              target_count=100, target_value=3_000_000_000,
+              capacity_limits={"daily_count": 40, "routing_team_id": str(team.id)},
+              campaign_from=str(date.today() - timedelta(days=30)), campaign_to=str(date.today() + timedelta(days=90)))
+    inst_svc.save_routing(db, ad, inst.id, [
+        {"name": "All SME requests → SME Desk", "conditions": {"customer_types": ["SME"]},
+         "target_team_id": str(team.id)}],
+        {"ack_within_minutes": 120, "first_contact_within_minutes": 480, "escalate_after_minutes": 1440})
+    inst_svc.save_notification_prefs(db, ad, inst.id, inst_svc.default_notification_prefs())
+    inst_svc.activate(db, ad, inst)
+    return _demo_bank_state(db, inst, {**people, "admin": admin})
+
+
+def _journey_bank_state(db: Session, inst: Institution) -> dict:
+    """The Demo Bank pieces a caller needs: the institution, its administrator and its SME desk."""
+    admin = db.execute(select(User).where(User.email == "admin@demo.bank")).scalar_one_or_none()
+    desk = db.execute(select(Team).where(Team.institution_id == inst.id).order_by(Team.name)).scalars().first()
+    return {"inst": inst, "admin": admin, "desk": desk}
+
+
+def seed_journey_demo_bank(db: Session) -> dict:
+    """Journey Demo Bank — the demo lender for the customer-journey demo: one ACTIVE SME working-capital product with one
+    ACTIVE mandate, routed to its own SME desk.
+
+    Opt-in on purpose: it is NOT part of the automatic seed, so the standard demo data and the existing test suite
+    stay exactly as they are. The journey demo (scripts/demo_marketplace_journey.py) and the journey tests call it
+    explicitly. Idempotent — a second call returns the same Demo Bank.
+    """
+    existing = db.execute(select(Institution).where(Institution.display_name == "Journey Demo Bank")).scalar_one_or_none()
+    if existing is not None:
+        return _journey_bank_state(db, existing)
+    ops = Actor(kind="WEZA_USER", roles=frozenset({"WEZA_OPS"}), display="Tendo Operations (seed)")
+    inst, admin = inst_svc.apply(db, {
+        "legal_name": "Journey Demo Bank Uganda Limited", "display_name": "Journey Demo Bank", "institution_type": "Commercial Bank",
+        "licence_no": "BOU/CB/0009-DEMO", "regulator": "Bank of Uganda",
+        "description": "Demo lender for the customer-journey demo: SME working capital.",
+        "accept_terms": True,
+        "representative": {"name": "Demo Bank Representative", "email": "rep@demo.bank"},
+        "compliance": {"name": "Demo Bank Compliance", "email": "compliance@demo.bank"},
+        "admin_name": "Demo Bank Admin", "admin_email": "admin@demo.bank", "admin_password": DEMO_PASSWORD})
+    inst.profile = {**inst.profile, "regions_served": ["Central", "Western", "Eastern"]}
+    inst_svc.verify(db, ops, inst, True, "Licence and representative verified (demo)")
+    desk = Team(institution_id=inst.id, name="SME Desk")
+    db.add(desk)
+    db.flush()
+    people = _staff(db, inst, "demo.bank", [
+        ("business", "Sarah Nansubuga", ["BUSINESS"], None),
+        ("credit", "Daniel Wasswa", ["CREDIT_RISK"], None),
+        ("manager", "Agnes Byaruhanga", ["MANAGER"], "SME Desk"),
+        ("officer", "Isaac Lukwago", ["OFFICER"], "SME Desk")], {"SME Desk": desk.id})
+    biz, cr, ad = _actor(db, people["business"]), _actor(db, people["credit"]), _actor(db, admin)
+    p1 = _product(db, biz, cr, name="SME Working Capital Loan", family="SME_WORKING_CAPITAL",
+                  terms={"min_amount": 5_000_000, "max_amount": 100_000_000, "min_tenor_months": 6,
+                         "max_tenor_months": 24, "pricing_display": "From 16% p.a. (indicative)",
+                         "collateral_required": False, "digital_journey": True, "typical_response_hours": 24,
+                         "customer_type": "SME",
+                         "description": "Working capital for established small and medium businesses."},
+                  rules=[{"field": "customer_type", "op": "in", "value": ["SME"], "label": "Registered business owner"},
+                         {"field": "business_age_months", "op": "gte", "value": 6,
+                          "label": "Operating for at least 6 months"},
+                         {"field": "business_registered", "op": "is_true", "label": "Business is registered"}],
+                  requirements=[{"doc_type": "business_registration", "label": "Business registration certificate",
+                                 "required": False}])
+    _appetite(db, cr, ad, name="Demo Bank SME Working Capital Mandate", product_ids=[str(p1)], min_match_score=60,
+              criteria=[{"field": "sector", "op": "in", "weight": 1,
+                         "value": ["health_pharmacy", "retail_trade", "wholesale_trade", "manufacturing", "services"],
+                         "label": "Trading and manufacturing sectors"},
+                        {"field": "region", "op": "in", "weight": 1, "value": ["Central", "Western", "Eastern"],
+                         "label": "Central, Western & Eastern regions"},
+                        {"field": "monthly_turnover", "op": "gte", "weight": 1, "value": 2_000_000,
+                         "label": "Turnover UGX 2M+ per month"}],
+              target_count=100, capacity_limits={"daily_count": 25, "routing_team_id": str(desk.id)})
+    inst_svc.save_routing(db, ad, inst.id, [
+        {"name": "All SME requests → SME Desk", "conditions": {"customer_types": ["SME"]},
+         "target_team_id": str(desk.id)}],
+        {"ack_within_minutes": 60, "first_contact_within_minutes": 240, "escalate_after_minutes": 1440})
+    inst_svc.save_notification_prefs(db, ad, inst.id, inst_svc.default_notification_prefs())
+    inst_svc.activate(db, ad, inst)
+    return _journey_bank_state(db, inst)
+
+
 def _demo_need(rng: random.Random, i: int) -> dict:
     kind = rng.choices(["SME", "SALARIED", "AGRICULTURE", "SOLAR", "HUGE"], [0.5, 0.22, 0.18, 0.06, 0.04])[0]
     from weza.domains.admin_config import UGANDA
@@ -457,6 +607,7 @@ def seed(force: bool = False) -> bool:
         seed_config(db)
         seed_weza_staff(db)
         inst_map = seed_institutions(db)
+        inst_map["demobank"] = seed_demo_bank(db)
     drain()
     with session_scope() as db:
         inst_map = {k: {"inst": db.get(Institution, v["inst"].id),
@@ -473,7 +624,8 @@ def seed(force: bool = False) -> bool:
 
 def _reload(db: Session) -> dict:
     out = {}
-    for key, domain in (("lakeside", "lakeside.demo"), ("pearl", "pearl.demo"), ("kijani", "kijani.demo")):
+    for key, domain in (("lakeside", "lakeside.demo"), ("pearl", "pearl.demo"), ("kijani", "kijani.demo"),
+                        ("demobank", "demobank.demo")):
         users = {u.email.split("@")[0]: u for u in db.execute(select(User).where(User.email.like(f"%@{domain}"))).scalars()}
         from weza.domains.identity.models import Membership
         m = db.execute(select(Membership).where(Membership.user_id == users["admin"].id)).scalar_one()

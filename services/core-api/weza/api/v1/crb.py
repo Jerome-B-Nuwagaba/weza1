@@ -10,7 +10,7 @@ from weza.api.deps import DB, customer_actor
 from weza.domains.consent import crb_service
 from weza.platform.context import Actor
 from weza.platform.errors import ValidationFailed
-from weza.schemas.crb import CRBConsentRequest, CRBConsentOTPChallenge, CRBConsentOTPVerify
+from weza.schemas.crb import CRBConsentOTPChallenge, CRBConsentOTPVerify, CRBConsentRequest
 
 router = APIRouter(prefix="/me/crb", tags=["crb"])
 

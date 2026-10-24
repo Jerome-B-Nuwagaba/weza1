@@ -15,13 +15,14 @@ import weza.consumers  # noqa: F401 — registers consumers
 import weza.domains.need.journey  # noqa: F401 — registers graphs
 from weza.config import get_settings
 from weza.domains.appetite import service as appetite_svc
-from weza.domains.intelligence import insights
+from weza.domains.intelligence import briefs, insights
 from weza.domains.matching import engine
 from weza.domains.matching.models import WaitingEntry
 from weza.domains.misc_models import MarketSnapshot
 from weza.domains.notification import service as notify
 from weza.domains.notification import whatsapp_inbound
 from weza.domains.opportunity import service as opp_svc
+from weza.domains.trust import retention
 from weza.platform.controls import purge_rate_counters
 from weza.platform.db import session_scope, utcnow
 from weza.platform.events import dispatch_pending
@@ -99,6 +100,13 @@ def _sweep(fn: Callable) -> Callable[[], None]:
     return run
 
 
+def retention_job() -> None:
+    """Daily retention run (TSD §70). Does nothing unless RETENTION_ENABLED, because it deletes data."""
+    if get_settings().retention_enabled:
+        with session_scope() as db:
+            retention.run(db, apply=True)
+
+
 JOBS: list[tuple[str, float, Callable[[], object]]] = [
     ("graph_timers", 15, run_graph_timers),
     ("service_targets", 60, _sweep(opp_svc.service_target_sweep)),
@@ -106,6 +114,7 @@ JOBS: list[tuple[str, float, Callable[[], object]]] = [
     ("info_request_expiry", 900, _sweep(opp_svc.info_request_expiry_sweep)),
     ("notify_retry", 60, _sweep(notify.retry_sweep)),
     ("whatsapp_retry", 60, _sweep(notify.retry_failed_channel_messages)),
+    ("whatsapp_receipts", 30, _sweep(notify.reconcile_whatsapp_status_receipts)),
     ("whatsapp_inbox_retry", 30, _sweep(whatsapp_inbound.retry_pending)),
     ("notify_escalation", 60, _sweep(notify.escalation_sweep)),
     ("waiting_room", 600, waiting_room_sweep),
@@ -113,6 +122,8 @@ JOBS: list[tuple[str, float, Callable[[], object]]] = [
     ("dead_letters", 120, dead_letter_alerts),
     ("hourly_clearing", 3600, hourly_clearing),
     ("nightly", 86400, nightly),
+    ("retention", 86400, retention_job),
+    ("briefs", 900, _sweep(briefs.send_due)),  # idempotent: one brief per person per day (Monday: and per week)
 ]
 
 

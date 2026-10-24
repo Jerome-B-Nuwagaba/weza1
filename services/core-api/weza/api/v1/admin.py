@@ -15,6 +15,7 @@ from weza.api.deps import DB, require_step_up, weza_actor
 from weza.domains.admin_config import get_config, publish_config
 from weza.domains.appetite import service as appetite_svc
 from weza.domains.appetite.models import Appetite
+from weza.domains.commercial import referral as referrals
 from weza.domains.commercial import service as commercial
 from weza.domains.commercial.models import CommercialEvent, Contract, Dispute
 from weza.domains.consent.models import Consent
@@ -26,16 +27,17 @@ from weza.domains.institution.models import Contact, Institution
 from weza.domains.intelligence import insights
 from weza.domains.intelligence.parsing import parse_phone
 from weza.domains.matching.models import ClearingRun, Match, ShadowMatch
-from weza.domains.misc_models import AiCallLog, IntegrityCase, LoopMetric, Notification, ReviewItem
+from weza.domains.misc_models import AgentStep, AiCallLog, IntegrityCase, LoopMetric, Notification, ReviewItem
 from weza.domains.need.models import FinancialNeed
 from weza.domains.opportunity import service as opp_svc
 from weza.domains.opportunity.models import Assignment, Opportunity, Outcome
 from weza.domains.product import service as product_svc
 from weza.domains.product.models import Product
-from weza.domains.trust import policy
+from weza.domains.trust import policy, retention
 from weza.domains.trust.models import AuditEvent, Decision
 from weza.domains.trust.service import audit
 from weza.platform.context import Actor
+from weza.platform.controls import rate_limit
 from weza.platform.db import session_scope, utcnow
 from weza.platform.errors import Forbidden, InvalidTransition, NotFound, ValidationFailed
 from weza.platform.events import emit, replay_delivery
@@ -89,10 +91,7 @@ def overview(actor: Actor = W, db: Session = DB):
 def institutions(actor: Actor = W, db: Session = DB):
     policy.require(actor, "admin.read")
     rows = db.execute(select(Institution).order_by(Institution.created_at.desc())).scalars()
-    return {"institutions": [{"id": str(i.id), "legal_name": i.legal_name, "display_name": i.display_name,
-                              "type": i.institution_type, "status": i.status, "licence_no": i.licence_no,
-                              "regulator": i.regulator, "created_at": i.created_at.isoformat(),
-                              "activated_at": i.activated_at.isoformat() if i.activated_at else None} for i in rows]}
+    return {"institutions": [{**inst_svc.summary(i), "created_at": i.created_at.isoformat()} for i in rows]}
 
 
 @router.get("/institutions/{inst_id}")
@@ -101,11 +100,9 @@ def institution(inst_id: uuid.UUID, actor: Actor = W, db: Session = DB):
     i = db.get(Institution, inst_id)
     if i is None:
         raise NotFound("Not found.")
-    return {"id": str(i.id), "legal_name": i.legal_name, "display_name": i.display_name, "type": i.institution_type,
-            "status": i.status, "status_reason": i.status_reason, "licence_no": i.licence_no, "regulator": i.regulator,
-            "profile": i.profile, "terms_version": i.terms_version,
-            "verified_by": i.verified_by, "verified_at": i.verified_at.isoformat() if i.verified_at else None,
-            "contacts": [{"kind": c.kind, "name": c.name, "email": c.email, "phone": c.phone, "title": c.title}
+    return {**inst_svc.summary(i), "status_reason": i.status_reason, "profile": i.profile,
+            "primary_contact": inst_svc.primary_contact(db, i),
+            "contacts": [inst_svc.contact_summary(c)
                          for c in db.execute(select(Contact).where(Contact.institution_id == i.id)).scalars()],
             "checklist": inst_svc.checklist(db, i),
             "users": db.execute(select(func.count()).select_from(Membership).where(
@@ -236,6 +233,7 @@ class LookupIn(BaseModel):
 @router.post("/customers/lookup")
 def customer_lookup(body: LookupIn, actor: Actor = W, db: Session = DB):
     """Support lookup via the Identity Vault — requires a reason, is audited, masks identifiers (blueprint A-05)."""
+    rate_limit(db, f"admin:customer_lookup:{actor.id}", 30, 600)
     try:
         policy.require(actor, "admin.vault_lookup")
         require_step_up(actor)
@@ -409,7 +407,9 @@ def commercial_overview(actor: Actor = W, db: Session = DB):
                                  "included_opportunities": c.included_opportunities,
                                  "opportunity_price": float(c.opportunity_price),
                                  "duplicate_window_days": c.duplicate_window_days,
-                                 "dispute_window_days": c.dispute_window_days} if c else None})
+                                 "dispute_window_days": c.dispute_window_days,
+                                 "min_match_score": commercial.qualified_definition(c)["min_match_score"]}
+                    if c else None})
     revenue = sum(x["statement"]["total_due"] for x in out)
     return {"period": period, "institutions": out, "unit_economics": {
         "revenue_month": revenue, "qualified_opportunities_total": total_opps,
@@ -434,15 +434,63 @@ def set_contract(inst_id: uuid.UUID, body: ContractIn, actor: Actor = W, db: Ses
     policy.require(actor, "admin.commercial")
     if db.get(Institution, inst_id) is None:
         raise NotFound("Not found.")
+    previous = commercial.active_contract(db, inst_id)
+    # Carry over every other qualification rule; only the match threshold is edited here.
+    definition = {**((previous.qualified_definition if previous else {}) or {}), "min_match_score": body.min_match_score}
     for c in db.execute(select(Contract).where(Contract.institution_id == inst_id, Contract.status == "ACTIVE")).scalars():
         c.status, c.effective_to = "ENDED", date.today()
     db.add(Contract(institution_id=inst_id, plan=body.plan, subscription_fee=Decimal(str(body.subscription_fee)),
                     included_opportunities=body.included_opportunities,
                     opportunity_price=Decimal(str(body.opportunity_price)),
                     duplicate_window_days=body.duplicate_window_days, dispute_window_days=body.dispute_window_days,
-                    qualified_definition={"min_match_score": body.min_match_score}, effective_from=date.today()))
+                    qualified_definition=definition, effective_from=date.today()))
     audit(db, actor, "contract.updated", "institution", inst_id, after=body.model_dump())
     return commercial_overview(actor, db)
+
+
+# ------------------------------------------------------------------ partner and campaign links (BRD §5, TSD §73)
+
+
+@router.get("/referral-links")
+def referral_link(source: str | None = Query(None, max_length=40), campaign: str | None = Query(None, max_length=40),
+                  partner: str | None = Query(None, max_length=40), referral: str | None = Query(None, max_length=40),
+                  text: str = Query("Hi", max_length=200), actor: Actor = W, db: Session = DB):
+    """A click-to-WhatsApp link and a printable QR code that tag every customer who arrives through it with its source,
+    campaign, partner and referral code. Generating one changes nothing: the lineage is recorded when a customer
+    actually arrives."""
+    policy.require(actor, "admin.commercial")
+    link = referrals.whatsapp_link(source, campaign, partner, referral, text)
+    ref = referrals.reference(source, campaign, partner, referral)
+    audit(db, actor, "referral_link.created", "referral_link", ref[:64], after={"reference": ref})
+    return {"link": link, "reference": ref, "qr_svg": referrals.qr_svg(link)}
+
+
+# ------------------------------------------------------------------ retention (TSD §70)
+
+
+@router.get("/retention")
+def retention_preview(actor: Actor = W, db: Session = DB):
+    """What the retention engine would do right now. Changes nothing."""
+    policy.require(actor, "admin.config")
+    return retention.run(db, apply=False)
+
+
+class RetentionRun(BaseModel):
+    reason: str = Field(..., min_length=8, max_length=300)
+
+
+@router.post("/retention/run")
+def retention_run(body: RetentionRun, actor: Actor = W, db: Session = DB):
+    """Carry out the retention policy now (it also runs daily when RETENTION_ENABLED). Deletes data, so it needs MFA
+    step-up and a recorded reason."""
+    rate_limit(db, f"admin:retention_run:{actor.id}", 5, 3600)
+    policy.require(actor, "admin.config")
+    require_step_up(actor)
+    report = retention.run(db, apply=True)
+    audit(db, actor, "retention.run_manual", "retention", "manual", reason=body.reason,
+          after={"customers_anonymised": report["customers"]["anonymise"],
+                 "rules": {k: v["done"] for k, v in report["rules"].items()}})
+    return report
 
 
 # ------------------------------------------------------------------ Graph Inspector (Skill §59)
@@ -450,7 +498,7 @@ def set_contract(inst_id: uuid.UUID, body: ContractIn, actor: Actor = W, db: Ses
 
 @router.get("/graph")
 def graph_inspector(q: str = Query(..., min_length=3, max_length=80), actor: Actor = W, db: Session = DB):
-    policy.require(actor, "admin.read")
+    policy.require(actor, "admin.engineering")
     audit(db, actor, "graph.inspected", "graph", q[:64])
     opp = need = None
     if q.upper().startswith("OPP-"):
@@ -540,6 +588,8 @@ def graph_inspector(q: str = Query(..., min_length=3, max_length=80), actor: Act
     audits = db.execute(select(AuditEvent).where(AuditEvent.object_id.in_(agg_ids + [str(o.consent_id) for o in opps]))
                         .order_by(AuditEvent.at)).scalars().all()
     ai_calls = db.execute(select(AiCallLog).where(AiCallLog.subject == str(need.id)).order_by(AiCallLog.created_at)).scalars().all()
+    agent_steps = db.execute(select(AgentStep).where(AgentStep.subject == str(need.id))
+                             .order_by(AgentStep.created_at)).scalars().all()
     return {
         "nodes": nodes, "edges": edges,
         "graph": {"id": str(gi.id), "type": gi.graph_type, "version": gi.graph_version, "current_node": gi.current_node,
@@ -560,6 +610,9 @@ def graph_inspector(q: str = Query(..., min_length=3, max_length=80), actor: Act
         "ai_calls": [{"capability": c.capability, "mode": c.mode, "model": c.model, "fallback": c.fallback_used,
                       "latency_ms": c.latency_ms, "tokens": c.input_tokens + c.output_tokens, "error": c.error,
                       "at": c.created_at.isoformat()} for c in ai_calls],
+        "agent_steps": [{"agent": s.agent, "tool": s.tool, "status": s.result_status,
+                         "latency_ms": s.latency_ms, "args_hash": s.args_hash,
+                         "at": s.created_at.isoformat()} for s in agent_steps],
     }
 
 
@@ -585,7 +638,7 @@ def audit_log(action: str | None = None, object_id: str | None = None, limit: in
 
 @router.get("/deliveries")
 def deliveries(status: str = "DEAD", actor: Actor = W, db: Session = DB):
-    policy.require(actor, "admin.read")
+    policy.require(actor, "admin.engineering")
     rows = db.execute(select(EventDelivery, OutboxEvent).join(OutboxEvent, OutboxEvent.id == EventDelivery.event_id)
                       .where(EventDelivery.status == status).order_by(EventDelivery.next_attempt_at.desc()).limit(200)).all()
     failed_notes = db.execute(select(Notification).where(Notification.status.in_(["FAILED", "DEAD"]))
@@ -617,7 +670,7 @@ def my_notifications(actor: Actor = W, db: Session = DB):
 @router.get("/loops")
 def loops(actor: Actor = W, db: Session = DB):
     """Loop & graph observability (Skill §61; blueprint 08 §6)."""
-    policy.require(actor, "admin.read")
+    policy.require(actor, "admin.engineering")
     since = utcnow() - timedelta(days=30)
     node_entries = db.execute(select(GraphTransition.to_node, func.count()).where(GraphTransition.at >= since)
                               .group_by(GraphTransition.to_node)).all()
@@ -632,10 +685,15 @@ def loops(actor: Actor = W, db: Session = DB):
                            func.count().filter(AiCallLog.fallback_used.is_(True)),
                            func.count().filter(AiCallLog.validation_ok.is_(False)))
                     .where(AiCallLog.created_at >= since).group_by(AiCallLog.capability)).all()
+    agent_steps = db.execute(select(AgentStep.agent, AgentStep.tool, AgentStep.result_status, func.count())
+                             .where(AgentStep.created_at >= since)
+                             .group_by(AgentStep.agent, AgentStep.tool, AgentStep.result_status)).all()
     return {"node_entries": dict(node_entries),
             "instances": [{"graph": g, "status": s, "count": c} for g, s, c in statuses],
             "waiting_at": dict(waiting_at),
             "loops": [{"loop": loop, "event": e, "count": c} for loop, e, c in loop_metrics],
+            "agent_steps": [{"agent": a, "tool": t, "status": s, "count": n}
+                            for a, t, s, n in agent_steps],
             "ai": [{"capability": c, "calls": n, "avg_latency_ms": round(lat or 0), "tokens": int(t or 0),
                     "fallbacks": f, "validation_failures": v} for c, n, lat, t, f, v in ai]}
 
@@ -796,6 +854,5 @@ def whatsapp_signup_connect(body: SignupIn, actor: Actor = W, db: Session = DB):
     policy.require(actor, "admin.config")
     require_step_up(actor)
     from weza.domains.notification import whatsapp_onboarding
-    from weza.platform.controls import rate_limit
     rate_limit(db, f"es:{actor.id}", 10, 3600)
     return whatsapp_onboarding.connect(db, actor, code=body.code, waba_id=body.waba_id or None, event=body.event)

@@ -1,18 +1,23 @@
 """WEZA Core API — FastAPI application factory."""
 
 import logging
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
+from sqlalchemy import text
 
 import weza.consumers  # noqa: F401 — registers event consumers
 import weza.domains.need.journey  # noqa: F401 — registers the customer journey graph
-from weza.api.v1 import admin, auth, crb, customer, institution, public
+from weza.api.v1 import admin, auth, crb, customer, institution, public, staff, webhooks
 from weza.config import get_settings
+from weza.platform import metrics
 from weza.platform.context import correlation_id_var
+from weza.platform.db import session_scope
 from weza.platform.errors import install_error_handlers
 from weza.platform.logging import configure_logging
 
@@ -25,7 +30,7 @@ async def _lifespan(app: FastAPI):
     if getattr(app.state, "start_worker", False):
         from weza.worker import Worker
         worker = Worker()
-        worker.start_thread()
+        app.state.worker_thread = worker.start_thread()
     yield
     if worker:
         worker.stop()
@@ -37,6 +42,8 @@ def create_app(start_worker: bool | None = None) -> FastAPI:
     if s.is_production and (problems := s.production_problems()):
         raise RuntimeError("Refusing to start in production: " + "; ".join(problems))
     log.info("channel_config", extra={"data": s.channel_config_summary()})  # names only, never values
+    if s.whatsapp_required and (missing := s.whatsapp_missing):
+        raise RuntimeError("WhatsApp is required but not configured: " + ", ".join(missing))
     app = FastAPI(title="WEZA Core API", version="1.0.0", lifespan=_lifespan,
                   description="Intelligent financial marketplace — zero core-system integration.",
                   docs_url=None if s.is_production else "/docs", openapi_url="/api/v1/openapi.json")
@@ -61,21 +68,64 @@ def create_app(start_worker: bool | None = None) -> FastAPI:
         response.headers["X-Correlation-ID"] = cid[:64]
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        # Defaults only: an endpoint may set a stricter value (the magic-link exchange uses no-referrer so its
+        # one-time token can't leak through the Referer header).
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.headers["Cache-Control"] = "no-store"
         if s.is_production:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        route = getattr(request.scope.get("route"), "path", None) or "unmatched"  # the template, never the raw URL
+        metrics.observe("weza_http_request_seconds", time.monotonic() - started, request.method, route,
+                        f"{response.status_code // 100}xx")
         elapsed = int((time.monotonic() - started) * 1000)
         if elapsed > 2000:
             log.warning("slow_request", extra={"data": {"path": request.url.path, "ms": elapsed}})
         return response
 
     install_error_handlers(app)
-    for r in (public.router, auth.router, customer.router, crb.router, institution.router, admin.router):
+    for r in (public.router, auth.router, customer.router, crb.router, institution.router, admin.router,
+              staff.router, webhooks.router):
         app.include_router(r, prefix="/api/v1")
+
+    @app.get("/metrics", include_in_schema=False)
+    def prometheus_metrics(request: Request):
+        """Service health, latency, errors, queue depth and business telemetry (TSD §64). Needs METRICS_TOKEN."""
+        token = get_settings().metrics_token
+        supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        if not token:
+            return JSONResponse({"error": {"code": "NOT_FOUND", "message": "Not found."}}, status_code=404)
+        if not secrets.compare_digest(supplied.encode(), token.encode()):
+            return JSONResponse({"error": {"code": "UNAUTHORIZED", "message": "Invalid token."}}, status_code=401)
+        with session_scope() as db:
+            body = metrics.render(db)
+        return Response(body, media_type="text/plain; version=0.0.4")
 
     @app.get("/healthz")
     def healthz():
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    def readyz():
+        # Render must check the database and the consumer that actually answers WhatsApp,
+        # rather than marking an HTTP-only process healthy while messages accumulate.
+        try:
+            with session_scope() as db:
+                db.execute(text("SELECT 1"))
+                stale_whatsapp = db.execute(text(
+                    "SELECT count(*) FROM notification.whatsapp_inbox "
+                    "WHERE status='PENDING' AND received_at < now() - interval '5 minutes'"
+                )).scalar_one()
+        except Exception:  # noqa: BLE001 — never expose database connection details
+            return JSONResponse({"status": "unavailable", "component": "database"}, status_code=503)
+        if stale_whatsapp:
+            return JSONResponse({"status": "unavailable", "component": "whatsapp_inbox",
+                                 "stale_messages": int(stale_whatsapp)}, status_code=503)
+        if app.state.start_worker:
+            thread = getattr(app.state, "worker_thread", None)
+            if thread is None or not thread.is_alive():
+                return JSONResponse({"status": "unavailable", "component": "worker"}, status_code=503)
+        if s.whatsapp_required and s.whatsapp_missing:
+            return JSONResponse({"status": "unavailable", "component": "whatsapp"}, status_code=503)
         return {"status": "ok"}
 
     app.state.start_worker = s.run_worker_inprocess if start_worker is None else start_worker

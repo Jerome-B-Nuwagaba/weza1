@@ -22,6 +22,8 @@ def routed_to_lakeside(journey, phone: str):
     opt = next(o for o in j.cards("options")[0]["options"] if o["institution"] == "Lakeside Bank")
     j.send(action="select", value=opt["match_id"])
     j.send(action="agree", value=j.cards("consent")[0]["template_id"])
+    if j.node == "CRB_CHECK":
+        j.send(action="crb_consent", value="yes")
     ref = j.cards("submitted")[0]["reference"]
     drain()
     with session_scope() as db:

@@ -52,6 +52,7 @@ export const STATE_LABEL: Record<string, string> = {
   RECEIVED: "Received",
   ASSIGNED: "Assigned",
   CONTACTED: "Contacted",
+  INFORMATION_REQUESTED: "More information requested",
   PROCEEDING: "Proceeding",
   SUBMITTED_TO_INSTITUTION: "Submitted internally",
   REPORTED_APPROVED: "Reported approved",

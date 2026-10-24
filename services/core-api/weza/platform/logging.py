@@ -6,18 +6,26 @@ import re
 import sys
 from datetime import UTC, datetime
 
+from weza.platform import classification
 from weza.platform.context import correlation_id_var
 
-SENSITIVE_KEYS = re.compile(r"(phone|nin|otp|code|password|secret|token|name|email|address|document|dob)", re.I)
+# Broad fragments kept from before (they catch names like "first_name" or "contact_phone"), plus every field the central
+# classification (TSD §49) rates PERSONAL or HIGHLY_SENSITIVE, so a newly classified field is redacted without a code change.
+_GENERIC = ("phone", "nin", "otp", "code", "password", "secret", "token", "name", "email", "address", "document", "dob")
+SENSITIVE_KEYS = re.compile("(" + "|".join(sorted({*_GENERIC, *classification.redacted_key_fragments()})) + ")", re.I)
 PHONE_RE = re.compile(r"\+?\d[\d\s-]{8,14}\d")
 NIN_RE = re.compile(r"\b[CA][MF][A-Z0-9]{12}\b")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 
 
+ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
 def redact_text(text: str) -> str:
     text = NIN_RE.sub("[NIN]", text)
     text = EMAIL_RE.sub("[EMAIL]", text)
-    return PHONE_RE.sub("[PHONE]", text)
+    # A date such as 2026-10-24 has the shape of a phone number but is not one: keep it readable in logs.
+    return PHONE_RE.sub(lambda m: m.group(0) if ISO_DATE_RE.fullmatch(m.group(0)) else "[PHONE]", text)
 
 
 def redact(value):

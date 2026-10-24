@@ -11,22 +11,37 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from weza.domains.admin_config import UGANDA
+from weza.domains.appetite import service as appetite_svc
 from weza.domains.appetite.models import Appetite, AppetiteVersion
 from weza.domains.commercial.models import CommercialEvent
 from weza.domains.institution.models import Institution
+from weza.domains.intelligence import agents
 from weza.domains.matching import engine
 from weza.domains.matching.models import Match
 from weza.domains.matching.rules import fmt_money
 from weza.domains.misc_models import AiCallLog, Notification, ReviewItem
 from weza.domains.need.models import FinancialNeed
 from weza.domains.opportunity.models import Assignment, Insight, Opportunity, Outcome
-from weza.domains.product.models import Product
+from weza.domains.product.models import Product, ProductVersion
 from weza.domains.trust import policy
 from weza.platform.context import Actor
 from weza.platform.db import utcnow
 from weza.platform.models import EventDelivery, GraphInstance
 
-PROGRESSING = {"PROCEEDING", "SUBMITTED_TO_INSTITUTION"}
+PROGRESSING = {"INFORMATION_REQUESTED", "PROCEEDING", "SUBMITTED_TO_INSTITUTION"}
+
+# FSD-CMD-002: cards adapt to the user's role. All eleven FSD-CMD-001 cards stay available; these are the four shown
+# first. The first group matching one of the user's roles wins.
+DEFAULT_CARDS = [
+    ({"INST_ADMIN", "MANAGER", "OFFICER"}, ["new", "high_match", "unassigned", "waiting"]),
+    ({"EXECUTIVE"}, ["qualified_demand", "progressing", "reported_approved", "reported_disbursed"]),
+    ({"BUSINESS", "CREDIT_RISK"}, ["new", "high_match", "qualified_demand", "conversion"]),
+]
+
+
+def default_cards(actor: Actor) -> list[str]:
+    return next((cards for roles, cards in DEFAULT_CARDS if roles & set(actor.roles)),
+                ["new", "unassigned", "waiting", "high_match"])
 
 
 def _scope(db: Session, actor: Actor):
@@ -54,8 +69,10 @@ def command_centre(db: Session, actor: Actor) -> dict:
     contacted = [o for o in opps if assign.get(o.id) and assign[o.id].first_contact_at]
     response_hours = [(assign[o.id].first_contact_at - o.routed_at).total_seconds() / 3600 for o in contacted
                       if o.routed_at and o.routed_at >= month]
-    outcomes = db.execute(select(Outcome).where(Outcome.institution_id == actor.institution_id,
-                                                Outcome.reported_at >= month)).scalars().all()
+    outcome_q = select(Outcome).where(Outcome.institution_id == actor.institution_id, Outcome.reported_at >= month)
+    if policy.officer_only(actor):  # an officer sees their own results, never the institution's totals
+        outcome_q = outcome_q.where(Outcome.opportunity_id.in_(ids or [uuid.UUID(int=0)]))
+    outcomes = db.execute(outcome_q).scalars().all()
     approved = [o for o in outcomes if o.state == "REPORTED_APPROVED"]
     disbursed = [o for o in outcomes if o.state == "REPORTED_DISBURSED"]
     qualified_30 = [o for o in opps if o.qualified_at >= month]
@@ -78,26 +95,51 @@ def command_centre(db: Session, actor: Actor) -> dict:
         "unassigned": {"label": "Unassigned", "value": len(unassigned)},
         "waiting": {"label": "Customers waiting >24h", "value": len(waiting)},
     }
+    owners = _owner_names(db, [a.user_id for a in assign.values() if a.user_id])
     attention = []
     for o in sorted(unassigned, key=lambda x: -float(x.amount))[:5]:
         attention.append({"kind": "UNASSIGNED", "id": str(o.id), "reference": o.reference,
                           "text": f"{fmt_money(o.amount)} · {o.purpose_category or ''} · {o.district or ''} · match "
-                                  f"{round(o.match_score)} — unassigned", "action": "Assign", "severity": "high"})
+                                  f"{round(o.match_score)} — unassigned", "action": "Assign", "severity": "high",
+                          **_case(o, assign.get(o.id), owners, "Not yet assigned to an officer")})
     for o in open_:
         a = assign.get(o.id)
         if a and a.breach_state in ("APPROACHING", "BREACHED", "ESCALATED") and a.first_contact_at is None:
+            overdue = a.breach_state != "APPROACHING"
             attention.append({"kind": "SERVICE_TARGET", "id": str(o.id), "reference": o.reference,
-                              "text": f"{o.reference} · first contact {'overdue' if a.breach_state != 'APPROACHING' else 'due soon'}",
-                              "action": "Contact", "severity": "high" if a.breach_state != "APPROACHING" else "medium"})
+                              "text": f"{o.reference} · first contact {'overdue' if overdue else 'due soon'}",
+                              "action": "Contact", "severity": "high" if overdue else "medium",
+                              **_case(o, a, owners, f"First contact {'overdue' if overdue else 'due soon'}")})
     for o in [x for x in open_ if x.integrity_hold][:3]:
         attention.append({"kind": "ON_HOLD", "id": str(o.id), "reference": o.reference,
-                          "text": f"{o.reference} on hold pending WEZA checks", "action": "View", "severity": "low"})
+                          "text": f"{o.reference} on hold pending WEZA checks", "action": "View", "severity": "low",
+                          **_case(o, assign.get(o.id), owners, "On hold pending WEZA checks")})
     stale = [o for o in open_ if o.freshness in ("STALE", "ATTENTION_REQUIRED")]
     if stale:
         attention.append({"kind": "STALE", "text": f"{len(stale)} opportunit{'ies' if len(stale) != 1 else 'y'} "
                           "need attention (no recent activity)", "action": "Review", "severity": "medium",
                           "link": "/institution/feed?freshness=STALE"})
     briefing = _briefing(cards, len(unassigned), high, new, waiting)
+    week = now - timedelta(days=7)
+    product_total = db.execute(select(func.count()).select_from(Product).where(
+        Product.institution_id == actor.institution_id, Product.status != "ARCHIVED")).scalar_one()
+    mandate_total = db.execute(select(func.count()).select_from(Appetite).where(
+        Appetite.institution_id == actor.institution_id, Appetite.lifecycle_status != "ARCHIVED")).scalar_one()
+    products_live, mandates_live = active_products(db, actor), active_mandates(db, actor)
+    priority = priority_opportunities(db, actor, open_, assign)
+    open_by_product = Counter(((o.snapshot or {}).get("product_version") or {}).get("name") for o in open_)
+    featured_product = max(products_live, key=lambda p: open_by_product.get(p["name"], 0)) if products_live else None
+    featured_mandate = mandates_live[0] if mandates_live else None
+    # The four Command Centre tiles. Every figure is a count WEZA holds; nothing is estimated or trended.
+    kpis = {"attention": len(attention), "attention_high": len([x for x in attention if x["severity"] == "high"]),
+            "new_24h": len(new), "new_7d": len([o for o in opps if o.qualified_at >= week]),
+            "active_products": len(products_live), "products_total": product_total,
+            "active_mandates": len(mandates_live), "mandates_total": mandate_total,
+            "featured_product": {"id": featured_product["id"], "name": featured_product["name"],
+                                 "open_opportunities": open_by_product.get(featured_product["name"], 0)}
+            if featured_product else None,
+            "featured_mandate": {"id": featured_mandate["id"], "name": featured_mandate["name"],
+                                 "regions": featured_mandate["regions"]} if featured_mandate else None}
     funnel = Counter(o.state for o in opps)
     no_lead = None
     if not open_ and not new:
@@ -116,8 +158,102 @@ def command_centre(db: Session, actor: Actor) -> dict:
                                "Demand Intelligence to see where WEZA demand is growing.", "link": "/institution/demand"}
     return {"briefing": briefing, "cards": cards, "attention": attention[:10], "funnel": dict(funnel),
             "no_lead": no_lead, "roles": sorted(actor.roles), "generated_at": now.isoformat(),
+            "default_cards": default_cards(actor), "scope": "own" if policy.officer_only(actor) else "institution",
+            "kpis": kpis, "priority": priority, "active_products": products_live, "active_mandates": mandates_live,
+            "new_opportunities": new_opportunities(new),
             "insights_open": db.execute(select(func.count()).select_from(Insight).where(
                 Insight.institution_id == actor.institution_id, Insight.status == "OPEN")).scalar_one()}
+
+
+def _owner_names(db: Session, user_ids: list) -> dict:
+    from weza.domains.identity.models import User
+    if not user_ids:
+        return {}
+    return {u.id: u.full_name for u in db.execute(select(User).where(User.id.in_(set(user_ids)))).scalars()}
+
+
+def _case(o: Opportunity, a: Assignment | None, owners: dict, issue: str) -> dict:
+    """The columns of an 'urgent case' row. Non-identifiable: the customer is described, never named."""
+    kind = {"SME": "Business", "SALARIED": "Salaried", "AGRICULTURE": "Farmer"}.get(o.customer_type or "", "Customer")
+    sector = UGANDA["sectors"].get(o.sector or "", (o.sector or "").replace("_", " ")) if o.sector else ""
+    return {"customer": " · ".join(x for x in (kind, sector, o.district) if x),
+            "product": ((o.snapshot or {}).get("product_version") or {}).get("name"),
+            "issue": issue, "owner": owners.get(a.user_id) if a and a.user_id else None,
+            "updated_at": (o.updated_at or o.qualified_at).isoformat()}
+
+
+def priority_opportunities(db: Session, actor: Actor, open_: list, assign: dict, limit: int = 5) -> list[dict]:
+    """The best-matched open opportunities. The business name is shown only where the Disclosure Gateway
+    permits that field for this person (the same decision, logged, as the opportunity page); otherwise the
+    customer is described, never named."""
+    from weza.domains.consent.models import Consent
+    from weza.domains.customer.service import current_facts
+    rows = sorted((o for o in open_ if not o.integrity_hold), key=lambda o: (-float(o.match_score), -float(o.amount)))
+    out = []
+    for o in rows[:limit]:
+        a = assign.get(o.id)
+        decision = policy.decide_opportunity_access(db, actor, o, a, db.get(Consent, o.consent_id) if o.consent_id else None,
+                                                    purpose="COMMAND_CENTRE")
+        name = None
+        if decision.result == "PERMIT" and "business_name" in decision.fields:
+            fact = current_facts(db, o.customer_id).get("business.name")
+            name = fact.value.get("v") if fact else None
+        kind = {"SME": "Business", "SALARIED": "Salaried", "AGRICULTURE": "Farmer"}.get(o.customer_type or "", "Customer")
+        status = ("UNDER_REVIEW" if o.state in ("SUBMITTED_TO_INSTITUTION", "INFORMATION_REQUESTED")
+                  else "HIGH" if o.match_score >= 85 else "GOOD")
+        out.append({"id": str(o.id), "reference": o.reference, "amount": float(o.amount), "business_name": name,
+                    "description": " · ".join(x for x in (kind, o.district) if x),
+                    "need": (o.purpose_category or "").replace("_", " ").capitalize() or None,
+                    "sector": o.sector, "sector_label": UGANDA["sectors"].get(o.sector or "") if o.sector else None,
+                    "product": ((o.snapshot or {}).get("product_version") or {}).get("name"),
+                    "match_score": round(o.match_score), "match_status": status, "state": o.state})
+    return out
+
+
+def active_products(db: Session, actor: Actor) -> list[dict]:
+    """Products this institution can currently offer (the Command Centre's 'active products')."""
+    out = []
+    for p in db.execute(select(Product).where(Product.institution_id == actor.institution_id,
+                                              Product.status == "ACTIVE").order_by(Product.name)).scalars():
+        pv = db.get(ProductVersion, p.active_version_id) if p.active_version_id else None
+        terms = (pv.terms if pv else {}) or {}
+        out.append({"id": str(p.id), "name": p.name, "family": p.family,
+                    "customer_type": terms.get("customer_type"),
+                    "min_amount": terms.get("min_amount"), "max_amount": terms.get("max_amount"),
+                    "min_tenor_months": terms.get("min_tenor_months"),
+                    "max_tenor_months": terms.get("max_tenor_months"), "status": p.status})
+    return out
+
+
+def active_mandates(db: Session, actor: Actor) -> list[dict]:
+    """Live mandates (appetites) and the products they cover."""
+    out = []
+    for ap in db.execute(select(Appetite).where(Appetite.institution_id == actor.institution_id,
+                                                 Appetite.lifecycle_status == "ACTIVE").order_by(Appetite.name)).scalars():
+        av = db.get(AppetiteVersion, ap.active_version_id) if ap.active_version_id else None
+        products = []
+        if av and av.product_ids:
+            products = [{"id": str(x.id), "name": x.name} for x in db.execute(
+                select(Product).where(Product.id.in_(list(av.product_ids)))).scalars()]
+        out.append({"id": str(ap.id), "name": ap.name, "status": ap.lifecycle_status,
+                    "capacity_state": ap.capacity_state, "version": av.version if av else None,
+                    "demand": appetite_svc.demand_state(db, ap),
+                    "min_match_score": av.min_match_score if av else None,
+                    "products": products, "criteria": (av.criteria if av else []) or [],
+                    "target_count": av.target_count if av else None,
+                    "regions": list(((av.mandate if av else None) or {}).get("regions") or []),
+                    "fulfilled_count": ap.fulfilled_count, "fulfilled_value": float(ap.fulfilled_value or 0)})
+    return out
+
+
+def new_opportunities(new: list, limit: int = 10) -> list[dict]:
+    """The newest matched opportunities (last 24h) for the Command Centre's 'new opportunities' section."""
+    return [{"id": str(o.id), "reference": o.reference, "amount": float(o.amount),
+             "match_score": round(o.match_score), "quality_score": o.quality_score,
+             "purpose_category": o.purpose_category,
+             "district": o.district, "customer_type": o.customer_type, "sector": o.sector,
+             "state": o.state, "qualified_at": o.qualified_at.isoformat()}
+            for o in sorted(new, key=lambda x: -float(x.match_score))[:limit]]
 
 
 def _briefing(cards: dict, unassigned: int, high: list, new: list, waiting: list) -> str:
@@ -251,15 +387,16 @@ def outcome_insights_job(db: Session) -> int:
             continue
         label = reason.replace("_", " ").lower()
         crit = related[0].get("label") if related else None
+        evidence = {"declines": len(outs), "reason": reason, "count": n, "criterion": crit}
+        fallback = f"{n} of {len(outs)} declines in the last 30 days for customers who met your configured appetite were reported as '{label}'." + (f" Your current criterion is: {crit}. Review whether it reflects how you lend today?" if crit else " Consider adding a criterion that reflects this.") + " WEZA will not change your appetite automatically."
+        narrative = agents.marketplace_narrative(
+            db, "narrate_insight", evidence, fallback, subject=f"appetite:{app_id}"
+        )
         db.add(Insight(institution_id=ap.institution_id, kind="APPETITE_OUTCOME_MISMATCH", appetite_id=app_id,
                        dedupe_key=key,
                        title=f"{n} customers in '{ap.name}' were reported declined for {label}",
-                       narrative=(f"{n} of {len(outs)} declines in the last 30 days for customers who met your configured "
-                                  f"appetite were reported as '{label}'."
-                                  + (f" Your current criterion is: {crit}. Review whether it reflects how you lend "
-                                     "today?" if crit else " Consider adding a criterion that reflects this.")
-                                  + " WEZA will not change your appetite automatically."),
-                       evidence={"declines": len(outs), "reason": reason, "count": n, "criterion": crit}))
+                       narrative=narrative,
+                       evidence=evidence))
         created += 1
     # Low fill: target well behind at mid-campaign, with near-appetite demand available
     for ap, av in db.execute(select(Appetite, AppetiteVersion).join(AppetiteVersion, AppetiteVersion.id == Appetite.active_version_id)
@@ -273,11 +410,17 @@ def outcome_insights_job(db: Session) -> int:
         key = f"lowfill:{ap.id}:{utcnow():%Y-%m}"
         if db.execute(select(Insight.id).where(Insight.dedupe_key == key)).first():
             continue
+        evidence = {"fulfilled": ap.fulfilled_count, "target": av.target_count,
+                    "campaign_elapsed_share": round(elapsed / span, 2)}
+        fallback = ("More than half the campaign period has passed. Open Opportunity Radius to see demand "
+                    "just outside this mandate and simulate a change. WEZA will not change it automatically.")
+        narrative = agents.marketplace_narrative(
+            db, "narrate_insight", evidence, fallback, subject=f"appetite:{ap.id}"
+        )
         db.add(Insight(institution_id=ap.institution_id, kind="LOW_FILL", appetite_id=ap.id, dedupe_key=key,
                        title=f"'{ap.name}' is at {ap.fulfilled_count} of {av.target_count} target opportunities",
-                       narrative="More than half the campaign period has passed. Open Opportunity Radius to see demand "
-                                 "just outside this mandate and simulate a change. WEZA will not change it automatically.",
-                       evidence={"fulfilled": ap.fulfilled_count, "target": av.target_count}))
+                       narrative=narrative,
+                       evidence=evidence))
         created += 1
     return created
 

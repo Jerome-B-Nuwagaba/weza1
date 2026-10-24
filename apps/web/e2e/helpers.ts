@@ -9,12 +9,20 @@ const SME_ANSWERS: Record<string, string> = {
   "business.registered": "yes", "finance.monthly_repayments": "0", "need.tenor_months": "24 months",
 };
 
+let testClientIp = 0;
+
+function nextTestClientIp() {
+  const id = testClientIp++;
+  // CI runs many simulated clients from one runner; keep the production IP throttle meaningful per client.
+  return `198.51.${100 + Math.floor(id / 254)}.${(id % 254) + 1}`;
+}
+
 export function idem() {
   return { "Idempotency-Key": crypto.randomUUID() };
 }
 
 /** Drives the customer conversation through the journey API exactly as the web chat does, then shares the request
- * with Lakeside Bank. Returns the opportunity and a customer session for later answers. */
+ * with Lakeside Bank. Returns browser-login details and API credentials for later assertions. */
 export async function customerSharesWithLakeside(request: APIRequestContext, text = "I need UGX 20 million to buy stock for my pharmacy") {
   return customerSharesWith(request, "Lakeside Bank", text);
 }
@@ -63,11 +71,13 @@ export async function customerSharesWith(request: APIRequestContext, institution
     oppId = o?.id || "";
     return o?.state;
   }, { timeout: 30_000 }).not.toMatch(/^(QUALIFIED)?$/);
-  return { reference, oppId, session, customer };
+  return { reference, oppId, customer, phone };
 }
 
 export async function staffToken(request: APIRequestContext, email: string, password = DEMO_PASSWORD) {
-  const r = await request.post(`${API}/auth/login`, { data: { email, password } });
+  const r = await request.post(`${API}/auth/login`, {
+    data: { email, password }, headers: { "X-Forwarded-For": nextTestClientIp() },
+  });
   expect(r.ok(), await r.text()).toBeTruthy();
   return { Authorization: `Bearer ${(await r.json()).access_token}` };
 }
@@ -85,9 +95,32 @@ export async function assignTo(request: APIRequestContext, oppId: string, office
 }
 
 export async function signIn(page: Page, email: string, password = DEMO_PASSWORD) {
+  await page.setExtraHTTPHeaders({ "X-Forwarded-For": nextTestClientIp() });
   await page.goto("/login");
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.waitForURL(/\/(institution|admin)/);
+  await expect(page).toHaveURL(/\/(institution|admin)/, { timeout: 15_000 });
+}
+
+export async function signInCustomer(page: Page, phone: string) {
+  await page.goto("/c/login");
+  const origin = new URL(page.url()).origin;
+  const headers = {
+    Origin: origin,
+    "X-WEZA-CSRF": "1",
+    "X-Forwarded-For": nextTestClientIp(),
+  };
+  const request = page.context().request;
+  const challengeResponse = await request.post(`${origin}${API}/me/auth/otp/request`, {
+    data: { phone }, headers,
+  });
+  expect(challengeResponse.ok(), await challengeResponse.text()).toBeTruthy();
+  const challenge = await challengeResponse.json();
+  expect(challenge.dev_code, "customer OTP should be available in the E2E demo environment").toBeTruthy();
+
+  const verifyResponse = await request.post(`${origin}${API}/me/auth/otp/verify`, {
+    data: { phone, challenge_id: challenge.challenge_id, code: challenge.dev_code }, headers,
+  });
+  expect(verifyResponse.ok(), await verifyResponse.text()).toBeTruthy();
 }

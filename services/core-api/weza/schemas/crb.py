@@ -66,3 +66,5 @@ class CRBSummaryReport(BaseModel):
     worst_days_in_arrears: int | None = None
     has_active_defaults: bool = False
     total_outstanding_balance_ugx: float = 0.0
+    # Is the number given to receive the money on the bureau record of the same National ID? (None = not checked)
+    phone_on_record: bool | None = None

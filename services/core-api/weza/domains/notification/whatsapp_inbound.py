@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from weza.domains.customer import documents as docs
+from weza.domains.customer.models import Document
 from weza.domains.misc_models import WhatsappInbox
 from weza.domains.notification import whatsapp_media
 from weza.domains.notification.service import send_customer_message
@@ -273,12 +274,32 @@ _HINTS = [
 ]
 
 
-def guess_doc_type(caption: str | None, filename: str | None, outstanding: list[str]) -> str:
+def hint_doc_type(caption: str | None, filename: str | None) -> str | None:
+    """The document type the customer's own caption or filename names, if it names one."""
     text = f"{caption or ''} {filename or ''}".lower()
-    for pattern, doc_type in _HINTS:
-        if re.search(pattern, text):
-            return doc_type
-    return outstanding[0] if outstanding else "other"
+    return next((doc_type for pattern, doc_type in _HINTS if re.search(pattern, text)), None)
+
+
+def guess_doc_type(caption: str | None, filename: str | None, outstanding: list[str]) -> str:
+    return hint_doc_type(caption, filename) or (outstanding[0] if outstanding else "other")
+
+
+CLASSIFY_MIN_CONFIDENCE = 0.85
+
+
+def _classify_stored(db: Session, d: Document, guessed: str, data: bytes, need_id: uuid.UUID) -> str:
+    """The customer did not say what this is. Now that the file has passed the malware scan and is stored, the AI may
+    suggest its type (DocumentClassification, TSD §9, §42); WEZA keeps the suggestion only when it is confident and the
+    file is legible, otherwise the guess from what is outstanding stands."""
+    from weza.domains.intelligence import agents, ai
+    from weza.platform import classification
+    if not ai.can_read_documents(db):
+        return guessed
+    found = agents.classify_document(db, d.mime, data, subject=str(need_id))
+    if not found or not found["legible"] or found["confidence"] < CLASSIFY_MIN_CONFIDENCE or found["doc_type"] == guessed:
+        return guessed
+    d.doc_type, d.classification = found["doc_type"], classification.document_level(found["doc_type"])
+    return found["doc_type"]
 
 
 def _active_journey(db: Session, phone_index: str):
@@ -290,9 +311,9 @@ def _active_journey(db: Session, phone_index: str):
 
 
 def _outstanding_doc_types(db: Session, need_id: uuid.UUID, customer_id: uuid.UUID) -> list[str]:
+    from weza.domains.consent.models import Consent
     from weza.domains.customer.models import Document
     from weza.domains.matching.models import Match
-    from weza.domains.consent.models import Consent
     from weza.domains.opportunity.models import InfoRequest, Opportunity
     have = set(db.execute(select(Document.doc_type).where(Document.customer_id == customer_id,
                                                           Document.pipeline_state == "STORED")).scalars())
@@ -335,16 +356,33 @@ def _process_media(db: Session, row: WhatsappInbox, data: dict) -> None:
     except whatsapp_media.MediaError as exc:
         log.warning("whatsapp_media_failed", extra={"data": {"err": exc.code}})
         return reply(TOO_LARGE if exc.code == "TOO_LARGE" else DOWNLOAD_FAILED, f"MEDIA_{exc.code}"[:40])
-    doc_type = guess_doc_type(data.get("caption"), data.get("filename"),
-                              _outstanding_doc_types(db, need_id, customer_id))
+    from weza.domains.need.journey import BUSINESS_DOCS, ID_NODES
+    node = gi.current_node if gi.status == "WAITING" else None
+    if node in ID_NODES:  # the conversation asked for the National ID
+        doc_type = "national_id"
+    elif node == "REQUEST_BUSINESS_DOCS":
+        have = set(db.execute(select(Document.doc_type).where(Document.customer_id == customer_id,
+                                                              Document.pipeline_state == "STORED")).scalars())
+        missing = [t for t in BUSINESS_DOCS if t not in have]
+        doc_type = guess_doc_type(data.get("caption"), data.get("filename"), missing or list(BUSINESS_DOCS))
+        doc_type = doc_type if doc_type in BUSINESS_DOCS else (missing or list(BUSINESS_DOCS))[0]
+    else:
+        hinted = hint_doc_type(data.get("caption"), data.get("filename")) is not None
+        doc_type = guess_doc_type(data.get("caption"), data.get("filename"),
+                                  _outstanding_doc_types(db, need_id, customer_id))
     d = docs.ingest(db, customer_id, doc_type=doc_type, filename=(data.get("filename") or "whatsapp-upload")[:200],
                     declared_mime=media.mime or data.get("mime") or "", data=media.data, need_id=need_id)
     if d.pipeline_state != "STORED":
         return reply((d.reject_reason or "I couldn't accept that file.") + " Please send a clear PDF, JPG or PNG.",
                      "DOC_REJECTED")
+    if node not in ID_NODES and node != "REQUEST_BUSINESS_DOCS" and not hinted:
+        doc_type = _classify_stored(db, d, doc_type, media.data, need_id)
     label = docs.DOC_TYPES[doc_type]
     journeys._persist(db, gi, "IN", {"type": "text", "text": f"[Document sent: {label}]"}, "whatsapp",
                       row.provider_message_id)
+    if node in ID_NODES or node == "REQUEST_BUSINESS_DOCS":  # the conversation reads it and answers
+        journeys.system_resume(db, gi.id, "id_uploaded" if node in ID_NODES else "business_doc_uploaded", str(d.id))
+        return _finish(row, "DONE", "DOC_FOR_JOURNEY")
     from weza.domains.need.journey import fulfil_info
     outputs = fulfil_info(db, customer_id, document_id=d.id, doc_type=doc_type)
     if outputs:

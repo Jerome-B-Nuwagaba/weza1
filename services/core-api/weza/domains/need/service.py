@@ -47,7 +47,8 @@ def start_journey(db: Session, *, channel: str, attribution: dict | None = None,
     db.add(need)
     db.flush()
     state = {"need_id": str(need.id), "channel": channel, "ip": crypto.sha256_hex(ip) if ip else "",
-             "device_hash": device_hash, "intent": {}, "customer_id": str(customer_id) if customer_id else None}
+             "device_hash": device_hash, "intent": {}, "customer_id": str(customer_id) if customer_id else None,
+             "lang": journey.customer_language(db, customer_id)}
     if first_text:
         state["first_text"] = first_text
     if channel_phone:
@@ -58,7 +59,7 @@ def start_journey(db: Session, *, channel: str, attribution: dict | None = None,
          data={"channel": channel, "source": a.get("src") or "direct"})
     if first_text:
         _persist(db, inst, "IN", {"type": "text", "text": first_text}, channel, message_id)
-    _persist_outputs(db, inst, outputs, channel)
+    _persist_outputs(db, inst, outputs, channel, delivery_key_prefix=message_id)
     return inst, outputs
 
 
@@ -77,13 +78,14 @@ def handle_input(db: Session, journey_id: uuid.UUID, payload: dict, *, channel: 
                                                          "label": payload.get("label")}
     if inst.state.get("pending_q", {}).get("type") in ("nin", "name") and inst.current_node == "ASK_PROFILE":
         shown = {"type": "text", "text": "•••• (hidden)"}  # never keep identity values in conversation history
-    if inst.current_node == "VERIFY_PHONE" or (inst.current_node == "CRB_CHECK" and inst.state.get("crb_challenge_id")):
+    if inst.current_node in ("VERIFY_PHONE", "PAYOUT_NUMBER") or (inst.current_node == "CRB_CHECK"
+                                                                   and inst.state.get("crb_challenge_id")):
         shown = {"type": "text", "text": "•••• (hidden)"}
     _persist(db, inst, "IN", shown, channel, message_id)
     if inst.status in ("COMPLETED", "EXPIRED", "CANCELLED", "FAILED"):
         return [{"type": "text", "text": "This conversation has ended. Start a new request any time."}]
     outputs = resume(db, inst, Trigger("CUSTOMER_REPLY", payload, actor="customer"))
-    _persist_outputs(db, inst, outputs, channel)
+    _persist_outputs(db, inst, outputs, channel, delivery_key_prefix=message_id)
     return outputs
 
 
@@ -112,7 +114,8 @@ def _persist(db: Session, inst: GraphInstance, direction: str, content: dict, ch
         pass
 
 
-def _persist_outputs(db: Session, inst: GraphInstance, outputs: list[dict], channel: str) -> None:
+def _persist_outputs(db: Session, inst: GraphInstance, outputs: list[dict], channel: str,
+                     delivery_key_prefix: str | None = None) -> None:
     from datetime import timedelta
 
     from weza.platform.db import utcnow
@@ -121,10 +124,11 @@ def _persist_outputs(db: Session, inst: GraphInstance, outputs: list[dict], chan
     for i, o in enumerate(journey.format_for_channel(outputs), start=1):
         _persist(db, inst, "OUT", o, channel, None, at=base + timedelta(microseconds=i))
     if channel == "whatsapp":
-        _send_whatsapp(db, inst, outputs)
+        _send_whatsapp(db, inst, outputs, delivery_key_prefix=delivery_key_prefix)
 
 
-def _send_whatsapp(db: Session, inst: GraphInstance, outputs: list[dict]) -> None:
+def _send_whatsapp(db: Session, inst: GraphInstance, outputs: list[dict], *,
+                   delivery_key_prefix: str | None = None) -> None:
     from weza.config import get_settings
     from weza.domains.customer.models import Customer
     from weza.domains.identity.service import vault_read
@@ -138,11 +142,13 @@ def _send_whatsapp(db: Session, inst: GraphInstance, outputs: list[dict]) -> Non
     if not phone:
         return
     web = get_settings().public_web_url
-    for o in outputs:
+    for i, o in enumerate(outputs, start=1):
         text = journey.whatsapp_text(o)
         if text:
-            send_customer_message(db, phone, text.replace("{web}", web), channel="whatsapp", kind="conversation",
-                                  payload={"quick_replies": o.get("quick_replies") or []})
+            key = f"wa:{inst.id}:{delivery_key_prefix}:{i}" if delivery_key_prefix else None
+            send_customer_message(db, phone, text.replace("{web}", web), channel="whatsapp",
+                                  kind="sensitive" if o.get("ephemeral") else "conversation",
+                                  payload={"quick_replies": o.get("quick_replies") or []}, idempotency_key=key)
 
 
 def view(db: Session, journey_id: uuid.UUID, limit: int = 200) -> dict:
@@ -168,6 +174,10 @@ def need_summary(need: FinancialNeed) -> dict:
     return {"id": str(need.id), "status": need.status, "amount": float(need.amount) if need.amount else None,
             "currency": need.currency, "purpose": need.purpose, "purpose_category": need.purpose_category,
             "customer_type": need.customer_type, "sector": need.sector, "district": need.district,
+            "region": need.region, "location": {"district": need.district, "region": need.region},
+            "phone_verified": bool(need.phone_verified),
+            "phone_verified_at": need.phone_verified_at.isoformat() if need.phone_verified_at else None,
+            "phone_verification_method": need.phone_verification_method,
             "readiness": need.readiness, "quality_score": need.quality_score,
             "intent_confirmed": need.intent_confirmed_at is not None,
             "created_at": need.created_at.isoformat() if need.created_at else None,

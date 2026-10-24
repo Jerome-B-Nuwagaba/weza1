@@ -10,7 +10,7 @@ export type ProductDraft = { name: string; family: string; terms: any; rules: Ru
 
 export const EMPTY: ProductDraft = {
   name: "", family: "SME_WORKING_CAPITAL",
-  terms: { min_amount: 1000000, max_amount: 50000000, min_tenor_months: 3, max_tenor_months: 24, pricing_display: "", collateral_required: false, digital_journey: true, typical_response_hours: 24, description: "" },
+  terms: { min_amount: 1000000, max_amount: 50000000, min_tenor_months: 3, max_tenor_months: 24, pricing_display: "", collateral_required: false, digital_journey: true, typical_response_hours: 24, description: "", customer_type: "SME" },
   rules: [], requirements: [],
 };
 
@@ -34,6 +34,9 @@ export function ProductEditor({ initial, onSave, saving, error }: { initial: Pro
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="Product name" required><Input value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} /></Field>
           <Field label="Product family" required>{meta && <Select value={d.family} onChange={(e) => setD({ ...d, family: e.target.value })} options={Object.entries(meta.families) as [string, string][]} />}</Field>
+          <Field label="Customer type" hint="Who this product is for.">
+            <Select value={t.customer_type || ""} onChange={(e) => setT({ customer_type: e.target.value })} options={[["", "Not set"], ["SME", "Business (SME)"], ["SALARIED", "Salaried"], ["AGRICULTURE", "Farmer"]]} />
+          </Field>
           <div className="md:col-span-2"><Field label="Customer-facing description"><Textarea rows={2} value={t.description || ""} onChange={(e) => setT({ description: e.target.value })} /></Field></div>
         </div>
       </Card>

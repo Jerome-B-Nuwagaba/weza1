@@ -1,0 +1,65 @@
+name: Live WhatsApp smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - test/e2e-integration
+    paths:
+      - ".github/workflows/live-whatsapp-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BASE_URL: https://weza-api-go6e.onrender.com
+    steps:
+      - name: Check Render readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          body="$(curl --retry 3 --retry-delay 5 --max-time 90 -fsS "$BASE_URL/readyz")"
+          echo "readyz response: $body"
+          python - "$body" <<'PY'
+          import json, sys
+          data = json.loads(sys.argv[1])
+          assert data.get("status") == "ok", data
+          PY
+
+      - name: Check public WhatsApp configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          body="$(curl --retry 3 --retry-delay 5 --max-time 90 -fsS "$BASE_URL/api/v1/public/config")"
+          python - "$body" <<'PY'
+          import json, sys
+          data = json.loads(sys.argv[1])
+          assert data.get("whatsapp_live") is True, data
+          number = data.get("whatsapp_number")
+          assert isinstance(number, str) and number.isdigit() and 8 <= len(number) <= 15, data
+          print("Public config reports WhatsApp live and a valid business-number shape.")
+          PY
+
+      - name: Check webhook route rejects unsigned traffic
+        shell: bash
+        run: |
+          set -euo pipefail
+          code="$(curl --retry 2 --retry-delay 2 --max-time 60 -sS -o /tmp/webhook.txt -w "%{http_code}" \
+            -H "Content-Type: application/json" \
+            -d '{"object":"whatsapp_business_account","entry":[]}' \
+            "$BASE_URL/api/v1/channels/whatsapp/webhook")"
+          echo "unsigned webhook HTTP status: $code"
+          test "$code" = "403"
+
+      - name: Check webhook verification rejects wrong token
+        shell: bash
+        run: |
+          set -euo pipefail
+          code="$(curl --retry 2 --retry-delay 2 --max-time 60 -sS -o /tmp/verify.txt -w "%{http_code}" \
+            "$BASE_URL/api/v1/channels/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=definitely-wrong&hub.challenge=12345")"
+          echo "wrong-token verification HTTP status: $code"
+          test "$code" = "403"

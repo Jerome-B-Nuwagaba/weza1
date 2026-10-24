@@ -8,7 +8,7 @@ export default function Team() {
   const t = useApi<any>("/inst/team");
   if (t.loading) return <Loading />;
   if (t.error) return <ErrorState error={t.error} />;
-  const officers = t.data.members.filter((m: any) => m.roles.includes("OFFICER") || m.roles.includes("MANAGER"));
+  const officers = t.data.members.filter((m: any) => m.role_set?.includes("OFFICER") || m.role_set?.includes("MANAGER"));
   return (
     <>
       <PageHeader title="Team" subtitle="Distribution, contact performance, ageing and service-target breaches. Reassign from any opportunity." />

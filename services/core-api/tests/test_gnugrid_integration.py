@@ -235,7 +235,7 @@ def test_production_refuses_the_mock_and_names_missing_crb_settings():
     assert any("GNGRID_USE_MOCK" in p for p in Settings(env="production").production_problems())
     problems = Settings(env="production", gngrid_use_mock=False).production_problems()
     assert any("GNUGRID_CLIENT_SECRET" in p for p in problems)
-    assert not any("CRB" in p for p in Settings(env="production", **REAL).production_problems())
+    assert not any("CRB" in p for p in Settings(**REAL).production_problems())
 
 
 # ------------------------------------------------------------------ journey: lender gate, explicit consent, outcomes

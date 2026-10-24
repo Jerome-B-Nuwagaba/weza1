@@ -32,6 +32,11 @@ class FinancialNeed(IdMixin, TimestampMixin, Base):
     tenor_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
     urgency: Mapped[str | None] = mapped_column(String(16), nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="DRAFT")
+    # Whether this journey's phone number has been proven reachable, and how. The OTP proves the
+    # number is reachable by this customer — nothing more (WEZA V1 boundary).
+    phone_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    phone_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    phone_verification_method: Mapped[str | None] = mapped_column(String(24), nullable=True)  # OTP | WHATSAPP_CHANNEL
     readiness: Mapped[str | None] = mapped_column(String(20), nullable=True)
     quality_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     quality_factors: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

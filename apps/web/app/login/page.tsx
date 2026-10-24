@@ -20,6 +20,14 @@ const DEMO = [
   ["Nile Fintech (pending)", "admin@nile.demo"],
 ];
 
+const SSO_ERRORS: Record<string, string> = {
+  ENTRA_NO_ACCOUNT: "Your Microsoft account is not set up in WEZA. Ask your administrator to add you.",
+  ENTRA_CANCELLED: "Microsoft sign-in was cancelled.",
+  ENTRA_STATE_MISMATCH: "Your sign-in session expired. Please try again.",
+  ENTRA_STATE_EXPIRED: "Your sign-in session expired. Please try again.",
+  ENTRA_UNAVAILABLE: "Microsoft sign-in is unavailable. Please try again.",
+};
+
 function Login() {
   const router = useRouter();
   const params = useSearchParams();
@@ -31,8 +39,26 @@ function Login() {
   const [busy, setBusy] = useState(false);
   const [demo, setDemo] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
+  const [entra, setEntra] = useState(false);
   useEffect(() => {
     api("/public/config").then((c) => setDemoMode(!!c.demo_mode)).catch(() => undefined);
+    api("/auth/entra/config", { auth: "none" }).then((c) => setEntra(!!c.enabled)).catch(() => undefined);
+  }, []);
+
+  // Coming back from Microsoft: the callback has set the session cookie (sso), or needs WEZA's own second step (sso_mfa),
+  // or failed (sso_error).
+  useEffect(() => {
+    const failed = params.get("sso_error");
+    if (failed) setError(SSO_ERRORS[failed] || "Microsoft sign-in could not be completed. Please try again.");
+    else if (params.get("sso")) {
+      api("/auth/refresh", { body: {}, auth: "none" }).then(finish).catch((e) => setError((e as ApiError).message));
+    } else if (params.get("sso_mfa")) {
+      const token = params.get("sso_mfa")!;
+      if (params.get("enrol") === "1") {
+        api("/auth/mfa/enrol-pending", { body: { mfa_token: token } }).then((enrol) => setMfa({ token, enrol })).catch((e) => setError((e as ApiError).message));
+      } else setMfa({ token });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function finish(r: any) {
@@ -85,6 +111,12 @@ function Login() {
           )}
           {error && <p className="mt-3 text-[13px] text-danger" role="alert">{error}</p>}
           <Button type="submit" className="mt-5 w-full" pending={busy}>{mfa ? "Verify" : "Sign in"}</Button>
+          {!mfa && entra && (
+            <a href={`/api/v1/auth/entra/start${params.get("next") ? `?next=${encodeURIComponent(params.get("next")!)}` : ""}`}
+              className="mt-3 flex h-10 w-full items-center justify-center rounded-lg border border-line bg-surface text-sm font-medium text-ink hover:bg-blue-50">
+              Sign in with Microsoft
+            </a>
+          )}
           {!mfa && <p className="mt-4 text-center text-[13px] text-muted">New institution? <a href="/institution/join" className="text-blue-800 underline">Join WEZA</a></p>}
         </form>
         {!mfa && demoMode && (

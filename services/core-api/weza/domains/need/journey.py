@@ -5,19 +5,22 @@ Channel-agnostic: web, Flutter and WhatsApp all drive the same graph through the
 """
 
 import base64
+import json
+import re
 import uuid
 from datetime import timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
 
-from weza.domains.admin_config import UGANDA, region_of
+from weza import i18n
+from weza.domains.admin_config import ANSWER_BANDS, UGANDA, region_of
 from weza.domains.consent import service as consent_svc
 from weza.domains.customer import service as customer_svc
 from weza.domains.customer.models import Customer, Preference
 from weza.domains.identity import service as identity
 from weza.domains.institution.models import Institution, ServiceTarget
-from weza.domains.intelligence import ai, parsing
+from weza.domains.intelligence import agents, ai, parsing
 from weza.domains.matching import engine
 from weza.domains.matching.models import Match
 from weza.domains.matching.rules import fmt, fmt_money
@@ -42,6 +45,17 @@ CUSTOMER_TYPE_LABELS = {"SME": "Business owner", "SALARIED": "Salaried employee"
 RANKING_PREFS = {"LOWER_MONTHLY_PAYMENT": "Lower monthly payment", "LOW_COLLATERAL": "Little or no collateral",
                  "FAST_RESPONSE": "Fast response", "DIGITAL": "Digital process", "NEAR_ME": "Near me",
                  "SHORTER_TENOR": "Shorter repayment"}
+
+
+def customer_language(db, customer_id) -> str:
+    """The customer's saved language (TSD §72), or English when they have none or it is not supported yet."""
+    pref = db.get(Preference, customer_id) if customer_id else None
+    return i18n.language(pref.language if pref else None)
+
+
+def _t(st: dict, key: str, **values) -> str:
+    """Customer-facing wording from the language catalogue (TSD §72), in the customer's language."""
+    return i18n.t(key, st.get("lang"), **values)
 
 
 def qr(label: str, action: str, value: str | None = None) -> dict:
@@ -113,8 +127,47 @@ def _apply_intent(ctx: Ctx, st: dict, extracted: dict, overwrite: bool) -> dict:
 # ------------------------------------------------------------------ nodes
 
 
+# ------------------------------------------------------------------ off-topic guard (21 Oct review)
+# WEZA is a financing assistant, not a general chatbot. Only clear chit-chat is turned away: a known off-topic subject,
+# or a question with no financing words in it. Anything that could be a financing request, however it is phrased, is let
+# through, so a customer is never refused for describing their business in their own words.
+OFF_TOPIC_STRIKES = 3
+_OFF_TOPIC_SUBJECTS = re.compile(
+    r"\b(weather|joke|jokes|riddle|football|soccer|match score|politic\w*|president|election|movie|film|song|music|lyrics"
+    r"|girlfriend|boyfriend|dating|horoscope|bitcoin|crypto\w*|poem|story|recipe|homework|translate|who are you"
+    r"|your name|are you (a )?(bot|robot|human|real|ai)|chatgpt|openai)\b", re.I)
+_FINANCE_WORDS = re.compile(
+    r"\b(loan\w*|borrow\w*|lend\w*|credit|financ\w*|fund\w*|money|capital|cash|business|shop|stock|farm\w*|school|fees"
+    r"|salary|bank\w*|sacco\w*|lender\w*|institution\w*|microfinance|repay\w*|pay|equipment|expand\w*|invest\w*|ugx|shs|shilling\w*|interest|rate"
+    r"|apply|application|requirement\w*|document\w*|eligible|qualify|approv\w*|consent|weza|offer\w*|option\w*)\b", re.I)
+_QUESTION_START = re.compile(r"^(who|what|when|where|why|how|which|is|are|do|does|can|could|will|would)\b", re.I)
+
+
+def _is_off_topic(text: str) -> bool:
+    text = (text or "").strip()
+    if len(text.split()) < 3 or any(ch.isdigit() for ch in text) or _FINANCE_WORDS.search(text):
+        return False
+    return bool(_OFF_TOPIC_SUBJECTS.search(text)) or text.endswith("?") or bool(_QUESTION_START.match(text))
+
+
+def _off_topic(ctx: Ctx, st: dict, reprompt: str) -> Step:
+    """Politely steer back; after three in a row, pause the conversation instead of chatting on."""
+    strikes = st.get("offtopic", 0) + 1
+    if strikes >= OFF_TOPIC_STRIKES:
+        ctx.say(_t(st, "offtopic.pause"))
+        return Step(to="SAVE_EXIT", patch={"offtopic": 0, "exit_reason": "off_topic"})
+    ctx.say(_t(st, "offtopic.redirect", reprompt=reprompt))
+    return Step(wait=Wait(REPLY, DAY), patch={"offtopic": strikes})
+
+
+_INTENT_PROMPT_KEYS = {"amount": "prompt.amount", "purpose": "prompt.purpose", "customer_type": "prompt.customer_type"}
+
+
 def greet(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if t.kind == "ENTER":
+        if st.get("first_text") and _is_off_topic(st["first_text"]):
+            ctx.say(_t(st, "offtopic.welcome", reprompt=_t(st, "prompt.greet")))
+            return Step(wait=Wait(REPLY, DAY), patch={"first_text": None, "offtopic": 1})
         if st.get("first_text"):
             return Step(to="UNDERSTAND_INTENT", patch={"last_text": st["first_text"], "first_text": None})
         ctx.say("Welcome to WEZA. Tell me what you would like financing for.",
@@ -124,13 +177,15 @@ def greet(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if not text:
         ctx.say("Tell me in your own words what you need financing for.")
         return Step(wait=Wait(REPLY, DAY))
-    return Step(to="UNDERSTAND_INTENT", patch={"last_text": text})
+    if _is_off_topic(text):
+        return _off_topic(ctx, st, _t(st, "prompt.greet"))
+    return Step(to="UNDERSTAND_INTENT", patch={"last_text": text, "offtopic": 0})
 
 
 def understand_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
     patch: dict = {"intent_turns": st.get("intent_turns", 0) + 1}
     if st.get("last_text"):
-        extracted = ai.extract_financial_intent(ctx.db, st["last_text"], subject=st["need_id"])
+        extracted = agents.customer_intent(ctx.db, st["last_text"], subject=st["need_id"])
         patch["intent"] = _apply_intent(ctx, st, extracted, overwrite=False)
         patch["last_text"] = None
     intent = patch.get("intent") or st.get("intent") or {}
@@ -155,6 +210,8 @@ def ask_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
                                                                 for k, v in CUSTOMER_TYPE_LABELS.items()])
         return Step(wait=Wait(REPLY, DAY))
     text, value = _text(t), t.payload.get("value")
+    if not value and _is_off_topic(text):
+        return _off_topic(ctx, st, _t(st, _INTENT_PROMPT_KEYS.get(field, "prompt.greet")))
     intent = dict(st.get("intent") or {})
     conf = dict(intent.get("confidence") or {})
     if field == "amount":
@@ -180,7 +237,8 @@ def ask_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
     intent["confidence"] = conf
     st2 = {**st, "intent": intent}
     _apply_intent(ctx, st2, {}, overwrite=False)
-    return Step(to="UNDERSTAND_INTENT", patch={"intent": intent, "last_text": text if field == "amount" else None})
+    return Step(to="UNDERSTAND_INTENT", patch={"intent": intent, "offtopic": 0,
+                                                   "last_text": text if field == "amount" else None})
 
 
 def _reask(ctx: Ctx, st: dict, msg: str) -> Step:
@@ -227,12 +285,14 @@ def confirm_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
     text = _text(t)
     if not text:
         return Step(wait=Wait(REPLY, DAY))
+    if _is_off_topic(text):
+        return _off_topic(ctx, st, _t(st, "prompt.change"))
     return Step(to="REVISE_INTENT", patch={"last_text": text})
 
 
 def revise_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
     text = st.get("last_text") or ""
-    extracted = ai.extract_financial_intent(ctx.db, text, subject=st["need_id"])
+    extracted = agents.customer_intent(ctx.db, text, subject=st["need_id"])
     amt = parsing.parse_money_answer(text)
     if extracted.get("amount") is None and amt:
         extracted["amount"], extracted["confidence"]["amount"] = float(amt), 1.0
@@ -306,6 +366,9 @@ def _phone_verified(ctx: Ctx, st: dict, phone: str, *, method: str) -> Step:
                                                            device_hash=st.get("device_hash"))
     need.customer_id = customer.id
     need.status = "PHONE_VERIFIED"
+    need.phone_verified = True
+    need.phone_verified_at = utcnow()
+    need.phone_verification_method = "OTP" if method == "otp" else "WHATSAPP_CHANNEL"
     ctx.instance.customer_id = customer.id
     if method == "otp":  # web/app need a session; WhatsApp is identified by the chat itself
         token = identity.create_customer_session(ctx.db, customer.id, st.get("channel", "web"))
@@ -318,14 +381,12 @@ def _phone_verified(ctx: Ctx, st: dict, phone: str, *, method: str) -> Step:
         ctx.say("Thank you — your number is verified." + (" Welcome back!" if not is_new else ""))
     elif not is_new:
         ctx.say("Welcome back!")
-    if st.get("channel") == "whatsapp":
-        from weza.domains.customer.auth import issue_magic_link
-        ctx.say("Open your requests, profile and documents securely: " + issue_magic_link(ctx.db, customer.id),
-                ephemeral=True)
+    # WhatsApp customers stay in the chat: no portal link (21 Oct review — a link here reads as phishing).
     st2 = {**st, "customer_id": str(customer.id)}
     _sync_customer_from_intent(ctx, st2)
     return Step(to="BUILD_PROFILE", patch={"customer_id": str(customer.id), "otp_challenge_id": None,
-                                           "phone_enc": None, "channel_phone_enc": None})
+                                           "phone_enc": None, "channel_phone_enc": None,
+                                           "lang": customer_language(ctx.db, customer.id)})
 
 
 def _send_otp(ctx: Ctx, st: dict, phone: str) -> Step:
@@ -359,17 +420,199 @@ def build_profile(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if need.status in ("PHONE_VERIFIED", "INTENT_CONFIRMED"):
         need.status = "PROFILE_IN_PROGRESS"
     skipped = set(st.get("skipped") or [])
-    qs = [q for q in customer_svc.missing_questions(ctx.db, need, uuid.UUID(st["customer_id"])) if q["key"] not in skipped]
+    cust_id = uuid.UUID(st["customer_id"])
+    qs = [q for q in customer_svc.missing_questions(ctx.db, need, cust_id) if q["key"] not in skipped]
+    if qs and st.get("channel") == "whatsapp":
+        # Less typing (21 Oct review): the National ID photo gives the name and NIN; for a business, the
+        # registration certificate and trading licence come next and fill in what they can.
+        if (any(q["key"] == "identity.full_name" for q in qs) and "id_upload" not in skipped
+                and ai.can_read_documents(ctx.db)):
+            return Step(to="REQUEST_ID", patch={"id_attempts": 0})
+        if (need.customer_type == "SME" and "business_docs" not in skipped and not qs[0]["key"].startswith("identity.")
+                and _missing_business_docs(ctx, cust_id)):
+            return Step(to="REQUEST_BUSINESS_DOCS")
     if not qs or st.get("profile_questions", 0) >= MAX_PROFILE_QUESTIONS:
         return Step(to="READINESS_CHECK")
     return Step(to="ASK_PROFILE", patch={"pending_q": qs[0], "answer_attempts": 0})
 
 
+# ------------------------------------------------------------------ documents instead of typing (WhatsApp)
+
+BUSINESS_DOCS = ("business_registration", "trading_licence")
+ID_NODES = ("REQUEST_ID", "CONFIRM_ID")
+# Waiting for a document or a one-time code: replies belong to the conversation, not to an institution's question
+DOCUMENT_OR_CODE_NODES = (*ID_NODES, "REQUEST_BUSINESS_DOCS", "PAYOUT_NUMBER", "CRB_CHECK")
+TYPE_INSTEAD = ("type", "type my details", "type my details instead", "type instead", "skip")
+
+
+def _skip(st: dict, key: str) -> list[str]:
+    return [*(st.get("skipped") or []), key]
+
+
+def _own_document(ctx: Ctx, st: dict, value):
+    from weza.domains.customer.models import Document
+    try:
+        d = ctx.db.get(Document, uuid.UUID(str(value)))
+    except ValueError:
+        return None
+    return d if d is not None and str(d.customer_id) == st["customer_id"] and d.pipeline_state == "STORED" else None
+
+
+def _missing_business_docs(ctx: Ctx, customer_id: uuid.UUID) -> list[str]:
+    have = customer_svc.documents_on_file(ctx.db, customer_id)
+    return [d for d in BUSINESS_DOCS if d not in have]
+
+
+def request_id(ctx: Ctx, st: dict, t: Trigger) -> Step:
+    type_instead = qr(_t(st, "id.type_instead"), "type_details")
+    if t.kind == "ENTER":
+        ctx.say(_t(st, "id.request"), quick_replies=[type_instead])
+        return Step(wait=Wait(REPLY, DAY))
+    a = _action(t)
+    if a == "id_uploaded":
+        from weza.domains.customer import documents as docs
+        d = _own_document(ctx, st, t.payload.get("value"))
+        data = docs.read_bytes(ctx.db, d.id) if d else None
+        read = agents.read_national_id(ctx.db, d.mime, data, subject=st["need_id"]) if data else None
+        if read:
+            return Step(to="CONFIRM_ID", patch={"id_read_enc": _enc(json.dumps({**read, "document_id": str(d.id)}))})
+        attempts = st.get("id_attempts", 0) + 1
+        if attempts >= 2:
+            ctx.say(_t(st, "id.unreadable_final"))
+            return Step(to="BUILD_PROFILE", patch={"skipped": _skip(st, "id_upload"), "id_attempts": 0})
+        ctx.say(_t(st, "id.unreadable_retry"), quick_replies=[type_instead])
+        return Step(wait=Wait(REPLY, DAY), patch={"id_attempts": attempts})
+    if a == "type_details" or _text(t).lower() in TYPE_INSTEAD:
+        return Step(to="BUILD_PROFILE", patch={"skipped": _skip(st, "id_upload")})
+    ctx.say(_t(st, "id.send_or_type"), quick_replies=[type_instead])
+    return Step(wait=Wait(REPLY, DAY))
+
+
+def confirm_id(ctx: Ctx, st: dict, t: Trigger) -> Step:
+    read = json.loads(_dec(st["id_read_enc"]))
+    if t.kind == "ENTER":
+        # Sent, never kept in the conversation history (ephemeral): it carries the NIN.
+        extra = "".join(f"*{_t(st, 'id.' + k)}:* {read[k]}\n" for k in ("date_of_birth", "expiry_date") if read.get(k))
+        ctx.say(_t(st, "id.readback", name=read["full_name"], nin=read["nin"], extra=extra), ephemeral=True,
+                quick_replies=[qr(_t(st, "id.confirm_yes"), "confirm"), qr(_t(st, "id.confirm_retry"), "retry"),
+                               qr(_t(st, "id.confirm_type"), "type_details")])
+        return Step(wait=Wait(REPLY, DAY))
+    a = _action(t)
+    if a == "id_uploaded":  # a second photo instead of an answer
+        return request_id(ctx, {**st, "id_attempts": 0}, t)
+    if a == "confirm":
+        from weza.domains.customer.models import Document
+        cust_id, ref = uuid.UUID(st["customer_id"]), f"document:{read['document_id']}"
+        for key in ("identity.full_name", "identity.nin"):
+            customer_svc.upsert_fact(ctx.db, cust_id, key, read[key.split(".")[1]], source="DOCUMENT",
+                                     channel=st.get("channel", "web"), confirmed=True, source_ref=ref)
+        fields = ["full_name", "nin"]
+        if read.get("date_of_birth"):  # personal data: kept in the encrypted identity vault, never shown to lenders
+            customer_svc.upsert_fact(ctx.db, cust_id, "identity.date_of_birth", read["date_of_birth"], source="DOCUMENT",
+                                     channel=st.get("channel", "web"), confirmed=True, source_ref=ref)
+            fields.append("date_of_birth")
+        if read.get("expiry_date"):
+            customer_svc.upsert_fact(ctx.db, cust_id, "identity.id_expiry", read["expiry_date"], source="DOCUMENT",
+                                     channel=st.get("channel", "web"), confirmed=True, source_ref=ref)
+            fields.append("id_expiry")
+        d = ctx.db.get(Document, uuid.UUID(read["document_id"]))
+        if d is not None and d.pipeline_state == "STORED":
+            d.pipeline_state = "CONFIRMED"
+        audit(ctx.db, _customer_actor(st), "customer.identity_from_document", "document", read["document_id"],
+              after={"fields": fields})
+        ctx.say(_t(st, "id.saved"))
+        if read.get("expiry_date") and read["expiry_date"] < utcnow().date().isoformat():
+            ctx.say(_t(st, "id.expired", date=read["expiry_date"]))
+        return Step(to="BUILD_PROFILE", patch={"id_read_enc": None})
+    if a in ("retry", "no"):
+        return Step(to="REQUEST_ID", patch={"id_read_enc": None, "id_attempts": 0})
+    if a == "type_details" or _text(t).lower() in TYPE_INSTEAD:
+        return Step(to="BUILD_PROFILE", patch={"id_read_enc": None, "skipped": _skip(st, "id_upload")})
+    ctx.say(_t(st, "id.tap_confirm"))
+    return Step(wait=Wait(REPLY, DAY))
+
+
+def request_business_docs(ctx: Ctx, st: dict, t: Trigger) -> Step:
+    from weza.domains.customer.documents import DOC_TYPES
+    cust_id = uuid.UUID(st["customer_id"])
+    missing = _missing_business_docs(ctx, cust_id)
+    none = qr(_t(st, "docs.none"), "skip")
+    if t.kind == "ENTER":
+        if not missing:
+            return Step(to="BUILD_PROFILE")
+        wanted = " and your ".join(DOC_TYPES[x].lower() for x in missing)
+        ctx.say(_t(st, "docs.request", wanted=wanted), quick_replies=[none])
+        return Step(wait=Wait(REPLY, DAY))
+    a = _action(t)
+    if a == "business_doc_uploaded":
+        d = _own_document(ctx, st, t.payload.get("value"))
+        if d is not None:
+            _apply_business_document(ctx, st, d)
+        missing = _missing_business_docs(ctx, cust_id)
+        if missing:
+            ctx.say(_t(st, "docs.next", document=DOC_TYPES[missing[0]].lower()),
+                    quick_replies=[qr(_t(st, "docs.none_one"), "skip")])
+            return Step(wait=Wait(REPLY, DAY))
+        ctx.say(_t(st, "docs.saved_both"))
+        return Step(to="BUILD_PROFILE")
+    if a in ("skip", "no") or _text(t).lower() in ("skip", "none", "i don't have them", "i don't have it"):
+        return Step(to="BUILD_PROFILE", patch={"skipped": _skip(st, "business_docs")})
+    ctx.say(_t(st, "docs.reminder"), quick_replies=[none])
+    return Step(wait=Wait(REPLY, DAY))
+
+
+def _apply_business_document(ctx: Ctx, st: dict, d) -> None:
+    """A stored registration certificate or trading licence answers 'is the business registered?'; when it can be
+    read, it also proposes the business name, the registration/licence number and the licence expiry."""
+    from weza.domains.customer import documents as docs
+    cust_id, channel, ref = uuid.UUID(st["customer_id"]), st.get("channel", "web"), f"document:{d.id}"
+    info = None
+    if ai.can_read_documents(ctx.db):
+        data = docs.read_bytes(ctx.db, d.id)
+        info = agents.read_business_document(ctx.db, d.mime, data, subject=st["need_id"]) if data else None
+    if info and info["kind"] in BUSINESS_DOCS and info["kind"] != d.doc_type:
+        d.doc_type = info["kind"]  # the document itself says what it is; the caption/filename was only a guess
+    customer_svc.upsert_fact(ctx.db, cust_id, "business.registered", True, source="DOCUMENT", channel=channel,
+                             source_ref=ref, verification_state="EXTRACTED")
+    if not info:
+        return
+    facts = customer_svc.fact_values(ctx.db, cust_id)
+    if info["business_name"] and not facts.get("business.name"):
+        customer_svc.upsert_fact(ctx.db, cust_id, "business.name", info["business_name"], source="AI_EXTRACTED",
+                                 channel=channel, source_ref=ref)
+    number_key = "business.registration_number" if d.doc_type == "business_registration" else "business.licence_number"
+    if info["registration_number"]:
+        customer_svc.upsert_fact(ctx.db, cust_id, number_key, info["registration_number"], source="AI_EXTRACTED",
+                                 channel=channel, source_ref=ref)
+    if d.doc_type == "trading_licence" and info["expiry_date"]:
+        customer_svc.upsert_fact(ctx.db, cust_id, "business.licence_expiry", info["expiry_date"],
+                                 source="AI_EXTRACTED", channel=channel, source_ref=ref)
+        if info["expiry_date"] < utcnow().date().isoformat():
+            ctx.say(_t(st, "docs.licence_expired", date=info["expiry_date"]))
+
+
+def _bands(st: dict, q: dict) -> list | None:
+    """Tap-to-choose ranges for a money or duration question — WhatsApp only (the other channels have their own inputs)."""
+    return ANSWER_BANDS.get(q["key"]) if st.get("channel") == "whatsapp" and q["type"] in ("money", "months") else None
+
+
+def _pick_band(bands: list, tapped, text: str):
+    """The band value for a tapped option (by its saved value) or a typed label such as "UGX 1M - 3M". A typed
+    number is NOT matched here: it goes through the normal parser, which understands units ("2 years")."""
+    if tapped is not None:
+        return next((v for v, _ in bands if str(v) == str(tapped)), None)
+    low = " ".join(text.lower().split())
+    return next((v for v, label in bands if label.lower() == low), None)
+
+
 def ask_profile(ctx: Ctx, st: dict, t: Trigger) -> Step:
     q = st["pending_q"]
+    bands = _bands(st, q)
     if t.kind == "ENTER":
         replies = []
-        if q["type"] == "choice":
+        if bands:
+            replies = [qr(label, "answer", str(v)) for v, label in bands]
+        elif q["type"] == "choice":
             replies = [qr(lbl, "answer", val) for val, lbl in q["options"]]
         elif q["type"] == "yesno":
             replies = [qr("Yes", "answer", "yes"), qr("No", "answer", "no")]
@@ -377,17 +620,20 @@ def ask_profile(ctx: Ctx, st: dict, t: Trigger) -> Step:
             replies = [qr(lbl, "answer", code) for code, lbl in UGANDA["sectors"].items()]
         if not q.get("required"):
             replies.append(qr("Skip", "skip"))
-        ctx.say(q["prompt"], quick_replies=replies)
+        ctx.say(q["prompt"], quick_replies=replies,
+                **({"hint": "Tap a range, or type an exact figure."} if bands else {}))
         ctx.card("question", {"key": q["key"], "type": q["type"], "required": q.get("required", False),
                               "options": q.get("options"), "progress": _progress(ctx, st)})
         return Step(wait=Wait(REPLY, DAY), patch={"profile_questions": st.get("profile_questions", 0) + 1})
     if _action(t) == "skip" and not q.get("required"):
         return Step(to="BUILD_PROFILE", patch={"skipped": [*(st.get("skipped") or []), q["key"]]})
     raw = t.payload.get("value") if t.payload.get("value") not in (None, "") else _text(t)
-    value = _parse_answer(q, str(raw))
+    picked = (_pick_band(bands, t.payload.get("value") if _action(t) == "answer" else None, _text(t))
+              if bands else None)
+    value = picked if picked is not None else _parse_answer(q, str(raw))
     source, confidence = "CUSTOMER", 1.0
     if value is None and str(raw).strip():
-        ai_val, ai_conf = ai.interpret_answer(ctx.db, q, str(raw), subject=st["need_id"])
+        ai_val, ai_conf = agents.customer_profile_answer(ctx.db, q, str(raw), subject=st["need_id"])
         if ai_val is not None and ai_conf >= CRITICAL_CONFIDENCE:
             value = _parse_answer(q, str(ai_val))
             source, confidence = "AI_EXTRACTED", ai_conf
@@ -574,6 +820,8 @@ def waiting_room(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if a == "_market_match":
         ctx.say("Good news — a new option may fit your financing need. Take a look:")
         return Step(to="PRESENT_OPTIONS")
+    if a == "show_options":  # tapped on an institution-interest message
+        return Step(to="PRESENT_OPTIONS")
     if a == "leave":
         from weza.domains.matching.models import WaitingEntry
         w = ctx.db.get(WaitingEntry, uuid.UUID(st["need_id"]))
@@ -690,8 +938,9 @@ def consent_node(ctx: Ctx, st: dict, t: Trigger) -> Step:
                                   pref.contact_channel if pref else "phone")),
                               contact_window=t.payload.get("contact_window") or (pref.contact_window if pref else "ANY"))
         need.status = "CONSENTED"
-        nxt = "CRB_CHECK" if _crb_check_due(ctx, st, inst.id) else "CREATE_OPPORTUNITY"
-        return Step(to=nxt, patch={"consent_id": str(c.id)})
+        nxt = "CRB_CHECK" if _crb_check_due(ctx, st, inst.id) else (
+            "PAYOUT_NUMBER" if st.get("channel") == "whatsapp" else "CREATE_OPPORTUNITY")
+        return Step(to=nxt, patch={"consent_id": str(c.id), "crb_consented": False})
     if a == "decline":
         m.state = "PRESENTED"
         _need(ctx, st).status = "MATCHED"
@@ -736,7 +985,11 @@ def crb_check(ctx: Ctx, st: dict, t: Trigger) -> Step:
         return Step(wait=Wait(REPLY, DAY))
     if no:
         audit(ctx.db, _customer_actor(st), "GNGRID_CRB_CHECK_DECLINED", "match", m.id, institution_id=inst.id)
-        return Step(to="CREATE_OPPORTUNITY")
+        return Step(to="PAYOUT_NUMBER" if st.get("channel") == "whatsapp" else "CREATE_OPPORTUNITY")
+    if st.get("channel") == "whatsapp" and not st.get("crb_challenge_id"):
+        # On WhatsApp one code does both jobs (21 Oct review): it proves the number that receives the money and
+        # authorises this bureau check. It is sent to that number in the next step.
+        return Step(to="PAYOUT_NUMBER", patch={"crb_consented": True})
     if not st.get("crb_challenge_id") and crb_service.reusable(ctx.db, _customer_actor(st).id, inst.id) is None:
         challenge = crb_service.issue_consent_otp(ctx.db, _customer_actor(st), inst.id,
                                                   channel=st.get("channel", "web"))
@@ -761,6 +1014,96 @@ def crb_check(ctx: Ctx, st: dict, t: Trigger) -> Step:
         ctx.say(f"The credit bureau check couldn't be completed right now. Your request continues — "
                 f"{inst.display_name} will do its own checks.")
     return Step(to="CREATE_OPPORTUNITY", patch={"crb_challenge_id": None})
+
+
+def payout_number(ctx: Ctx, st: dict, t: Trigger) -> Step:
+    """WhatsApp: the number that should receive the money, proven by an SMS code typed back into the chat. With
+    bureau consent the code is the lender-bound CRB consent code, so one code verifies the number and authorises
+    the check; the bureau report then says whether the number is on the record of the same National ID."""
+    from weza.domains.consent import crb_service
+    m = ctx.db.get(Match, uuid.UUID(st["selected_match_id"]))
+    inst = ctx.db.get(Institution, m.institution_id)
+    actor, crb = _customer_actor(st), bool(st.get("crb_consented"))
+    options = [qr(_t(st, "payout.resend"), "resend"), qr(_t(st, "payout.change"), "change_number")]
+    if t.kind == "ENTER":
+        ctx.say(_t(st, "payout.ask", institution=inst.display_name),
+                quick_replies=[qr(_t(st, "payout.use_this"), "payout_this")])
+        return Step(wait=Wait(REPLY, DAY), patch={"payout_enc": None, "payout_challenge_id": None,
+                                                  "crb_challenge_id": None})
+    a, text = _action(t), _text(t)
+    if a == "change_number":
+        ctx.say(_t(st, "payout.change_prompt"), hint=_t(st, "payout.example", example=UGANDA["phone"]["example"]))
+        return Step(wait=Wait(REPLY, DAY), patch={"payout_enc": None, "payout_challenge_id": None,
+                                                  "crb_challenge_id": None})
+    challenge_id = st.get("crb_challenge_id") or st.get("payout_challenge_id")
+    if a == "resend" and st.get("payout_enc"):
+        return _send_payout_code(ctx, st, inst, _dec(st["payout_enc"]), crb)
+    if not challenge_id:
+        if a == "payout_this":
+            phone = identity.vault_read(ctx.db, ctx.db.get(Customer, actor.id).vault_token).get("phone")
+        else:
+            phone = parsing.parse_phone(text or str(t.payload.get("value") or ""))
+        if not phone:
+            ctx.say(_t(st, "payout.invalid", example=UGANDA["phone"]["example"]),
+                    quick_replies=[qr(_t(st, "payout.use_this"), "payout_this")])
+            return Step(wait=Wait(REPLY, DAY))
+        return _send_payout_code(ctx, st, inst, phone, crb)
+    phone, code = _dec(st["payout_enc"]), "".join(ch for ch in text if ch.isdigit())
+    if crb:
+        try:
+            res = crb_service.run_check(ctx.db, actor, inst.id, channel="whatsapp", challenge_id=uuid.UUID(challenge_id),
+                                        otp=code, payout_phone=phone)
+        except ValidationFailed as exc:
+            ctx.say(exc.message, quick_replies=options)
+            patch = {"crb_challenge_id": None} if exc.code in ("OTP_LOCKED", "OTP_EXPIRED") else {}
+            return Step(wait=Wait(REPLY, DAY), patch=patch)
+        if res["status"] == "VERIFIED":
+            ctx.say(_t(st, "payout.verified_bureau", institution=inst.display_name))
+        elif res["status"] not in crb_service.FAILED:
+            ctx.say(_t(st, "payout.verified_bureau_pending", institution=inst.display_name))
+    else:
+        res = identity.verify_otp(ctx.db, uuid.UUID(challenge_id), code)
+        if not res.ok:
+            ctx.say(res.message, quick_replies=options)
+            patch = {"payout_challenge_id": None} if res.code in ("OTP_LOCKED", "OTP_EXPIRED") else {}
+            return Step(wait=Wait(REPLY, DAY), patch=patch)
+        ctx.say(_t(st, "payout.verified"))
+    cust = ctx.db.get(Customer, actor.id)
+    identity.vault_update(ctx.db, cust.vault_token, payout_phone=phone)
+    audit(ctx.db, actor, "customer.payout_number_verified", "match", m.id, institution_id=inst.id,
+          after={"method": "crb_consent_otp" if crb else "otp"})
+    return Step(to="CREATE_OPPORTUNITY", patch={"payout_enc": None, "payout_challenge_id": None,
+                                                "crb_challenge_id": None})
+
+
+def _send_payout_code(ctx: Ctx, st: dict, inst: Institution, phone: str, crb: bool) -> Step:
+    from weza.domains.consent import crb_service
+    patch: dict = {"payout_enc": _enc(phone)}
+    options = [qr(_t(st, "payout.resend"), "resend"), qr(_t(st, "payout.change"), "change_number")]
+    masked = identity.mask_phone(phone)
+    if crb:
+        try:
+            ch = crb_service.issue_consent_otp(ctx.db, _customer_actor(st), inst.id, channel="whatsapp", phone=phone)
+        except ValidationFailed as exc:
+            ctx.say(exc.message, quick_replies=options)
+            return Step(wait=Wait(REPLY, DAY), patch=patch)
+        patch["crb_challenge_id"], dev_code = str(ch["challenge_id"]), ch.get("dev_code")
+        how = _t(st, "payout.how_whatsapp") if ch.get("delivered_via") == "whatsapp" else _t(st, "payout.how_sms", masked=masked)
+        ctx.say(_t(st, "payout.sent_crb", how=how, institution=inst.display_name), quick_replies=options)
+    else:
+        chat_phone = identity.vault_read(ctx.db, ctx.db.get(Customer, ctx.instance.customer_id).vault_token).get("phone")
+        via = "whatsapp" if st.get("channel") == "whatsapp" and phone == chat_phone else "sms"
+        res = identity.issue_otp(ctx.db, phone, ip=st.get("ip", ""), journey_id=ctx.instance.id, deliver_via=via)
+        if not res.ok and res.code != "OTP_COOLDOWN":
+            ctx.say(res.message, quick_replies=[qr(_t(st, "payout.change"), "change_number")])
+            return Step(wait=Wait(REPLY, DAY), patch=patch)
+        if res.ok and res.challenge is not None:
+            patch["payout_challenge_id"] = str(res.challenge.id)
+        dev_code = res.dev_code
+        how = _t(st, "payout.how_whatsapp") if via == "whatsapp" else _t(st, "payout.how_sms", masked=masked)
+        ctx.say(_t(st, "payout.sent", how=how) if res.ok else _t(st, "payout.wait"), quick_replies=options)
+    ctx.card("otp_input", {"masked": masked, "dev_code": dev_code, "purpose": "payout"})
+    return Step(wait=Wait(REPLY, DAY), patch=patch)
 
 
 def create_opportunity(ctx: Ctx, st: dict, t: Trigger) -> Step:
@@ -808,7 +1151,7 @@ def tracking(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if a == "_declined":
         return Step(to="RESCUE_ASK", patch={"declined_opportunity_id": t.payload.get("value"),
                                             "decline_reason": t.payload.get("reason")})
-    if a == "another":
+    if a in ("another", "show_options"):
         return Step(to="PRESENT_OPTIONS")
     lines = []
     for oid in st.get("opportunity_ids") or []:
@@ -871,6 +1214,7 @@ def status_label(state: str) -> str:
     return {"QUALIFIED": "Completing checks", "ROUTED": "Shared — waiting for the institution",
             "RECEIVED": "Opened by the institution", "ASSIGNED": "Assigned to an officer",
             "CONTACTED": "The institution has contacted you", "PROCEEDING": "In the institution's process",
+            "INFORMATION_REQUESTED": "The institution has asked you for more information",
             "SUBMITTED_TO_INSTITUTION": "Application submitted to the institution",
             "REPORTED_APPROVED": "Reported approved by the institution",
             "REPORTED_DISBURSED": "Reported disbursed by the institution",
@@ -952,6 +1296,8 @@ GRAPH = register(GraphDef(type="customer_journey", version=1, start="GREET", nod
     "ASK_INTENT": Node(ask_intent, 2, R), "CONFIRM_INTENT": Node(confirm_intent, 0, R),
     "REVISE_INTENT": Node(revise_intent, 1), "CONFIRM_INTENT_WAIT": Node(confirm_intent_wait, 0, R),
     "VERIFY_PHONE": Node(verify_phone, 2, R), "BUILD_PROFILE": Node(build_profile, 2),
+    "REQUEST_ID": Node(request_id, 2, R), "CONFIRM_ID": Node(confirm_id, 0, R),
+    "REQUEST_BUSINESS_DOCS": Node(request_business_docs, 2, R), "PAYOUT_NUMBER": Node(payout_number, 0, R),
     "ASK_PROFILE": Node(ask_profile, 2, R), "RESOLVE_CONFLICT": Node(resolve_conflict, 0, R),
     "READINESS_CHECK": Node(readiness_check, 2), "REQUEST_MISSING_ITEM": Node(request_missing_item, 2, R),
     "OFFER_WAITING_ROOM": Node(offer_waiting_room, 0, "SAVE_EXIT"), "WAITING_ROOM": Node(waiting_room, 3, "EXPIRE"),
