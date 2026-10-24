@@ -75,7 +75,7 @@ def test_happy_path_customer_reaches_a_qualified_opportunity_at_demo_bank(journe
     assert any(o["institution"] == "Journey Demo Bank" for o in options)
     demo = _demo_option(j)
     assert demo["readiness"] == "READY"
-    assert demo["product"] == "SME Working Capital Loan"
+    assert demo["product"] == "SME Working Capital"
     # The score is explainable — components, not a black box — and it is not a promise of approval.
     assert demo["score"] > 0
     assert set(demo["components"]) == {"product_fit", "appetite_fit", "preference_fit", "readiness", "capacity_fit"}
@@ -102,7 +102,7 @@ def test_happy_path_customer_reaches_a_qualified_opportunity_at_demo_bank(journe
         assert opp.match_score > 0
         snap = opp.snapshot
         # the versioned product and mandate the customer was actually shown
-        assert snap["product_version"]["name"] == "SME Working Capital Loan"
+        assert snap["product_version"]["name"] == "SME Working Capital"
         assert snap["appetite_version"]["id"]
         assert snap["match"]["algorithm_version"] and snap["quality"]["score"] > 0
         # the consent behind the share, with its version and hash
@@ -112,7 +112,7 @@ def test_happy_path_customer_reaches_a_qualified_opportunity_at_demo_bank(journe
         # routed to a Journey Demo Bank officer
         assignment = db.get(Assignment, opp.id)
         assert assignment is not None and assignment.user_id is not None
-        assert db.get(User, assignment.user_id).email.endswith("@demo.bank")
+        assert db.get(User, assignment.user_id).email.endswith("@demobank.demo")
         # no bureau call was made for this journey
         assert db.execute(select(CrbCheck).where(CrbCheck.customer_id == need.customer_id)).scalars().all() == []
         # audit trail: the consent and the routing
@@ -145,7 +145,7 @@ def test_without_consent_nothing_is_shared_or_routed(journey, drain, demo_bank, 
     unchanged — nothing identifiable was routed."""
     j = _to_options(journey, "0772400003", "I need UGX 25 million to buy stock for my pharmacy")
     demo = _demo_option(j)
-    headers = as_user("admin@demo.bank")
+    headers = as_user("admin@demobank.demo")
     before = client.get("/api/v1/inst/opportunities", headers=headers).json()["total"]
     j.send(action="select", value=demo["match_id"])
     assert j.node == "CONSENT", j.node
@@ -204,10 +204,11 @@ def test_an_inactive_mandate_never_produces_an_opportunity(journey, drain, demo_
     demo = _demo_option(j)
     j.send(action="select", value=demo["match_id"])
     assert j.node == "CONSENT", j.node
+    # The mandate behind the option the customer chose (Demo Bank may carry other mandates from other tests).
     with session_scope() as db:
-        appetite = db.execute(select(Appetite).where(
-            Appetite.institution_id == uuid.UUID(demo_bank["id"]))).scalar_one()
-        admin = db.execute(select(User).where(User.email == "admin@demo.bank")).scalar_one()
+        appetite_id = db.get(Match, uuid.UUID(demo["match_id"])).appetite_id
+        appetite = db.get(Appetite, appetite_id)
+        admin = db.execute(select(User).where(User.email == "admin@demobank.demo")).scalar_one()
         actor = identity.actor_for_user(db, admin, mfa=True)
         appetite_svc.set_lifecycle(db, actor, appetite, "PAUSED", "Paused for the demo")
     try:
@@ -218,8 +219,7 @@ def test_an_inactive_mandate_never_produces_an_opportunity(journey, drain, demo_
             assert db.execute(select(Opportunity).where(Opportunity.need_id == need.id)).scalars().all() == []
     finally:
         with session_scope() as db:
-            appetite = db.execute(select(Appetite).where(
-                Appetite.institution_id == uuid.UUID(demo_bank["id"]))).scalar_one()
-            admin = db.execute(select(User).where(User.email == "admin@demo.bank")).scalar_one()
+            appetite = db.get(Appetite, appetite_id)
+            admin = db.execute(select(User).where(User.email == "admin@demobank.demo")).scalar_one()
             actor = identity.actor_for_user(db, admin, mfa=True)
             appetite_svc.set_lifecycle(db, actor, appetite, "ACTIVE", "Resumed after the demo")

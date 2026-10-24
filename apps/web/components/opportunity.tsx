@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { money, minutesLabel, STATE_LABEL } from "@/lib/format";
-import { Badge, cx, ScoreRing, StateBadge } from "./ui";
+import { Badge, cx, ScoreRing, StateBadge, useSkin } from "./ui";
 
 export function PriorityBadge({ p }: { p: string }) {
   if (p === "NORMAL") return null;
@@ -67,8 +67,9 @@ export function QualityBadges({ o }: { o: any }) {
 }
 
 export function OpportunityRow({ o, compact }: { o: any; compact?: boolean }) {
+  const crisp = useSkin() === "crisp";
   return (
-    <Link href={`/institution/opportunities/${o.id}`} className={cx("flex gap-4 border-b border-line px-4 py-3.5 last:border-0 hover:bg-canvas", o.match_score >= 90 && "bg-gold-100/30")}>
+    <Link href={`/institution/opportunities/${o.id}`} className={cx("flex gap-4 border-b border-line last:border-0", crisp ? "px-5 py-4 hover:bg-soft/60" : "px-4 py-3.5 hover:bg-canvas", !crisp && o.match_score >= 90 && "bg-gold-100/30")}>
       <ScoreRing score={o.match_score} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">

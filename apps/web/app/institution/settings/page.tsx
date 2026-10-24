@@ -34,7 +34,7 @@ export default function Settings() {
       {node}
       <PageHeader title="Institution settings" actions={<StateBadge state={i.status} />} />
       <Card title="Registration">
-        <KV items={[["Legal name", i.legal_name], ["Type", i.type], ["Licence", i.licence_no], ["Regulator", i.regulator], ["Verified", i.verified_at ? date(i.verified_at) : "Pending"], ["Marketplace terms", `v${i.terms_version}`]]} />
+        <KV items={[["Legal name", i.legal_name], ["Type", i.type], ["Licence", i.licence_no], ["Regulator", i.regulator], ["Verified", i.verified_at ? date(i.verified_at) : "Pending"], ["Marketplace terms", i.terms_version ? `v${i.terms_version}` : "—"]]} />
         {i.status_reason && <p className="mt-2 text-[13px] text-muted">Last status note: {i.status_reason}</p>}
       </Card>
       <Card title="Marketplace profile" subtitle="Shown to customers on option cards.">

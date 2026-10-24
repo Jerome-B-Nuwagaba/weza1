@@ -28,9 +28,10 @@ test("radius what-if simulates a change without touching the live appetite", asy
 
 test("ask WEZA answers from read-only tools", async ({ page }) => {
   await signIn(page, "credit@lakeside.demo");
+  // Ask Weza lives on the Command Centre (/institution/ask redirects there).
   await page.goto("/institution/ask");
-  await page.getByLabel("Question").fill("What sits just outside our appetite?");
-  await page.getByRole("button", { name: "Ask" }).click();
+  await page.getByLabel("Ask Weza", { exact: true }).fill("What sits just outside our appetite?");
+  await page.getByRole("button", { name: "Send question" }).click();
   await expect(page.locator("main p.whitespace-pre-line").first()).not.toBeEmpty({ timeout: 30_000 });
   await noServerError(page);
 });
@@ -112,8 +113,8 @@ test("reports export downloads a CSV without customer identity", async ({ page }
 test("officers don't get an export they aren't allowed to use", async ({ page }) => {
   await signIn(page, "officer@lakeside.demo");
   await page.goto("/institution/feed");
-  await expect(page.getByRole("heading", { name: "Opportunity Feed" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Export CSV/ })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Opportunities", level: 1 })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Export/ })).toHaveCount(0);
 });
 
 test("a charge is disputed by the institution", async ({ page, request }) => {

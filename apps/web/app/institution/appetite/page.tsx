@@ -12,7 +12,7 @@ const CUSTOMER_TYPE: Record<string, string> = {
 
 const one = (v: any) => (Array.isArray(v) && v.length === 1 ? String(v[0]) : "");
 const pair = (v: any) => (Array.isArray(v) && v.length === 2 ? [Number(v[0]), Number(v[1])] : null);
-const text = (v: any) => (v ? String(v).replace(/_/g, " ").toLowerCase() : "");
+const text = (v: any) => (Array.isArray(v) ? v.map((x) => String(x).replace(/_/g, " ").toLowerCase()).join(", ") : v ? String(v).replace(/_/g, " ").toLowerCase() : "");
 
 export default function Appetites() {
   const { can } = useMe();

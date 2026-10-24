@@ -50,6 +50,101 @@
   }
 }
 
+/* Institution workspace skin — WEZA Brand Identity & UI Design Brief v2 (§4 colour system) and the Command
+   Centre navigation mockups. Deep evergreen leads; the W monogram's light green is the only accent; white and
+   soft-surface neutrals carry the data. Limited shadow (§6): crisp 1px borders instead of blur, so edges stay
+   sharp on low-DPI screens. Scoped to [data-skin="institution"]; the existing --blue-* names map to the
+   evergreen scale so every institution page inherits the brand without per-page colour code. */
+[data-skin="institution"] {
+  --evergreen: #063b32;       /* Primary — Deep Evergreen */
+  --evergreen-hover: #0a4a3f;
+  --evergreen-press: #042b25;
+  --olive: #567d35;           /* Secondary — Olive Green */
+  --leaf: #78903e;            /* The light green of the W monogram (sampled from the supplied artwork) */
+  --leaf-press: #567d35;
+  --leaf-tint: #eef3e6;
+  --blue-50: #e9f0ec;         /* selected navigation / soft emphasis */
+  --blue-100: #d3e2da;        /* focus ring */
+  --blue-400: #7fa597;
+  --blue-600: #063b32;
+  --blue-700: #052f28;
+  --blue-800: #04261f;
+  --navy-900: #063b32;
+  --surface: #ffffff;         /* Canvas — White */
+  --canvas: #ffffff;
+  --soft: #f3f7f5;            /* Soft Surface */
+  --border: #d9e3de;          /* Borders / Dividers */
+  --muted: #5d6965;           /* Secondary Text */
+  --text: #17211f;            /* Primary Text */
+  --success: #3f6d22;
+  --success-bg: #eef3e6;
+  --success-dot: #78903e;
+  --warning: #8a5a00;
+  --warning-bg: #fdf3e1;
+  --warning-dot: #e0a100;
+  --danger: #c5221f;
+  --danger-bg: #fdecea;
+  --danger-dot: #d93025;
+  --info: #1f4e79;
+  --info-bg: #eaf1f8;
+  --info-dot: #1f4e79;
+  /* The brief has no gold: the institution skin draws the old gold emphasis in the W's light green. */
+  --gold-100: #eef3e6;
+  --gold-500: #78903e;
+  --gold-700: #3f6d22;
+  --elev-xs: none;
+  --elev-sm: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) [data-skin="institution"] {
+    --evergreen: #8fd1b9;
+    --evergreen-hover: #a7dcc8;
+    --evergreen-press: #78c2a7;
+    --leaf: #9bb85c;
+    --leaf-press: #86a34a;
+    --leaf-tint: #1d2a14;
+    --blue-50: #12261f;
+    --blue-100: #1d3a30;
+    --blue-400: #4f8a75;
+    --blue-600: #8fd1b9;
+    --blue-700: #a7dcc8;
+    --blue-800: #bfe6d7;
+    --navy-900: #8fd1b9;
+    --surface: #0d1714;
+    --canvas: #0a1210;
+    --soft: #111d19;
+    --border: #22332d;
+    --muted: #9aaba5;
+    --text: #e6eeeb;
+    --success: #a9c97a;
+    --success-bg: #1d2a14;
+    --success-dot: #9bb85c;
+    --warning: #f2c46d;
+    --warning-bg: #2b2210;
+    --warning-dot: #e0a100;
+    --danger: #f28b82;
+    --danger-bg: #2e1513;
+    --danger-dot: #f28b82;
+    --info: #9cc2e8;
+    --info-bg: #142231;
+    --info-dot: #9cc2e8;
+  }
+}
+
+/* Form controls in the institution skin: a clear focus ring instead of a colour shift alone. */
+[data-skin="institution"] :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea):focus {
+  border-color: var(--blue-600);
+  box-shadow: 0 0 0 3px var(--blue-100);
+  outline: none;
+}
+[data-skin="institution"] input[type="checkbox"] {
+  accent-color: var(--blue-600);
+}
+
 @theme inline {
   --color-blue-50: var(--blue-50);
   --color-blue-100: var(--blue-100);
@@ -72,6 +167,22 @@
   --color-warning-bg: var(--warning-bg);
   --color-danger: var(--danger);
   --color-danger-bg: var(--danger-bg);
+  --color-evergreen: var(--evergreen);
+  --color-evergreen-hover: var(--evergreen-hover);
+  --color-evergreen-press: var(--evergreen-press);
+  --color-olive: var(--olive);
+  --color-leaf: var(--leaf);
+  --color-leaf-press: var(--leaf-press);
+  --color-leaf-tint: var(--leaf-tint);
+  --color-soft: var(--soft);
+  --color-success-dot: var(--success-dot);
+  --color-warning-dot: var(--warning-dot);
+  --color-danger-dot: var(--danger-dot);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --color-info-dot: var(--info-dot);
+  --shadow-xs: var(--elev-xs, 0 1px 2px rgba(15, 27, 45, 0.05));
+  --shadow-sm: var(--elev-sm, 0 1px 3px rgba(15, 27, 45, 0.06));
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-serif: var(--font-serif4), Georgia, serif;
 }
