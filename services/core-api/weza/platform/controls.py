@@ -59,6 +59,12 @@ def idempotent(db: Session, key: str | None, scope: str, body: dict, fn: Callabl
     return result
 
 
+def idempotent_optional(db: Session, key: str | None, scope: str, body: dict, fn: Callable[[], dict]) -> dict:
+    """Like `idempotent`, but a request without a key simply runs. For creation screens that are being moved to send a
+    key one at a time: a client that sends one is protected from double submits, one that does not behaves as before."""
+    return idempotent(db, key, scope, body, fn) if key else fn()
+
+
 # ---------------------------------------------------------------- flags & kill switches
 
 

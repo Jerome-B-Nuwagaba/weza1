@@ -50,7 +50,7 @@ from weza.domains.trust.models import AuditEvent, PolicyDecisionLog
 from weza.domains.trust.service import audit
 from weza.domains.verification import service as verification
 from weza.platform.context import Actor
-from weza.platform.controls import flag, idempotent, rate_limit
+from weza.platform.controls import flag, idempotent, idempotent_optional, rate_limit
 from weza.platform.db import utcnow
 from weza.platform.errors import NotFound, ValidationFailed
 
@@ -359,10 +359,13 @@ class ProductIn(BaseModel):
 
 
 @router.post("/products", status_code=201)
-def create_product(body: ProductIn, actor: Actor = A, db: Session = DB):
+def create_product(body: ProductIn, idempotency_key: str | None = Header(None), actor: Actor = A, db: Session = DB):
     rate_limit(db, f"institution:create_product:{actor.id}", 200, 3600)
-    pv = product_svc.create(db, actor, body.model_dump(), provenance=body.provenance)
-    return {"product_id": str(pv.product_id), "version": _pv_dict(pv)}
+
+    def run() -> dict:
+        pv = product_svc.create(db, actor, body.model_dump(), provenance=body.provenance)
+        return {"product_id": str(pv.product_id), "version": _pv_dict(pv)}
+    return idempotent_optional(db, idempotency_key, f"create_product:{actor.id}", body.model_dump(mode="json"), run)
 
 
 @router.put("/products/{product_id}")
@@ -538,10 +541,13 @@ class AppetiteIn(BaseModel):
 
 
 @router.post("/appetites", status_code=201)
-def create_appetite(body: AppetiteIn, actor: Actor = A, db: Session = DB):
+def create_appetite(body: AppetiteIn, idempotency_key: str | None = Header(None), actor: Actor = A, db: Session = DB):
     rate_limit(db, f"institution:create_appetite:{actor.id}", 200, 3600)
-    av = appetite_svc.create(db, actor, body.model_dump())
-    return {"appetite_id": str(av.appetite_id), "version": _av_dict(av)}
+
+    def run() -> dict:
+        av = appetite_svc.create(db, actor, body.model_dump())
+        return {"appetite_id": str(av.appetite_id), "version": _av_dict(av)}
+    return idempotent_optional(db, idempotency_key, f"create_appetite:{actor.id}", body.model_dump(mode="json"), run)
 
 
 @router.put("/appetites/{appetite_id}")

@@ -149,3 +149,39 @@ def test_password_resets_are_rate_limited_per_administrator(client, as_user):
     codes = [client.post(f"/api/v1/inst/users/{off}/password", headers=w["admin"],
                          json={"new_password": PW}).status_code for _ in range(11)]
     assert codes[-1] == 429 and 429 not in codes[:10]
+
+
+PRODUCT = {"name": "Idem Loan", "family": "SME_WORKING_CAPITAL",
+           "terms": {"min_amount": 1_000_000, "max_amount": 50_000_000, "min_tenor_months": 3, "max_tenor_months": 24},
+           "rules": [{"field": "customer_type", "op": "in", "value": ["SME"]}]}
+
+
+def _count_products(client, headers) -> int:
+    return len(client.get("/api/v1/inst/products", headers=headers).json()["products"])
+
+
+def test_creating_a_product_twice_with_the_same_key_makes_one(client, as_user):
+    w = _new_institution(client, as_user)
+    h = {**w["admin"], "Idempotency-Key": f"prod-{w['s']}"}
+    first = client.post("/api/v1/inst/products", json=PRODUCT, headers=h)
+    second = client.post("/api/v1/inst/products", json=PRODUCT, headers=h)
+    assert first.status_code == second.status_code == 201
+    assert first.json()["product_id"] == second.json()["product_id"]
+    assert _count_products(client, w["admin"]) == 1
+    changed = client.post("/api/v1/inst/products", json={**PRODUCT, "name": "Other"}, headers=h)
+    assert changed.status_code == 422 and changed.json()["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_without_a_key_creation_behaves_as_before(client, as_user):
+    w = _new_institution(client, as_user)
+    for _ in range(2):
+        assert client.post("/api/v1/inst/products", json=PRODUCT, headers=w["admin"]).status_code == 201
+    assert _count_products(client, w["admin"]) == 2
+
+
+def test_the_same_key_from_another_person_is_not_a_repeat(client, as_user):
+    w = _new_institution(client, as_user)
+    mgr = login(client, f"biz@w{w['s']}.co.ug", PW)
+    a = client.post("/api/v1/inst/products", json=PRODUCT, headers={**w["admin"], "Idempotency-Key": f"shared-{w['s']}"})
+    b = client.post("/api/v1/inst/products", json=PRODUCT, headers={**mgr, "Idempotency-Key": f"shared-{w['s']}"})
+    assert a.json()["product_id"] != b.json()["product_id"]
