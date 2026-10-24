@@ -143,16 +143,20 @@ def _require_selection(db: Session, actor: Actor, institution_id: uuid.UUID) -> 
     return match_id
 
 
-def issue_consent_otp(db: Session, actor: Actor, institution_id: uuid.UUID, *, channel: str) -> dict:
-    """WEZA's lender-bound consent OTP, delivered on WhatsApp for chat journeys and SMS otherwise.
+def issue_consent_otp(db: Session, actor: Actor, institution_id: uuid.UUID, *, channel: str,
+                      phone: str | None = None) -> dict:
+    """WEZA's lender-bound consent OTP. v1.08 has no bureau OTP endpoint; issuing a code makes no bureau enquiry.
 
-    v1.08 has no bureau OTP endpoint; issuing a code makes no bureau enquiry.
+    `phone` is where the code goes: on WhatsApp, the number that will receive the money (default: the customer's
+    verified number). It is delivered on WhatsApp when that is the number the customer is chatting from, and by SMS
+    otherwise (a code sent into the same chat would prove nothing about a different number).
     """
     match_id = _require_selection(db, actor, institution_id)
     customer = db.get(Customer, actor.id)
     vault = identity.vault_read(db, customer.vault_token)
     if not vault.get("nin"):
         raise ValidationFailed("Save your National ID before verification.", code="NIN_REQUIRED")
+    phone = phone or vault["phone"]
     settings, now = get_settings(), utcnow()
     rate_limit(db, f"crb:otp:{actor.id}", 5, 900)
     for old in db.execute(select(CrbCheck).where(CrbCheck.customer_id == actor.id,
@@ -167,23 +171,25 @@ def issue_consent_otp(db: Session, actor: Actor, institution_id: uuid.UUID, *, c
                      expires_at=now + timedelta(seconds=settings.otp_ttl_seconds))
     db.add(check)
     db.flush()
-    challenge = OtpChallenge(phone_index=crypto.blind_index("phone", vault["phone"]),
+    challenge = OtpChallenge(phone_index=crypto.blind_index("phone", phone),
                               code_hash=crypto.hash_otp(code, salt), salt=salt, expires_at=check.expires_at,
                               last_sent_at=now, channel="crb", journey_id=check.id)
     db.add(challenge)
     db.flush()
     check.challenge_id = str(challenge.id)
     from weza.domains.notification.service import send_customer_message
-    delivered = send_customer_message(db, vault["phone"],
+    via = "whatsapp" if channel == "whatsapp" and phone == vault["phone"] else "sms"
+    how = ("Reply here with it" if via == "whatsapp" else
+           "Type it in your WhatsApp chat with WEZA" if channel == "whatsapp" else "Enter it in your application")
+    delivered = send_customer_message(db, phone,
         f"Your WEZA consent code for {_inst_name(db, institution_id)} is {code}. "
-        + ("Reply here with it" if channel == "whatsapp" else "Enter it in your application")
-        + " to authorise the credit bureau check. It expires in 5 minutes.",
-        channel="whatsapp" if channel == "whatsapp" else "sms", kind="otp")
+        + how + " to authorise the credit bureau check. It expires in 5 minutes.",
+        channel=via, kind="otp")
     if not delivered:
         check.status, challenge.status = "FAILED", "FAILED_DELIVERY"
         raise ValidationFailed("We couldn't send the code. Please try again.", code="OTP_DELIVERY_FAILED")
     return {"challenge_id": challenge.id, "selected_institution_id": institution_id,
-            "expires_at": check.expires_at, "masked": identity.mask_phone(vault["phone"]), "digits": 10,
+            "expires_at": check.expires_at, "masked": identity.mask_phone(phone), "digits": 10, "delivered_via": via,
             "dev_code": code if settings.otp_delivery == "display" and not settings.is_production else None}
 
 
@@ -246,10 +252,10 @@ def _ops_alert(own: Session, exc: CRBError, check: CrbCheck) -> None:
                dedupe_key=f"CRB_UNAVAILABLE:{exc.category}")
 
 
-def _fetch_report(own: Session, check: CrbCheck, client) -> CRBSummaryReport | None:
+def _fetch_report(own: Session, check: CrbCheck, client, phone: str | None = None) -> CRBSummaryReport | None:
     try:
         report = client.credit_report(check.enquiry_id, check.individual_id, reference=check.enquiry_reference
-                                      or check.enquiry_id)
+                                      or check.enquiry_id, **({"phone": phone} if phone else {}))
     except CRBConfigError as exc:
         check.error_category = exc.category
         _ops_alert(own, exc, check)
@@ -263,10 +269,11 @@ def _fetch_report(own: Session, check: CrbCheck, client) -> CRBSummaryReport | N
 
 
 def run_check(db: Session, actor: Actor, institution_id: uuid.UUID, *, channel: str,
-              challenge_id: uuid.UUID | None = None, otp: str | None = None) -> dict:
+              challenge_id: uuid.UUID | None = None, otp: str | None = None, payout_phone: str | None = None) -> dict:
     """The customer chose this lender and said "Yes" to the bureau check. Returns the outcome; never raises for a
-    bureau problem (the request continues without a report)."""
-    _require_selection(db, actor, institution_id)
+    bureau problem (the request continues without a report). `payout_phone`: compared with the numbers on the
+    bureau record of the same National ID (only the yes/no answer is kept)."""
+    _require_selection(db, actor, institution_id)  # raises unless the customer chose this lender
     customer = db.get(Customer, actor.id)
     vault = identity.vault_read(db, customer.vault_token)
     if not vault.get("nin"):
@@ -293,7 +300,7 @@ def run_check(db: Session, actor: Actor, institution_id: uuid.UUID, *, channel: 
                     "charged. Confirm with GnuGrid before running it again.", check)
             own.commit()
         if check is not None and check.status == "ENQUIRED" and client is not None:
-            report = _fetch_report(own, check, client)  # resume: same enquiry, no new charge
+            report = _fetch_report(own, check, client, payout_phone)  # resume: same enquiry, no new charge
             fresh_outcome = "REPORT" if report else None  # identity was recorded when the enquiry ran
             own.commit()
         elif check is None:
@@ -335,7 +342,7 @@ def run_check(db: Session, actor: Actor, institution_id: uuid.UUID, *, channel: 
                     elif outcome == "VERIFIED":
                         check.status, check.individual_id = "ENQUIRED", profile.individual_id
                         own.commit()  # the paid enquiry is on record before the report is requested
-                        report = _fetch_report(own, check, client)
+                        report = _fetch_report(own, check, client, payout_phone)
                         fresh_outcome = "VERIFIED"
                     else:
                         check.status, check.verified_at, fresh_outcome = outcome, utcnow(), outcome

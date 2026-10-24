@@ -43,7 +43,7 @@ export default function Commercial() {
             <Td className="num">{x.statement.billable_count} · {moneyFull(x.statement.billable_amount)}</Td>
             <Td className="num">{moneyFull(x.statement.adjustments)}</Td>
             <Td className="num font-semibold">{moneyFull(x.statement.total_due)}</Td>
-            <Td>{can("admin.commercial") && x.contract && <Button size="sm" variant="ghost" onClick={() => setEdit({ institution_id: x.institution_id, name: x.institution, c: { ...x.contract, min_match_score: 60 } })}>Edit contract</Button>}</Td>
+            <Td>{can("admin.commercial") && x.contract && <Button size="sm" variant="ghost" onClick={() => setEdit({ institution_id: x.institution_id, name: x.institution, c: { ...x.contract } })}>Edit contract</Button>}</Td>
           </tr>
         ))}
       </Table>

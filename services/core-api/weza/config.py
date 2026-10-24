@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     seed_demo: bool = False
     demo_mode: bool = True  # shows demo banners, allows OTP display delivery
     mfa_enforced: bool = False  # production: True (blueprint §10.6)
+    # Sign-in attempts allowed per IP address per 15 minutes. Only the browser test suite (every test signs in from
+    # one address) raises it; production must keep it at 100 or less.
+    login_ip_limit: int = 50
 
     # OTP (TSD §13)
     otp_delivery: str = "display"  # display | sms
@@ -51,6 +54,9 @@ class Settings(BaseSettings):
     ai_model: str = "claude-opus-5-5"
     ai_timeout_seconds: float = 20.0
     ai_server_fallbacks: bool = True
+    # Reading National ID and licence photos with the AI provider (only after the malware scan). Needs a privacy
+    # sign-off before production: set AI_DOCUMENT_EXTRACTION=false and customers type their details instead.
+    ai_document_extraction: bool = True
 
     # Channels. A value that is empty, unset or the template placeholder (REPLACE_ME) means NOT CONFIGURED:
     # the app then stays in simulator/console mode and never calls Meta or an SMS provider.
@@ -135,6 +141,8 @@ class Settings(BaseSettings):
             problems.append("development secrets (SECRET_KEY / VAULT_MASTER_KEY / BLIND_INDEX_KEY)")
         if not self.mfa_enforced:
             problems.append("MFA_ENFORCED is not true")
+        if self.login_ip_limit > 100:
+            problems.append("LOGIN_IP_LIMIT is above 100 (it is only for test environments)")
         if self.otp_delivery != "sms":
             problems.append("OTP_DELIVERY must be sms")
         if self.sms_provider == "africastalking":

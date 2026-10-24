@@ -11,7 +11,7 @@ import { useMe } from "@/components/StaffShell";
 import { Badge, Banner, Bar, Button, Card, cx, ErrorState, Field, Input, KV, Loading, Modal, ReasonChips, ScoreRing, Select, StateBadge, Textarea, useToast } from "@/components/ui";
 
 const COMPONENTS: [string, string][] = [["product_fit", "Product fit"], ["appetite_fit", "Appetite fit"], ["preference_fit", "Preference fit"], ["readiness", "Readiness"], ["capacity_fit", "Capacity"]];
-const FIELD_LABEL: Record<string, string> = { full_name: "Name", phone: "Phone", email: "Email", contact_channel: "Preferred contact", contact_window: "Contact window", nin: "NIN", business_name: "Business name", business_registered: "Business registered", employer: "Employer", employment_type: "Employment type", farm_activity: "Farming activity", monthly_turnover: "Monthly turnover", monthly_income: "Monthly income", annual_income: "Annual farm income", monthly_repayments: "Existing monthly repayments" };
+const FIELD_LABEL: Record<string, string> = { full_name: "Name", phone: "Phone", email: "Email", contact_channel: "Preferred contact", contact_window: "Contact window", nin: "NIN", business_name: "Business name", business_registered: "Business registered", employer: "Employer", employment_type: "Employment type", farm_activity: "Farming activity", monthly_turnover: "Monthly turnover", monthly_income: "Monthly income", annual_income: "Annual farm income", monthly_repayments: "Existing monthly repayments", payout_phone: "Number to receive the money", business_registration_number: "Business registration no.", trading_licence_number: "Trading licence no.", trading_licence_expiry: "Trading licence expires" };
 // The statuses an institution officer records. WEZA records what the institution reports — it never decides.
 const STATUS_ACTION: Record<string, { label: string; variant?: "secondary" | "gold" | "ghost" }> = {
   CONTACTED: { label: "Mark contacted" },
@@ -164,6 +164,7 @@ export default function Opportunity360({ params }: { params: Promise<{ id: strin
                 <IdentityBadge status={cust.verification?.identity?.status} label={cust.verification?.identity?.label} />
               </div>
               {cust.verification?.identity?.checked_at && <p className="mt-1 text-[12px] text-muted">Checked {dateTime(cust.verification.identity.checked_at)}. {cust.verification.note}</p>}
+              {cust.credit_report && <CreditReport r={cust.credit_report} />}
               {cust.documents?.length > 0 && (
                 <div className="mt-4">
                   <div className="mb-1 text-[13px] font-medium">Authorised documents</div>
@@ -391,5 +392,29 @@ function AssignModal({ open, onClose, id, members, onDone }: any) {
       <Field label="Officer"><Select value={user} onChange={(e) => setUser(e.target.value)} options={[["", "Choose…"], ...(members || []).map((m: any) => [m.id, `${m.name}${m.team ? ` · ${m.team}` : ""}`] as [string, string])]} /></Field>
       {err && <Banner tone="danger" className="mt-3">{err}</Banner>}
     </Modal>
+  );
+}
+
+const BAND_TONE: Record<string, "success" | "warning" | "danger" | "muted"> = { EXCELLENT: "success", GOOD: "success", FAIR: "warning", POOR: "danger" };
+
+function CreditReport({ r }: { r: any }) {
+  const phone = r.phone_on_record === true ? "Yes" : r.phone_on_record === false ? "No — confirm with the customer" : "Not checked";
+  return (
+    <div className="mt-4 rounded-xl border border-line p-3">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <span className="text-[13px] font-medium">Credit bureau (gnuGRID)</span>
+        {r.credit_score_band && <Badge tone={BAND_TONE[r.credit_score_band] || "muted"}>{r.credit_score_band.toLowerCase()}</Badge>}
+        {r.has_active_defaults && <Badge tone="danger">Active arrears</Badge>}
+      </div>
+      <KV items={[
+        ["Credit score", r.numeric_score != null ? `${r.numeric_score}${r.score_grade ? ` (${r.score_grade})` : ""}` : "—"],
+        ["Probability of default", r.probability_of_default || "—"],
+        ["Open loans", String(r.active_loans_count ?? 0)],
+        ["Outstanding balance", moneyFull(r.total_outstanding_balance_ugx || 0)],
+        ["Worst arrears", r.worst_days_in_arrears != null ? `${r.worst_days_in_arrears} days` : "—"],
+        ["Payout number on the bureau record", phone],
+      ]} />
+      <p className="mt-2 text-[12px] text-muted">Pulled {dateTime(r.pulled_at)} · ref {r.crb_reference_id}. {r.label}</p>
+    </div>
   );
 }

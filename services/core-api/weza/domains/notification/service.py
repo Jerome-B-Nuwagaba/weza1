@@ -132,6 +132,8 @@ def send_customer_message(db: Session, phone_e164: str, body: str, *, channel: s
                 log.warning("sms_send_failed", extra={"data": {"err": res.error_code}})
     if kind == "otp" and provider != "simulator":
         body = "[one-time code redacted]"  # only the simulator inbox needs it; never keep a real one-time code
+    elif kind == "sensitive" and provider != "simulator":
+        body = "[identity details redacted]"  # e.g. the name and NIN read from an ID, shown back for confirmation
     msg = ChannelMessage(channel=channel, to_index=crypto.blind_index("phone", phone_e164), body=body,
                          payload={"kind": kind, **(payload or {})}, provider=provider, status=status,
                          provider_message_id=wamid, error_code=error_code,

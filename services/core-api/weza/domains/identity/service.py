@@ -75,7 +75,8 @@ class OtpResult:
 
 
 def issue_otp(db: Session, phone_e164: str, *, ip: str = "", journey_id: uuid.UUID | None = None,
-              channel: str = "sms") -> OtpResult:
+              channel: str = "sms", deliver_via: str = "sms") -> OtpResult:
+    """`deliver_via`: "sms" (default) or "whatsapp" — the latter only for the number the customer is chatting from."""
     s = get_settings()
     idx = crypto.blind_index("phone", phone_e164)
     rate_limit(db, f"otp:phone:{idx}", 5, 900, "Too many codes requested for this number. Try again in 15 minutes.")
@@ -103,7 +104,7 @@ def issue_otp(db: Session, phone_e164: str, *, ip: str = "", journey_id: uuid.UU
     db.flush()
     from weza.domains.notification.service import send_customer_message
     delivered = send_customer_message(db, phone_e164, f"Your WEZA verification code is {code}. It expires in 5 "
-                                      "minutes. Never share this code.", channel="sms", kind="otp")
+                                      "minutes. Never share this code.", channel=deliver_via, kind="otp")
     if not delivered:
         ch.status = "FAILED_DELIVERY"
         return OtpResult(False, "OTP_DELIVERY_FAILED", "We couldn't send the code. Please check the number or try "
@@ -219,7 +220,7 @@ def login(db: Session, email: str, password: str, ip: str = "") -> dict:
     email = email.strip().lower()
     rate_limit(db, f"login:email:{crypto.sha256_hex(email)}", 10, 900, "Too many sign-in attempts. Try again later.")
     if ip:
-        rate_limit(db, f"login:ip:{crypto.sha256_hex(ip)}", 50, 900)
+        rate_limit(db, f"login:ip:{crypto.sha256_hex(ip)}", get_settings().login_ip_limit, 900)
     user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
     if user is None or user.status != "ACTIVE":
         crypto.verify_password(password, crypto.hash_password("timing-equaliser-xx"))

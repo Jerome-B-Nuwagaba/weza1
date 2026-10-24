@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from tests.helpers import opp_for
 from weza.consumers import preview_payload
@@ -202,3 +202,25 @@ def test_tests_never_use_real_channel_credentials_or_network():
     assert not (s.whatsapp_send_ready or s.whatsapp_webhook_ready or s.sms_ready)
     with pytest.raises(AssertionError, match="real network call"):
         httpx.post("https://graph.facebook.com/v25.0/x/messages", json={})
+
+
+def test_sign_in_attempts_per_address_are_capped_and_the_cap_is_configurable(client, monkeypatch):
+    """50 a quarter-hour by default; the browser-test container raises it, and production refuses a high value."""
+    from weza.config import Settings, get_settings
+    from weza.domains.identity import service as identity
+    from weza.platform.errors import RateLimited
+    ip = "203.0.113.77"
+    monkeypatch.setattr(get_settings(), "login_ip_limit", 3)
+    with session_scope() as db:
+        db.execute(text("DELETE FROM platform.rate_counter WHERE bucket LIKE 'login:%'"))
+    for i in range(3):
+        with session_scope() as db, pytest.raises(Exception) as err:
+            identity.login(db, f"nobody{i}@example.invalid", "x" * 12, ip=ip)
+        assert not isinstance(err.value, RateLimited)  # refused for the password, not for the address
+    with pytest.raises(RateLimited), session_scope() as db:
+        identity.login(db, "nobody9@example.invalid", "x" * 12, ip=ip)
+    with session_scope() as db:
+        db.execute(text("DELETE FROM platform.rate_counter WHERE bucket LIKE 'login:%'"))
+    assert Settings().login_ip_limit == 50
+    assert any("LOGIN_IP_LIMIT" in p for p in Settings(login_ip_limit=1000).production_problems())
+    assert not any("LOGIN_IP_LIMIT" in p for p in Settings(login_ip_limit=50).production_problems())

@@ -114,7 +114,7 @@ jobs:
       - name: Boot API container with demo seed
         run: |
           docker build -t weza-api services/core-api
-          docker run -d --name api --network host -e PORT=8000 -e ENV=dev -e SEED_DEMO=true -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/weza -e SECRET_KEY=ci-secret -e VAULT_MASTER_KEY=ci-vault-key -e BLIND_INDEX_KEY=ci-index weza-api
+          docker run -d --name api --network host -e PORT=8000 -e ENV=dev -e SEED_DEMO=true -e LOGIN_IP_LIMIT=1000 -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/weza -e SECRET_KEY=ci-secret -e VAULT_MASTER_KEY=ci-vault-key -e BLIND_INDEX_KEY=ci-index weza-api
           for i in $(seq 1 60); do curl -sf localhost:8000/healthz && break; sleep 3; done
           curl -sf localhost:8000/api/v1/public/stats | grep -q "Lakeside Bank"
       - uses: actions/setup-node@v4

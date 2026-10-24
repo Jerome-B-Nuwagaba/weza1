@@ -39,7 +39,7 @@ CUSTOMER_CONVERSATION = AgentSpec(
 )
 DOCUMENT_EXTRACTION = AgentSpec(
     "document_extraction",
-    frozenset({"classify_document", "extract_product_rules"}),
+    frozenset({"classify_document", "extract_product_rules", "read_national_id", "read_business_document"}),
     3,
 )
 PRODUCT_CONFIGURATION = AgentSpec(
@@ -144,6 +144,22 @@ def customer_profile_answer(
         {"question_key": question.get("key"), "text_length": len(text)},
         lambda: ai.interpret_answer(db, question, text, subject=subject),
         subject=subject,
+    )
+
+
+def read_national_id(db: Session, mime: str, data: bytes, *, subject: str | None = None) -> dict | None:
+    """Name and NIN from a scanned, stored National ID image. Only the size and type are logged, never the image."""
+    return run_step(
+        db, DOCUMENT_EXTRACTION, "read_national_id", {"mime": mime, "bytes": len(data)},
+        lambda: ai.read_national_id(db, mime, data, subject=subject), subject=subject,
+    )
+
+
+def read_business_document(db: Session, mime: str, data: bytes, *, subject: str | None = None) -> dict | None:
+    """Type, business name, registration/licence number and expiry from a stored business document."""
+    return run_step(
+        db, DOCUMENT_EXTRACTION, "read_business_document", {"mime": mime, "bytes": len(data)},
+        lambda: ai.read_business_document(db, mime, data, subject=subject), subject=subject,
     )
 
 

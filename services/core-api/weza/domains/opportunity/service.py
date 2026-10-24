@@ -862,6 +862,13 @@ def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
             "annual_income": facts.get("farm.annual_income"), "monthly_repayments": facts.get("finance.monthly_repayments"),
         }
         customer_block["fields"] = {k: v for k, v in available.items() if k in decision.fields and v is not None}
+        if "phone" in decision.fields and vault.get("payout_phone"):  # verified by an SMS code in the chat
+            customer_block["fields"]["payout_phone"] = vault["payout_phone"]
+        for key, field in (("business.registration_number", "business_registration_number"),
+                           ("business.licence_number", "trading_licence_number"),
+                           ("business.licence_expiry", "trading_licence_expiry")):
+            if "business_registered" in decision.fields and facts.get(key):
+                customer_block["fields"][field] = facts[key]
         from weza.domains.verification.service import summary as identity_summary
         customer_block["verification"] = {"phone": True, "nin_provided": bool(vault.get("nin")),
                                           "level": cust.verification_level,
