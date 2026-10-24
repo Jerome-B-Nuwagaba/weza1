@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useApi } from "@/lib/hooks";
 import { money } from "@/lib/format";
 import { useMe } from "@/components/StaffShell";
+import { InstitutionAskPanel } from "@/components/InstitutionAskPanel";
 import { FIELD_META } from "@/components/RuleBuilder";
 import { Banner, Button, Card, EmptyState, ErrorState, Loading, PageHeader, StateBadge, Table, Td } from "@/components/ui";
 
@@ -122,6 +123,7 @@ export default function CommandCentre() {
         )}
       </Card>
 
+      <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
       <Card title="Needs attention" subtitle="Unassigned work, missed service targets and holds.">
         {attention.length === 0 ? <p className="text-[14px] text-muted">Nothing urgent. Nicely done.</p> : (
           <ul className="divide-y divide-line">
@@ -137,6 +139,8 @@ export default function CommandCentre() {
           </ul>
         )}
       </Card>
+      <InstitutionAskPanel />
+      </div>
     </div>
   );
 }

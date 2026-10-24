@@ -41,7 +41,6 @@ const INST_NAV: [string, Item[]][] = [
     { href: "/institution/demand", label: "Demand Intelligence", icon: Map, perm: "analytics.read" },
     { href: "/institution/product-opportunity", label: "Product Opportunity", icon: Briefcase, perm: "analytics.read" },
     { href: "/institution/insights", label: "Insights", icon: Activity, perm: "analytics.read" },
-    { href: "/institution/ask", label: "Ask WEZA", icon: MessageSquareText },
     { href: "/institution/reports", label: "Outcomes & reports", icon: BarChart3, perm: "analytics.read" },
   ]],
   ["Workspace", [
