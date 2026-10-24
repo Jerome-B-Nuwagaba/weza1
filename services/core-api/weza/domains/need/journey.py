@@ -6,13 +6,14 @@ Channel-agnostic: web, Flutter and WhatsApp all drive the same graph through the
 
 import base64
 import json
+import re
 import uuid
 from datetime import timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
 
-from weza.domains.admin_config import UGANDA, region_of
+from weza.domains.admin_config import ANSWER_BANDS, UGANDA, region_of
 from weza.domains.consent import service as consent_svc
 from weza.domains.customer import service as customer_svc
 from weza.domains.customer.models import Customer, Preference
@@ -114,8 +115,50 @@ def _apply_intent(ctx: Ctx, st: dict, extracted: dict, overwrite: bool) -> dict:
 # ------------------------------------------------------------------ nodes
 
 
+# ------------------------------------------------------------------ off-topic guard (21 Oct review)
+# WEZA is a financing assistant, not a general chatbot. Only clear chit-chat is turned away: a known off-topic subject,
+# or a question with no financing words in it. Anything that could be a financing request, however it is phrased, is let
+# through, so a customer is never refused for describing their business in their own words.
+OFF_TOPIC_STRIKES = 3
+_OFF_TOPIC_SUBJECTS = re.compile(
+    r"\b(weather|joke|jokes|riddle|football|soccer|match score|politic\w*|president|election|movie|film|song|music|lyrics"
+    r"|girlfriend|boyfriend|dating|horoscope|bitcoin|crypto\w*|poem|story|recipe|homework|translate|who are you"
+    r"|your name|are you (a )?(bot|robot|human|real|ai)|chatgpt|openai)\b", re.I)
+_FINANCE_WORDS = re.compile(
+    r"\b(loan\w*|borrow\w*|lend\w*|credit|financ\w*|fund\w*|money|capital|cash|business|shop|stock|farm\w*|school|fees"
+    r"|salary|bank\w*|sacco\w*|lender\w*|institution\w*|microfinance|repay\w*|pay|equipment|expand\w*|invest\w*|ugx|shs|shilling\w*|interest|rate"
+    r"|apply|application|requirement\w*|document\w*|eligible|qualify|approv\w*|consent|weza|offer\w*|option\w*)\b", re.I)
+_QUESTION_START = re.compile(r"^(who|what|when|where|why|how|which|is|are|do|does|can|could|will|would)\b", re.I)
+
+
+def _is_off_topic(text: str) -> bool:
+    text = (text or "").strip()
+    if len(text.split()) < 3 or any(ch.isdigit() for ch in text) or _FINANCE_WORDS.search(text):
+        return False
+    return bool(_OFF_TOPIC_SUBJECTS.search(text)) or text.endswith("?") or bool(_QUESTION_START.match(text))
+
+
+def _off_topic(ctx: Ctx, st: dict, reprompt: str) -> Step:
+    """Politely steer back; after three in a row, pause the conversation instead of chatting on."""
+    strikes = st.get("offtopic", 0) + 1
+    if strikes >= OFF_TOPIC_STRIKES:
+        ctx.say("I can only help with financing requests, so I'll pause here. Message me any time you want to talk "
+                "about financing.")
+        return Step(to="SAVE_EXIT", patch={"offtopic": 0, "exit_reason": "off_topic"})
+    ctx.say("I can only help with financing requests. " + reprompt)
+    return Step(wait=Wait(REPLY, DAY), patch={"offtopic": strikes})
+
+
+_INTENT_PROMPTS = {"amount": "How much financing do you need?", "purpose": "What will you use the money for?",
+                   "customer_type": "Which best describes you: a business owner, a salaried employee or a farmer?"}
+GREET_PROMPT = "Tell me what you would like financing for, for example: I need UGX 30 million to expand my pharmacy."
+
+
 def greet(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if t.kind == "ENTER":
+        if st.get("first_text") and _is_off_topic(st["first_text"]):
+            ctx.say("Welcome to WEZA. I can only help with financing requests. " + GREET_PROMPT)
+            return Step(wait=Wait(REPLY, DAY), patch={"first_text": None, "offtopic": 1})
         if st.get("first_text"):
             return Step(to="UNDERSTAND_INTENT", patch={"last_text": st["first_text"], "first_text": None})
         ctx.say("Welcome to WEZA. Tell me what you would like financing for.",
@@ -125,7 +168,9 @@ def greet(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if not text:
         ctx.say("Tell me in your own words what you need financing for.")
         return Step(wait=Wait(REPLY, DAY))
-    return Step(to="UNDERSTAND_INTENT", patch={"last_text": text})
+    if _is_off_topic(text):
+        return _off_topic(ctx, st, GREET_PROMPT)
+    return Step(to="UNDERSTAND_INTENT", patch={"last_text": text, "offtopic": 0})
 
 
 def understand_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
@@ -156,6 +201,8 @@ def ask_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
                                                                 for k, v in CUSTOMER_TYPE_LABELS.items()])
         return Step(wait=Wait(REPLY, DAY))
     text, value = _text(t), t.payload.get("value")
+    if not value and _is_off_topic(text):
+        return _off_topic(ctx, st, _INTENT_PROMPTS.get(field, GREET_PROMPT))
     intent = dict(st.get("intent") or {})
     conf = dict(intent.get("confidence") or {})
     if field == "amount":
@@ -181,7 +228,8 @@ def ask_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
     intent["confidence"] = conf
     st2 = {**st, "intent": intent}
     _apply_intent(ctx, st2, {}, overwrite=False)
-    return Step(to="UNDERSTAND_INTENT", patch={"intent": intent, "last_text": text if field == "amount" else None})
+    return Step(to="UNDERSTAND_INTENT", patch={"intent": intent, "offtopic": 0,
+                                                   "last_text": text if field == "amount" else None})
 
 
 def _reask(ctx: Ctx, st: dict, msg: str) -> Step:
@@ -228,6 +276,8 @@ def confirm_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
     text = _text(t)
     if not text:
         return Step(wait=Wait(REPLY, DAY))
+    if _is_off_topic(text):
+        return _off_topic(ctx, st, "Tell me what to change, for example: the amount is 25 million.")
     return Step(to="REVISE_INTENT", patch={"last_text": text})
 
 
@@ -436,8 +486,10 @@ def confirm_id(ctx: Ctx, st: dict, t: Trigger) -> Step:
     read = json.loads(_dec(st["id_read_enc"]))
     if t.kind == "ENTER":
         # Sent, never kept in the conversation history (ephemeral): it carries the NIN.
+        extra = "".join(f"*{label}:* {read[k]}\n" for k, label in (("date_of_birth", "Date of birth"),
+                                                                    ("expiry_date", "Card expires")) if read.get(k))
         ctx.say(f"I read these details from your National ID:\n*Name:* {read['full_name']}\n*NIN:* {read['nin']}\n"
-                "Are they correct?", ephemeral=True,
+                f"{extra}Are they correct?", ephemeral=True,
                 quick_replies=[qr("Yes, correct", "confirm"), qr("Send another photo", "retry"),
                                qr("Type instead", "type_details")])
         return Step(wait=Wait(REPLY, DAY))
@@ -450,12 +502,24 @@ def confirm_id(ctx: Ctx, st: dict, t: Trigger) -> Step:
         for key in ("identity.full_name", "identity.nin"):
             customer_svc.upsert_fact(ctx.db, cust_id, key, read[key.split(".")[1]], source="DOCUMENT",
                                      channel=st.get("channel", "web"), confirmed=True, source_ref=ref)
+        fields = ["full_name", "nin"]
+        if read.get("date_of_birth"):  # personal data: kept in the encrypted identity vault, never shown to lenders
+            customer_svc.upsert_fact(ctx.db, cust_id, "identity.date_of_birth", read["date_of_birth"], source="DOCUMENT",
+                                     channel=st.get("channel", "web"), confirmed=True, source_ref=ref)
+            fields.append("date_of_birth")
+        if read.get("expiry_date"):
+            customer_svc.upsert_fact(ctx.db, cust_id, "identity.id_expiry", read["expiry_date"], source="DOCUMENT",
+                                     channel=st.get("channel", "web"), confirmed=True, source_ref=ref)
+            fields.append("id_expiry")
         d = ctx.db.get(Document, uuid.UUID(read["document_id"]))
         if d is not None and d.pipeline_state == "STORED":
             d.pipeline_state = "CONFIRMED"
         audit(ctx.db, _customer_actor(st), "customer.identity_from_document", "document", read["document_id"],
-              after={"fields": ["full_name", "nin"]})
+              after={"fields": fields})
         ctx.say("Thank you, your details are saved.")
+        if read.get("expiry_date") and read["expiry_date"] < utcnow().date().isoformat():
+            ctx.say(f"Note: this National ID expired on {read['expiry_date']}. You can continue, but an institution "
+                    "may ask for a current one.")
         return Step(to="BUILD_PROFILE", patch={"id_read_enc": None})
     if a in ("retry", "no"):
         return Step(to="REQUEST_ID", patch={"id_read_enc": None, "id_attempts": 0})
@@ -526,11 +590,28 @@ def _apply_business_document(ctx: Ctx, st: dict, d) -> None:
                     "current one.")
 
 
+def _bands(st: dict, q: dict) -> list | None:
+    """Tap-to-choose ranges for a money or duration question — WhatsApp only (the other channels have their own inputs)."""
+    return ANSWER_BANDS.get(q["key"]) if st.get("channel") == "whatsapp" and q["type"] in ("money", "months") else None
+
+
+def _pick_band(bands: list, tapped, text: str):
+    """The band value for a tapped option (by its saved value) or a typed label such as "UGX 1M - 3M". A typed
+    number is NOT matched here: it goes through the normal parser, which understands units ("2 years")."""
+    if tapped is not None:
+        return next((v for v, _ in bands if str(v) == str(tapped)), None)
+    low = " ".join(text.lower().split())
+    return next((v for v, label in bands if label.lower() == low), None)
+
+
 def ask_profile(ctx: Ctx, st: dict, t: Trigger) -> Step:
     q = st["pending_q"]
+    bands = _bands(st, q)
     if t.kind == "ENTER":
         replies = []
-        if q["type"] == "choice":
+        if bands:
+            replies = [qr(label, "answer", str(v)) for v, label in bands]
+        elif q["type"] == "choice":
             replies = [qr(lbl, "answer", val) for val, lbl in q["options"]]
         elif q["type"] == "yesno":
             replies = [qr("Yes", "answer", "yes"), qr("No", "answer", "no")]
@@ -538,14 +619,17 @@ def ask_profile(ctx: Ctx, st: dict, t: Trigger) -> Step:
             replies = [qr(lbl, "answer", code) for code, lbl in UGANDA["sectors"].items()]
         if not q.get("required"):
             replies.append(qr("Skip", "skip"))
-        ctx.say(q["prompt"], quick_replies=replies)
+        ctx.say(q["prompt"], quick_replies=replies,
+                **({"hint": "Tap a range, or type an exact figure."} if bands else {}))
         ctx.card("question", {"key": q["key"], "type": q["type"], "required": q.get("required", False),
                               "options": q.get("options"), "progress": _progress(ctx, st)})
         return Step(wait=Wait(REPLY, DAY), patch={"profile_questions": st.get("profile_questions", 0) + 1})
     if _action(t) == "skip" and not q.get("required"):
         return Step(to="BUILD_PROFILE", patch={"skipped": [*(st.get("skipped") or []), q["key"]]})
     raw = t.payload.get("value") if t.payload.get("value") not in (None, "") else _text(t)
-    value = _parse_answer(q, str(raw))
+    picked = (_pick_band(bands, t.payload.get("value") if _action(t) == "answer" else None, _text(t))
+              if bands else None)
+    value = picked if picked is not None else _parse_answer(q, str(raw))
     source, confidence = "CUSTOMER", 1.0
     if value is None and str(raw).strip():
         ai_val, ai_conf = agents.customer_profile_answer(ctx.db, q, str(raw), subject=st["need_id"])
@@ -734,6 +818,8 @@ def waiting_room(ctx: Ctx, st: dict, t: Trigger) -> Step:
     a = _action(t)
     if a == "_market_match":
         ctx.say("Good news — a new option may fit your financing need. Take a look:")
+        return Step(to="PRESENT_OPTIONS")
+    if a == "show_options":  # tapped on an institution-interest message
         return Step(to="PRESENT_OPTIONS")
     if a == "leave":
         from weza.domains.matching.models import WaitingEntry
@@ -1069,7 +1155,7 @@ def tracking(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if a == "_declined":
         return Step(to="RESCUE_ASK", patch={"declined_opportunity_id": t.payload.get("value"),
                                             "decline_reason": t.payload.get("reason")})
-    if a == "another":
+    if a in ("another", "show_options"):
         return Step(to="PRESENT_OPTIONS")
     lines = []
     for oid in st.get("opportunity_ids") or []:

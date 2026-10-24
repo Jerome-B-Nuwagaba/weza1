@@ -57,6 +57,28 @@ COMMON = [
      "request faster. You can reply 'skip'.", "type": "nin", "required": False},
 ]
 
+# Tap-to-choose answers for money and duration questions on WhatsApp (21 Oct review: less typing). Each entry is
+# (value saved, label shown); the customer may still type an exact figure. The saved value is the CONSERVATIVE end of
+# the range for what the customer will be judged on: the lower bound for income, turnover and time in business (never
+# claim more than they said), the upper bound for existing repayments (never understate their debt).
+_M = 1_000_000
+ANSWER_BANDS = {
+    "business.monthly_turnover": [(0, "Under UGX 1M"), (1 * _M, "UGX 1M - 3M"), (3 * _M, "UGX 3M - 5M"),
+                                  (5 * _M, "UGX 5M - 10M"), (10 * _M, "UGX 10M - 30M"), (30 * _M, "Over UGX 30M")],
+    "finance.monthly_repayments": [(0, "None"), (500_000, "Up to UGX 500K"), (1 * _M, "UGX 500K - 1M"),
+                                   (3 * _M, "UGX 1M - 3M"), (5 * _M, "UGX 3M - 5M"), (10 * _M, "Over UGX 5M")],
+    "employment.monthly_net_income": [(0, "Under UGX 500K"), (500_000, "UGX 500K - 1M"), (1 * _M, "UGX 1M - 2M"),
+                                      (2 * _M, "UGX 2M - 4M"), (4 * _M, "UGX 4M - 8M"), (8 * _M, "Over UGX 8M")],
+    "farm.annual_income": [(0, "Under UGX 2M"), (2 * _M, "UGX 2M - 5M"), (5 * _M, "UGX 5M - 10M"),
+                           (10 * _M, "UGX 10M - 20M"), (20 * _M, "UGX 20M - 50M"), (50 * _M, "Over UGX 50M")],
+    "need.tenor_months": [(3, "3 months"), (6, "6 months"), (12, "12 months"), (18, "18 months"),
+                          (24, "24 months"), (36, "36 months")],
+}
+_TIME_BANDS = [(0, "Under 6 months"), (6, "6 - 12 months"), (12, "1 - 2 years"), (24, "2 - 5 years"),
+               (60, "5 - 10 years"), (120, "Over 10 years")]
+for _key in ("business.age_months", "employment.months", "farm.operating_months"):
+    ANSWER_BANDS[_key] = _TIME_BANDS
+
 QUESTION_PATHS = {
     "SME": COMMON + [
         {"key": "business.name", "prompt": "What is the name of your business?", "type": "text", "required": True},

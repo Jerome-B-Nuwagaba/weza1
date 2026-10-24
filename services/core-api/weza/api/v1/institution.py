@@ -925,7 +925,7 @@ def interest(preview_id: uuid.UUID, body: InterestIn, actor: Actor = A, db: Sess
     if body.state == "NOT_INTERESTED" and body.reason not in opp_svc.REASON_SIGNALS:
         raise ValidationFailed("Tell us why you're passing — it feeds your near-match intelligence.",
                                code="REASON_REQUIRED")
-    p.interest_state, p.interest_by = body.state, actor.id
+    previous, p.interest_state, p.interest_by = p.interest_state, body.state, actor.id
     signal = db.execute(select(ReasonSignal).where(ReasonSignal.preview_id == p.id)).scalar_one_or_none()
     if body.state == "NOT_INTERESTED":
         if signal is None:
@@ -937,19 +937,20 @@ def interest(preview_id: uuid.UUID, body: InterestIn, actor: Actor = A, db: Sess
         db.delete(signal)  # the institution changed its mind; the pass reason no longer applies
     audit(db, actor, "preview.interest", "preview", p.id,
           after={"state": body.state, "reason": body.reason if body.state == "NOT_INTERESTED" else None})
-    if body.state in ("INTERESTED", "NEED_MORE_INFORMATION"):
+    if body.state in ("INTERESTED", "NEED_MORE_INFORMATION") and body.state != previous:  # not on every repeat click
         from weza.domains.need.models import FinancialNeed
         from weza.domains.notification.service import notify_customer
         need = db.get(FinancialNeed, p.need_id)
         if need and need.customer_id and body.state == "INTERESTED":
             notify_customer(db, need.customer_id, "InstitutionInterest", title="An institution is interested",
-                            body="A participating institution is interested in your request. Open WEZA to review your "
-                                 "options — nothing is shared unless you choose to.", link="/start")
+                            body="A participating institution is interested in your request. Nothing is shared with "
+                                 "it unless you choose to.", link="/start",
+                            quick_replies=[{"label": "Show my options", "action": "show_options", "value": None}])
         elif need and need.customer_id:
             # Pre-consent: the institution is not named and receives nothing; the customer may strengthen the request.
             notify_customer(db, need.customer_id, "InstitutionNeedsMore", title="Your request could go further",
                             body="A participating institution would like more detail before it can consider your "
-                                 "request. Adding documents or completing your profile in WEZA may open more options.",
+                                 "request. Sending a document or completing your profile may open more options.",
                             link="/c/documents")
     return {"ok": True, "note": "Interest is not approval and does not disclose the customer's identity."}
 

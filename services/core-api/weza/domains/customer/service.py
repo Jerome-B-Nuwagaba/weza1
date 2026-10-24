@@ -24,7 +24,8 @@ MATERIAL_KEYS = {
 }
 FACT_FRESH_DAYS = 180
 
-VAULT_KEYS = {"identity.full_name": "full_name", "identity.nin": "nin", "identity.email": "email"}
+VAULT_KEYS = {"identity.full_name": "full_name", "identity.nin": "nin", "identity.email": "email",
+              "identity.date_of_birth": "date_of_birth"}
 
 FIELD_LABELS = {
     "identity.full_name_captured": "Full name", "identity.nin_captured": "National ID (NIN)",

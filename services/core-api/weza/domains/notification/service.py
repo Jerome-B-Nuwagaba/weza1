@@ -281,19 +281,28 @@ def retry_failed_channel_messages(db: Session, now: datetime | None = None) -> i
     return n
 
 
+def _reply_id(b: dict) -> str:
+    return (f"{b['action']}:{b['value']}" if b.get("value") else (b.get("action") or b["label"]))[:256]
+
+
 def _whatsapp_send(phone_e164: str, body: str, payload: dict | None) -> SendResult:
+    """Up to 3 options are buttons, 4 to 10 a tap-to-pick list, more than that plain text the customer answers by
+    typing. Replies come back through the same id format ("action:value") whichever way they were shown."""
     buttons = (payload or {}).get("quick_replies") or []
+    to = phone_e164.lstrip("+")
     if buttons and len(buttons) <= 3:
-        msg = {"messaging_product": "whatsapp", "to": phone_e164.lstrip("+"), "type": "interactive",
+        msg = {"messaging_product": "whatsapp", "to": to, "type": "interactive",
                "interactive": {"type": "button", "body": {"text": body[:1024]}, "action": {"buttons": [
-                   {"type": "reply", "reply": {"id": (f"{b['action']}:{b['value']}" if b.get("value")
-                                                      else (b.get("action") or b["label"]))[:256],
-                                               "title": b["label"][:20]}} for b in buttons]}}}
+                   {"type": "reply", "reply": {"id": _reply_id(b), "title": b["label"][:20]}} for b in buttons]}}}
+    elif buttons and len(buttons) <= 10:
+        msg = {"messaging_product": "whatsapp", "to": to, "type": "interactive",
+               "interactive": {"type": "list", "body": {"text": body[:1024]},
+                               "action": {"button": "Choose", "sections": [{"title": "Options", "rows": [
+                                   {"id": _reply_id(b), "title": b["label"][:24]} for b in buttons]}]}}}
     else:
         if buttons:
             body = body + "\n\nReply with: " + " / ".join(b["label"] for b in buttons)
-        msg = {"messaging_product": "whatsapp", "to": phone_e164.lstrip("+"), "type": "text",
-               "text": {"body": body[:4096]}}
+        msg = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": body[:4096]}}
     return _graph_post(msg)
 
 

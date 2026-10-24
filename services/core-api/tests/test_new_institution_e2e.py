@@ -97,8 +97,9 @@ def test_new_institution_receives_a_whatsapp_customers_opportunity(client, as_us
     assert journeys_for(phone)[0][1] == "PAYOUT_NUMBER"
     send(client, __import__("scripts.replay_whatsapp_webhook", fromlist=["x"]).build(
         "button", phone=phone, button_id="payout_this"))
-    sms = next(m.body for m in reversed(out_messages(phone)) if m.channel == "sms")
-    code = re.search(r"\b(\d{6})\b", sms).group(1)
+    # it is the chat number, so the code arrives in the chat itself (any other number would get an SMS)
+    sent = next(m.body for m in reversed(out_messages(phone)) if (m.payload or {}).get("kind") == "otp")
+    code = re.search(r"\b(\d{6})\b", sent).group(1)
     text_msg(client, phone, code)
     assert journeys_for(phone)[0][1] == "TRACKING"
     assert "OPP-" in " ".join(m.body for m in _bot(phone))  # the customer is told the reference

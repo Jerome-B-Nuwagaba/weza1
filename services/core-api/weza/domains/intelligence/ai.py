@@ -66,6 +66,7 @@ class NationalIdV1(BaseModel):
     given_names: str | None = None
     nin: str | None = Field(None, description="The 14-character NIN exactly as printed")
     date_of_birth: str | None = Field(None, description="YYYY-MM-DD")
+    expiry_date: str | None = Field(None, description="Card expiry, YYYY-MM-DD")
     confidence: float = 0.0
 
 
@@ -323,8 +324,8 @@ def read_national_id(db: Session, mime: str, data: bytes, subject: str | None = 
     if not get_settings().ai_document_extraction:
         return None
     system = SYSTEM_BASE.format(country="Uganda") + (
-        " Read the attached Ugandan National ID card. Copy the surname, given names and NIN (14 characters, "
-        "starting CM or CF, e.g. CM12345678ABCD) exactly as printed. If it is not a National ID, or any of these is "
+        " Read the attached Ugandan National ID card. Copy the surname, given names, NIN (14 characters, "
+        "starting CM or CF, e.g. CM12345678ABCD), date of birth and card expiry date exactly as printed. If it is not a National ID, or any of these is "
         "unreadable, set is_national_id false or return null for that value. Confidence is 0..1.")
     ai = _call(db, "read_national_id", NationalIdV1, system, "Read this document.", subject=subject,
                allowed_modes=("AVAILABLE",), attachment=(mime, data))
@@ -334,7 +335,21 @@ def read_national_id(db: Session, mime: str, data: bytes, subject: str | None = 
     name = parsing.parse_name(f"{ai.given_names or ''} {ai.surname or ''}".strip())
     if not nin or not name:
         return None
-    return {"full_name": name, "nin": nin, "date_of_birth": (ai.date_of_birth or "")[:10] or None}
+    return {"full_name": name, "nin": nin, "date_of_birth": _plausible_date(ai.date_of_birth, born=True),
+            "expiry_date": _plausible_date(ai.expiry_date, born=False)}
+
+
+def _plausible_date(value: str | None, *, born: bool) -> str | None:
+    """An ISO date, or None when it is missing, malformed or implausible (a birth date must make the holder 16 to
+    110 years old; an expiry date within 15 years either way). The rest of the ID is still used without it."""
+    from datetime import date
+    try:
+        d = date.fromisoformat((value or "")[:10])
+    except ValueError:
+        return None
+    years = (date.today() - d).days / 365.25
+    ok = 16 <= years <= 110 if born else -15 <= years <= 15
+    return d.isoformat() if ok else None
 
 
 def read_business_document(db: Session, mime: str, data: bytes, subject: str | None = None) -> dict | None:

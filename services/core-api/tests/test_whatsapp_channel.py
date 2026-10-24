@@ -298,6 +298,9 @@ def test_whatsapp_crb_consent_code_and_bureau_check_stay_in_chat(client, wa_live
 
     for _ in range(30):
         state = view()
+        if state["node"] == "REQUEST_BUSINESS_DOCS":  # a business is asked for its licences; this customer has none
+            text_msg(client, phone, "skip")
+            continue
         if state["node"] != "ASK_PROFILE":
             break
         question = next(o["data"] for o in state["outputs"] if o.get("card") == "question")
@@ -313,7 +316,11 @@ def test_whatsapp_crb_consent_code_and_bureau_check_stay_in_chat(client, wa_live
     send(client, rw.build("button", phone=phone, button_id=f"agree:{template}"))
     assert view()["node"] == "CRB_CHECK" and not gnugrid.MOCK_BUREAU.enquiries
     send(client, rw.build("button", phone=phone, button_id=f"crb_consent:{consent}"))
+    # Either way the customer is next asked which number should receive the money; the chat number is one tap
+    assert view()["node"] == "PAYOUT_NUMBER" and not gnugrid.MOCK_BUREAU.enquiries
+    send(client, rw.build("button", phone=phone, button_id="payout_this"))
     if consent == "yes":
+        # one code proves the number AND authorises the bureau check; it goes into the chat because it is the chat number
         otp_message = next(m for m in reversed(out_messages(phone)) if m.payload.get("kind") == "otp")
         assert otp_message.channel == "whatsapp" and otp_message.provider == "whatsapp_cloud"
         assert not gnugrid.MOCK_BUREAU.enquiries
@@ -327,8 +334,12 @@ def test_whatsapp_crb_consent_code_and_bureau_check_stay_in_chat(client, wa_live
                                                        CrbCheck.status == "VERIFIED")).scalar_one()
             assert check.consent_channel == "whatsapp"
     else:
+        # no bureau consent: the payout number is still proven with an ordinary 6-digit code, and no bureau call is made
         assert not gnugrid.MOCK_BUREAU.enquiries
-        assert not any(m.payload.get("kind") == "otp" for m in out_messages(phone))
+        code = next(re.search(r"\b\d{6}\b", c["json"].get("text", {}).get("body", "")).group()
+                    for c in reversed(http.calls) if "Your WEZA verification code" in c["json"].get("text", {}).get("body", ""))
+        text_msg(client, phone, code)
+        assert not gnugrid.MOCK_BUREAU.enquiries
     assert view()["node"] == "TRACKING"
 
 
@@ -540,12 +551,23 @@ def test_outbound_buttons_become_interactive_message(wa_live, http):
     assert all(len(b["reply"]["title"]) <= 20 for b in buttons)
 
 
-def test_outbound_more_than_three_buttons_falls_back_to_text(wa_live, http):
-    qr = [{"label": f"Option {i}", "action": "pick", "value": str(i)} for i in range(4)]
+def test_outbound_four_to_ten_options_become_a_tap_to_pick_list(wa_live, http):
+    qr = [{"label": f"Option {i} with a long label", "action": "pick", "value": str(i)} for i in range(4)]
     with session_scope() as db:
         notify.send_customer_message(db, "+" + fake_phone(), "Choose", channel="whatsapp", payload={"quick_replies": qr})
     msg = http.calls[0]["json"]
-    assert msg["type"] == "text" and "Reply with: Option 0 / Option 1 / Option 2 / Option 3" in msg["text"]["body"]
+    assert msg["type"] == "interactive" and msg["interactive"]["type"] == "list"
+    rows = msg["interactive"]["action"]["sections"][0]["rows"]
+    assert [r["id"] for r in rows] == ["pick:0", "pick:1", "pick:2", "pick:3"]  # same ids as buttons: replies parse alike
+    assert all(len(r["title"]) <= 24 for r in rows)
+
+
+def test_outbound_more_than_ten_options_fall_back_to_text(wa_live, http):
+    qr = [{"label": f"Option {i}", "action": "pick", "value": str(i)} for i in range(11)]
+    with session_scope() as db:
+        notify.send_customer_message(db, "+" + fake_phone(), "Choose", channel="whatsapp", payload={"quick_replies": qr})
+    msg = http.calls[0]["json"]
+    assert msg["type"] == "text" and "Reply with: Option 0 / Option 1" in msg["text"]["body"]
 
 
 @pytest.mark.parametrize("behaviour", ["http500", "timeout"])
