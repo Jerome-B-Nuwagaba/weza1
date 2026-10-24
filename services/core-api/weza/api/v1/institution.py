@@ -50,7 +50,7 @@ from weza.domains.trust.models import AuditEvent, PolicyDecisionLog
 from weza.domains.trust.service import audit
 from weza.domains.verification import service as verification
 from weza.platform.context import Actor
-from weza.platform.controls import flag, idempotent
+from weza.platform.controls import flag, idempotent, rate_limit
 from weza.platform.db import utcnow
 from weza.platform.errors import NotFound, ValidationFailed
 
@@ -151,6 +151,7 @@ def _own_team(db: Session, actor: Actor, team_id: str | None) -> uuid.UUID | Non
 
 @router.post("/users", status_code=201)
 def add_user(body: UserIn, actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:add_user:{actor.id}", 100, 3600)
     policy.require(actor, "users.manage")
     roles = [r for r in body.roles if r in policy.INST_ROLES]
     if not roles:
@@ -201,6 +202,7 @@ class PasswordResetIn(BaseModel):
 def reset_user_password(user_id: uuid.UUID, body: PasswordResetIn, actor: Actor = A, db: Session = DB):
     """Institution administrator sets a new password for a colleague (e.g. forgotten password). Their sessions end;
     share the new password with them securely."""
+    rate_limit(db, f"institution:reset_user_password:{actor.id}", 10, 900)
     policy.require(actor, "users.manage")
     m = db.execute(select(Membership).where(Membership.user_id == user_id,
                                                   Membership.institution_id == actor.institution_id)).scalar_one_or_none()
@@ -249,7 +251,6 @@ def set_my_phone(body: PhoneIn, actor: Actor = A, db: Session = DB):
 def change_my_password(body: PasswordChangeIn, actor: Actor = A, db: Session = DB):
     """Any institution user changes their own password. All their other sessions are signed out."""
     from weza.platform import crypto
-    from weza.platform.controls import rate_limit
     rate_limit(db, f"pwchange:{actor.id}", 5, 900, "Too many attempts. Try again in 15 minutes.")
     user = db.get(User, actor.id)
     if not crypto.verify_password(body.current_password, user.password_hash):
@@ -266,6 +267,7 @@ class TeamIn(BaseModel):
 
 @router.post("/teams", status_code=201)
 def add_team(body: TeamIn, actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:add_team:{actor.id}", 100, 3600)
     policy.require(actor, "team.manage")
     t = Team(institution_id=actor.institution_id, name=body.name)
     db.add(t)
@@ -358,6 +360,7 @@ class ProductIn(BaseModel):
 
 @router.post("/products", status_code=201)
 def create_product(body: ProductIn, actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:create_product:{actor.id}", 200, 3600)
     pv = product_svc.create(db, actor, body.model_dump(), provenance=body.provenance)
     return {"product_id": str(pv.product_id), "version": _pv_dict(pv)}
 
@@ -536,6 +539,7 @@ class AppetiteIn(BaseModel):
 
 @router.post("/appetites", status_code=201)
 def create_appetite(body: AppetiteIn, actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:create_appetite:{actor.id}", 200, 3600)
     av = appetite_svc.create(db, actor, body.model_dump())
     return {"appetite_id": str(av.appetite_id), "version": _av_dict(av)}
 
@@ -557,6 +561,7 @@ def _draftish(db: Session, appetite_id) -> AppetiteVersion:
 
 @router.post("/appetites/{appetite_id}/simulate")
 def simulate_appetite(appetite_id: uuid.UUID, actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:simulate_appetite:{actor.id}", 30, 600)
     appetite_svc.get_owned(db, actor, appetite_id)
     return appetite_svc.simulate_version(db, actor, _draftish(db, appetite_id))
 
@@ -598,6 +603,7 @@ class WhatIfIn(BaseModel):
 
 @router.post("/simulate")
 def what_if(body: WhatIfIn, actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:what_if:{actor.id}", 30, 600)
     return appetite_svc.simulate_adhoc(db, actor, body.model_dump())
 
 
@@ -606,6 +612,7 @@ def what_if(body: WhatIfIn, actor: Actor = A, db: Session = DB):
 
 @router.post("/sandbox/runs")
 def sandbox(actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:sandbox:{actor.id}", 20, 600)
     policy.require(actor, "sandbox.run")
     from weza.domains.intelligence.sandbox import run_sandbox
     return run_sandbox(db, actor)
@@ -689,7 +696,6 @@ def put_channels(body: ChannelsIn, actor: Actor = A, db: Session = DB):
 @router.post("/notification-channels/teams/test")
 def test_teams(actor: Actor = A, db: Session = DB):
     """Post a test card to the connected Teams channel, so the administrator sees it work before relying on it."""
-    from weza.platform.controls import rate_limit
     policy.require(actor, "institution.settings")
     rate_limit(db, f"teams:test:{actor.institution_id}", 6, 600, "Too many test messages. Try again in a few minutes.")
     inst = db.get(Institution, actor.institution_id)
@@ -1121,6 +1127,7 @@ class AskIn(BaseModel):
 
 @router.post("/ask")
 def ask(body: AskIn, actor: Actor = A, db: Session = DB):
+    rate_limit(db, f"institution:ask:{actor.id}", 30, 600)
     return assistant.ask(db, actor, body.question)
 
 

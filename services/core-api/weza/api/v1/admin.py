@@ -37,6 +37,7 @@ from weza.domains.trust import policy, retention
 from weza.domains.trust.models import AuditEvent, Decision
 from weza.domains.trust.service import audit
 from weza.platform.context import Actor
+from weza.platform.controls import rate_limit
 from weza.platform.db import session_scope, utcnow
 from weza.platform.errors import Forbidden, InvalidTransition, NotFound, ValidationFailed
 from weza.platform.events import emit, replay_delivery
@@ -232,6 +233,7 @@ class LookupIn(BaseModel):
 @router.post("/customers/lookup")
 def customer_lookup(body: LookupIn, actor: Actor = W, db: Session = DB):
     """Support lookup via the Identity Vault — requires a reason, is audited, masks identifiers (blueprint A-05)."""
+    rate_limit(db, f"admin:customer_lookup:{actor.id}", 30, 600)
     try:
         policy.require(actor, "admin.vault_lookup")
         require_step_up(actor)
@@ -481,6 +483,7 @@ class RetentionRun(BaseModel):
 def retention_run(body: RetentionRun, actor: Actor = W, db: Session = DB):
     """Carry out the retention policy now (it also runs daily when RETENTION_ENABLED). Deletes data, so it needs MFA
     step-up and a recorded reason."""
+    rate_limit(db, f"admin:retention_run:{actor.id}", 5, 3600)
     policy.require(actor, "admin.config")
     require_step_up(actor)
     report = retention.run(db, apply=True)
@@ -851,6 +854,5 @@ def whatsapp_signup_connect(body: SignupIn, actor: Actor = W, db: Session = DB):
     policy.require(actor, "admin.config")
     require_step_up(actor)
     from weza.domains.notification import whatsapp_onboarding
-    from weza.platform.controls import rate_limit
     rate_limit(db, f"es:{actor.id}", 10, 3600)
     return whatsapp_onboarding.connect(db, actor, code=body.code, waba_id=body.waba_id or None, event=body.event)

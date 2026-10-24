@@ -15,6 +15,7 @@ from weza.api.deps import DB, require_step_up, weza_actor
 from weza.domains.institution import staff as staff_svc
 from weza.domains.trust import policy
 from weza.platform.context import Actor
+from weza.platform.controls import rate_limit
 
 router = APIRouter(prefix="/staff", tags=["staff"])
 W = Depends(weza_actor)
@@ -47,6 +48,7 @@ class InstitutionIn(BaseModel):
 @router.post("/institutions", status_code=201)
 def create_institution(body: InstitutionIn, actor: Actor = W, db: Session = DB):
     """Create an institution in Draft. It receives nothing until it is activated."""
+    rate_limit(db, f"staff:create_institution:{actor.id}", 100, 3600)
     inst = staff_svc.create_draft(db, actor, body.model_dump())
     return staff_svc.detail(db, actor, inst)
 
@@ -90,6 +92,7 @@ class AdministratorIn(BaseModel):
 @router.post("/institutions/{inst_id}/administrator", status_code=201)
 def create_administrator(inst_id: uuid.UUID, body: AdministratorIn, actor: Actor = W, db: Session = DB):
     """Create the institution's administrator. Share the initial password with them securely."""
+    rate_limit(db, f"staff:create_administrator:{actor.id}", 100, 3600)
     inst = staff_svc.get(db, inst_id)
     created = staff_svc.create_administrator(db, actor, inst, body.model_dump())
     return {**staff_svc.detail(db, actor, inst), "administrator": created}

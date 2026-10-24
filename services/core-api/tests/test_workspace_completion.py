@@ -141,3 +141,11 @@ def test_an_officers_brief_covers_only_their_own_work(client, as_user):
         brief = briefs.daily(db, briefs.actor_for(db, user, member))
     assert brief["body"].startswith(("Nothing new", "You have"))
     assert "Your institution has" not in brief["body"]
+
+
+def test_password_resets_are_rate_limited_per_administrator(client, as_user):
+    w = _new_institution(client, as_user)
+    off = w["users"]["off"]["id"]
+    codes = [client.post(f"/api/v1/inst/users/{off}/password", headers=w["admin"],
+                         json={"new_password": PW}).status_code for _ in range(11)]
+    assert codes[-1] == 429 and 429 not in codes[:10]
