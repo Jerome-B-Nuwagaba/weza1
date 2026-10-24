@@ -39,7 +39,7 @@ def test_logs_redact_personal_and_highly_sensitive_fields_but_not_everything():
 
 
 def test_a_field_the_classification_does_not_know_is_never_shown_to_an_institution(client, as_user, journey, monkeypatch):
-    _, oid, owner = routed_to_lakeside(journey, "0772480002")
+    _, oid, owner = routed_to_lakeside(journey, "0772480902")
     headers = as_user(owner)
     shown = client.get(f"/api/v1/inst/opportunities/{oid}", headers=headers).json()["customer"]["fields"]
     assert "phone" in shown and "full_name" in shown

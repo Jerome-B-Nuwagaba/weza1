@@ -9,7 +9,7 @@ from datetime import timedelta
 
 import httpx
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 import weza.integrations.gnugrid as gnugrid
 from tests.helpers import SME_ANSWERS
@@ -21,7 +21,6 @@ from weza.domains.customer.service import current_facts
 from weza.domains.identity.models import User
 from weza.domains.institution.models import Institution
 from weza.domains.misc_models import ReviewItem
-from weza.domains.need.models import ConversationMessage
 from weza.domains.opportunity.models import Assignment, Opportunity
 from weza.domains.trust.models import AuditEvent
 from weza.domains.verification.models import IdentityCheck
@@ -245,18 +244,6 @@ def test_production_refuses_the_mock_and_names_missing_crb_settings():
 def _lakeside() -> uuid.UUID:
     with session_scope() as db:
         return db.execute(select(Institution.id).where(Institution.display_name == "Lakeside Bank")).scalar_one()
-
-
-@pytest.fixture(autouse=True)
-def quiet_integrity_history():
-    """These journeys all start with the same sentence from the same test client. Every other test module does too, so
-    in a full run the marketplace-integrity "same message" and "same device" patterns would fire for a perfectly
-    ordinary customer and hold the request. History from earlier tests is moved out of the pattern windows."""
-    with session_scope() as db:
-        db.execute(update(Customer).values(device_hash=None))
-        db.execute(update(ConversationMessage).where(ConversationMessage.received_at >= utcnow() - timedelta(days=1))
-                   .values(received_at=utcnow() - timedelta(days=3)))
-    yield
 
 
 def _selected(journey, phone: str, nin: str | None = None, name: str = "Grace Nakato", select_lender: bool = True):

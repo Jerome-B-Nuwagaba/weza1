@@ -64,12 +64,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -t weza-api services/core-api
       - name: Scan the image for fixable critical vulnerabilities
-        uses: aquasecurity/trivy-action@v0.33.1
-        with:
-          image-ref: weza-api
-          severity: CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
+        run: >
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.65.0
+          image --severity CRITICAL --ignore-unfixed --exit-code 1 --no-progress weza-api
       - name: Boot container (migrate + seed + serve) and smoke-test
         run: |
           docker run -d --name api --network host -e PORT=8000 -e ENV=dev -e SEED_DEMO=true             -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/weza             -e SECRET_KEY=ci-secret -e VAULT_MASTER_KEY=ci-vault-key -e BLIND_INDEX_KEY=ci-index weza-api
