@@ -53,6 +53,19 @@ export function AwaitingBadge({ o }: { o: any }) {
   return <Badge tone="gold">Waiting for customer{o.open_info_requests > 1 ? ` (${o.open_info_requests})` : ""}</Badge>;
 }
 
+const READINESS: Record<string, string> = { READY: "Ready now", ALMOST: "Almost ready" };
+
+/** WEZA Quality Score (how complete and verified the request is) and readiness: two facts about the REQUEST, kept apart
+ * from the match score and never a credit score or an approval probability (FSD-SCR-001/002, BRD §9). */
+export function QualityBadges({ o }: { o: any }) {
+  return (
+    <>
+      {o.quality_score != null && <span title="WEZA Quality Score: how complete and verified this request is. Not a credit score." className="num rounded-md border border-line px-1.5 py-0.5 text-[12px] text-muted">Quality {o.quality_score}</span>}
+      {o.readiness && <Badge tone={o.readiness === "READY" ? "success" : "warning"}>{READINESS[o.readiness] || o.readiness}</Badge>}
+    </>
+  );
+}
+
 export function OpportunityRow({ o, compact }: { o: any; compact?: boolean }) {
   return (
     <Link href={`/institution/opportunities/${o.id}`} className={cx("flex gap-4 border-b border-line px-4 py-3.5 last:border-0 hover:bg-canvas", o.match_score >= 90 && "bg-gold-100/30")}>
@@ -62,6 +75,7 @@ export function OpportunityRow({ o, compact }: { o: any; compact?: boolean }) {
           <span className="num font-semibold text-ink">{money(o.amount)}</span>
           <span className="truncate text-ink">{o.need || o.purpose_category}</span>
           <PriorityBadge p={o.priority} />
+          <QualityBadges o={o} />
           <FreshnessBadge f={o.freshness} />
           {o.integrity_hold && <Badge tone="warning">On hold</Badge>}
           <AwaitingBadge o={o} />

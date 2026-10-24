@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from weza.domains.customer.models import Document, DocumentBlob
 from weza.domains.trust.service import audit
-from weza.platform import crypto
+from weza.platform import classification, crypto
 from weza.platform.context import Actor
 from weza.platform.errors import ValidationFailed
 from weza.platform.events import emit
@@ -23,8 +23,6 @@ DOC_TYPES = {
 }
 MAGIC = {b"%PDF": "application/pdf", b"\xff\xd8\xff": "image/jpeg", b"\x89PNG": "image/png"}
 EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!"
-CLASSIFICATION = {"national_id": "HIGHLY_SENSITIVE", "bank_statement": "HIGHLY_SENSITIVE",
-                  "mobile_money_statement": "HIGHLY_SENSITIVE", "payslip": "PERSONAL"}
 
 
 class BasicScanner:
@@ -104,7 +102,7 @@ def ingest(db: Session, customer_id: uuid.UUID, *, doc_type: str, filename: str,
         raise ValidationFailed("Choose a document type.")
     d = Document(customer_id=customer_id, need_id=need_id, doc_type=doc_type, filename=filename[:200],
                  mime=declared_mime[:80], size=len(data), sha256=crypto.sha256_hex(data), pipeline_state="UPLOADED",
-                 classification=CLASSIFICATION.get(doc_type, "PERSONAL"))
+                 classification=classification.document_level(doc_type))
     db.add(d)
     db.flush()
     if len(data) > MAX_BYTES:

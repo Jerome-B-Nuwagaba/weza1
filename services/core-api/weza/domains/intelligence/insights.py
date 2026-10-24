@@ -29,6 +29,19 @@ from weza.platform.models import EventDelivery, GraphInstance
 
 PROGRESSING = {"INFORMATION_REQUESTED", "PROCEEDING", "SUBMITTED_TO_INSTITUTION"}
 
+# FSD-CMD-002: cards adapt to the user's role. All eleven FSD-CMD-001 cards stay available; these are the four shown
+# first. The first group matching one of the user's roles wins.
+DEFAULT_CARDS = [
+    ({"INST_ADMIN", "MANAGER", "OFFICER"}, ["new", "high_match", "unassigned", "waiting"]),
+    ({"EXECUTIVE"}, ["qualified_demand", "progressing", "reported_approved", "reported_disbursed"]),
+    ({"BUSINESS", "CREDIT_RISK"}, ["new", "high_match", "qualified_demand", "conversion"]),
+]
+
+
+def default_cards(actor: Actor) -> list[str]:
+    return next((cards for roles, cards in DEFAULT_CARDS if roles & set(actor.roles)),
+                ["new", "unassigned", "waiting", "high_match"])
+
 
 def _scope(db: Session, actor: Actor):
     q = select(Opportunity).where(Opportunity.institution_id == actor.institution_id)
@@ -55,8 +68,10 @@ def command_centre(db: Session, actor: Actor) -> dict:
     contacted = [o for o in opps if assign.get(o.id) and assign[o.id].first_contact_at]
     response_hours = [(assign[o.id].first_contact_at - o.routed_at).total_seconds() / 3600 for o in contacted
                       if o.routed_at and o.routed_at >= month]
-    outcomes = db.execute(select(Outcome).where(Outcome.institution_id == actor.institution_id,
-                                                Outcome.reported_at >= month)).scalars().all()
+    outcome_q = select(Outcome).where(Outcome.institution_id == actor.institution_id, Outcome.reported_at >= month)
+    if policy.officer_only(actor):  # an officer sees their own results, never the institution's totals
+        outcome_q = outcome_q.where(Outcome.opportunity_id.in_(ids or [uuid.UUID(int=0)]))
+    outcomes = db.execute(outcome_q).scalars().all()
     approved = [o for o in outcomes if o.state == "REPORTED_APPROVED"]
     disbursed = [o for o in outcomes if o.state == "REPORTED_DISBURSED"]
     qualified_30 = [o for o in opps if o.qualified_at >= month]
@@ -117,6 +132,7 @@ def command_centre(db: Session, actor: Actor) -> dict:
                                "Demand Intelligence to see where WEZA demand is growing.", "link": "/institution/demand"}
     return {"briefing": briefing, "cards": cards, "attention": attention[:10], "funnel": dict(funnel),
             "no_lead": no_lead, "roles": sorted(actor.roles), "generated_at": now.isoformat(),
+            "default_cards": default_cards(actor), "scope": "own" if policy.officer_only(actor) else "institution",
             "active_products": active_products(db, actor), "active_mandates": active_mandates(db, actor),
             "new_opportunities": new_opportunities(new),
             "insights_open": db.execute(select(func.count()).select_from(Insight).where(

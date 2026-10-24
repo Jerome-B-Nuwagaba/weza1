@@ -68,6 +68,9 @@ PERMISSIONS: dict[str, set[str]] = {
     "admin.vault_lookup": {"WEZA_OPS", "WEZA_SUPER"},
     "admin.read": {"WEZA_OPS", "WEZA_COMMERCIAL", "WEZA_SUPER"},
     "admin.review": {"WEZA_OPS", "WEZA_SUPER"},
+    # Diagnostic pages (Graph Inspector, Loops & AI, Events & delivery): for the people who run the platform, not for
+    # business staff (21 Oct review). Commercial staff keep every commercial, billing and audit page.
+    "admin.engineering": {"WEZA_OPS", "WEZA_SUPER"},
     "admin.commercial": {"WEZA_COMMERCIAL", "WEZA_SUPER"},
 }
 

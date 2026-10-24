@@ -11,6 +11,7 @@ import { useMe } from "@/components/StaffShell";
 import { Badge, Banner, Bar, Button, Card, cx, ErrorState, Field, Input, KV, Loading, Modal, ReasonChips, ScoreRing, Select, StateBadge, Textarea, useToast } from "@/components/ui";
 
 const COMPONENTS: [string, string][] = [["product_fit", "Product fit"], ["appetite_fit", "Appetite fit"], ["preference_fit", "Preference fit"], ["readiness", "Readiness"], ["capacity_fit", "Capacity"]];
+const QUALITY_FACTOR: Record<string, string> = { phone_verified: "Phone verified", identity_captured: "Identity captured", profile_complete: "Profile completeness", documents: "Documents", consistency: "Consistent answers", responsiveness: "Responsiveness" };
 const FIELD_LABEL: Record<string, string> = { full_name: "Name", phone: "Phone", email: "Email", contact_channel: "Preferred contact", contact_window: "Contact window", nin: "NIN", business_name: "Business name", business_registered: "Business registered", employer: "Employer", employment_type: "Employment type", farm_activity: "Farming activity", monthly_turnover: "Monthly turnover", monthly_income: "Monthly income", annual_income: "Annual farm income", monthly_repayments: "Existing monthly repayments", payout_phone: "Number to receive the money", business_registration_number: "Business registration no.", trading_licence_number: "Trading licence no.", trading_licence_expiry: "Trading licence expires" };
 // The statuses an institution officer records. WEZA records what the institution reports — it never decides.
 const STATUS_ACTION: Record<string, { label: string; variant?: "secondary" | "gold" | "ghost" }> = {
@@ -187,6 +188,15 @@ export default function Opportunity360({ params }: { params: Promise<{ id: strin
           </ul>
           <ReasonChips matched={(match.explanation?.matched || []).map((x: any) => x.text)} near={(match.explanation?.near_miss || []).map((x: any) => `${x.text} (${x.observed})`)} missing={(match.explanation?.outstanding || []).map((x: any) => x.text)} />
           <p className="mt-3 text-[12px] text-muted">The match score reflects fit with your configured product and appetite at the time of qualification. It is not a probability of approval.</p>
+          {snap.quality?.factors?.factors && (
+            <div className="mt-4 border-t border-line pt-3">
+              <div className="mb-1 text-[12px] uppercase tracking-wide text-muted">Quality score {d.quality_score} · what it is made of</div>
+              <ul className="grid grid-cols-2 gap-x-6 gap-y-1 text-[13px]">
+                {Object.entries(snap.quality.factors.factors).map(([k, v]) => <li key={k} className="flex justify-between"><span className="text-muted">{QUALITY_FACTOR[k] || k}</span><span className="num">+{String(v)}</span></li>)}
+              </ul>
+              <p className="mt-2 text-[12px] text-muted">{snap.quality.factors.note || "Marketplace readiness, not a credit score."} Version {snap.quality.factors.version}.</p>
+            </div>
+          )}
         </Card>
       </div>
 

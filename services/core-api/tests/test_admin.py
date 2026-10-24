@@ -58,15 +58,32 @@ def _review_item(kind: str = "FACT_CONFLICT") -> str:
 # ------------------------------------------------------------------ access
 
 
+ENGINEERING = ("/deliveries", "/loops", "/graph?q=OPP-NONE")
+
+
 def test_admin_read_open_to_all_weza_roles_only(client, as_user):
     for email in ("admin@weza.demo", "ops@weza.demo", "commercial@weza.demo"):
         h = as_user(email)
         for path in ("/overview", "/institutions", "/market", "/review", "/integrity", "/disputes", "/commercial",
-                     "/audit", "/deliveries", "/loops", "/config", "/users"):
+                     "/audit", "/config", "/users"):
             assert client.get(API + path, headers=h).status_code == 200, (email, path)
     assert client.get(API + "/overview").status_code == 401
     r = client.get(API + "/overview", headers=as_user("admin@lakeside.demo"))
     assert r.status_code == 403  # institution administrators never reach WEZA admin
+
+
+def test_engineering_pages_are_for_the_people_who_run_the_platform(client, as_user):
+    """Graph Inspector, Loops & AI and Events & delivery are hidden from business staff (21 Oct review, 48:01)."""
+    for email in ("admin@weza.demo", "ops@weza.demo"):
+        for path in ENGINEERING:
+            assert client.get(API + path, headers=as_user(email)).status_code in (200, 404), (email, path)
+    commercial = as_user("commercial@weza.demo")
+    for path in ENGINEERING:
+        r = client.get(API + path, headers=commercial)
+        assert r.status_code == 403, path
+    me = client.get("/api/v1/auth/me", headers=commercial).json()
+    assert "admin.engineering" not in me["permissions"] and "admin.commercial" in me["permissions"]
+    assert "admin.engineering" in client.get("/api/v1/auth/me", headers=as_user("ops@weza.demo")).json()["permissions"]
 
 
 def test_role_separation_on_writes(client, as_user):

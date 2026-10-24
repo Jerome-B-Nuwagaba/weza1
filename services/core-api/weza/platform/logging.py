@@ -6,9 +6,13 @@ import re
 import sys
 from datetime import UTC, datetime
 
+from weza.platform import classification
 from weza.platform.context import correlation_id_var
 
-SENSITIVE_KEYS = re.compile(r"(phone|nin|otp|code|password|secret|token|name|email|address|document|dob)", re.I)
+# Broad fragments kept from before (they catch names like "first_name" or "contact_phone"), plus every field the central
+# classification (TSD §49) rates PERSONAL or HIGHLY_SENSITIVE, so a newly classified field is redacted without a code change.
+_GENERIC = ("phone", "nin", "otp", "code", "password", "secret", "token", "name", "email", "address", "document", "dob")
+SENSITIVE_KEYS = re.compile("(" + "|".join(sorted({*_GENERIC, *classification.redacted_key_fragments()})) + ")", re.I)
 PHONE_RE = re.compile(r"\+?\d[\d\s-]{8,14}\d")
 NIN_RE = re.compile(r"\b[CA][MF][A-Z0-9]{12}\b")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")

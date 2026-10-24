@@ -4,11 +4,17 @@ import Link from "next/link";
 import { useApi } from "@/lib/hooks";
 import { money } from "@/lib/format";
 import { useMe } from "@/components/StaffShell";
+import { AskPanel } from "@/components/AskPanel";
 import { FIELD_META } from "@/components/RuleBuilder";
 import { Banner, Button, Card, EmptyState, ErrorState, Loading, PageHeader, Stat, StateBadge, Table, Td } from "@/components/ui";
 
 const CUSTOMER_TYPE: Record<string, string> = {
   SME: "Business (SME)", SALARIED: "Salaried", AGRICULTURE: "Farmer",
+};
+
+// Where a card leads when it is clicked (only filters the feed actually supports).
+const CARD_LINK: Record<string, string> = {
+  new: "/institution/feed", high_match: "/institution/feed?min_match=90", unassigned: "/institution/feed?view=unassigned",
 };
 
 const customerType = (v?: string | null) => (v ? CUSTOMER_TYPE[v] || v.replace(/_/g, " ").toLowerCase() : null);
@@ -32,7 +38,15 @@ export default function CommandCentre() {
   const mandates: any[] = d.active_mandates || [];
   const fresh: any[] = d.new_opportunities || [];
   const attention: any[] = d.attention || [];
-  const c = d.cards;
+  const c = d.cards || {};
+  const defaults: string[] = d.default_cards || ["new", "high_match", "unassigned", "waiting"];
+  const others = Object.keys(c).filter((k) => !defaults.includes(k));
+  // FSD-CMD-001: every card keeps a home. A value the API can't compute (no data yet) shows a dash, never a made-up number.
+  const stat = (k: string) => (
+    <Stat key={k} label={c[k].label} href={CARD_LINK[k]} tone={k === "high_match" ? "gold" : undefined}
+      value={c[k].value == null ? "—" : c[k].money ? money(c[k].value) : `${c[k].value}${c[k].unit ? ` ${c[k].unit}` : ""}`}
+      sub={c[k].sub} />
+  );
   const hour = new Date().getHours();
   const greet = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
 
@@ -53,14 +67,35 @@ export default function CommandCentre() {
         </Banner>
       )}
 
-      {c && (
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <Stat label={c.new.label} value={c.new.value} href="/institution/feed" />
-          <Stat label={c.high_match.label} value={c.high_match.value} tone="gold" href="/institution/feed?min_match=90" />
-          <Stat label={c.unassigned.label} value={c.unassigned.value} href="/institution/feed?view=unassigned" />
-          <Stat label={c.waiting.label} value={c.waiting.value} />
-        </div>
+      {defaults.some((k) => c[k]) && (
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">{defaults.filter((k) => c[k]).map(stat)}</div>
       )}
+      {others.length > 0 && (
+        <details className="rounded-xl border border-line bg-surface px-4 py-3">
+          <summary className="cursor-pointer text-[13px] font-medium text-blue-800">All metrics ({others.length} more)</summary>
+          <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4">{others.map(stat)}</div>
+          <p className="mt-3 text-[12px] text-muted">
+            Approved and disbursed figures are reported by institutions and are not credit decisions by WEZA.
+            {d.scope === "own" && " These numbers cover only the opportunities assigned to you."}
+          </p>
+        </details>
+      )}
+
+      <Card title="Needs attention" subtitle="Unassigned work, missed service targets and holds.">
+        {attention.length === 0 ? <p className="text-[14px] text-muted">Nothing urgent. Nicely done.</p> : (
+          <ul className="divide-y divide-line">
+            {attention.map((a: any, i: number) => (
+              <li key={i} className="flex items-center justify-between gap-3 py-2.5">
+                <span className="flex items-center gap-2 text-[14px]">
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${a.severity === "high" ? "bg-danger" : a.severity === "medium" ? "bg-warning" : "bg-blue-400"}`} />
+                  {a.text}
+                </span>
+                <Button size="sm" variant="secondary" href={a.id ? `/institution/opportunities/${a.id}` : a.link}>{a.action}</Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Active products" subtitle="What your institution can offer customers today."
@@ -135,20 +170,8 @@ export default function CommandCentre() {
         )}
       </Card>
 
-      <Card title="Needs attention" subtitle="Unassigned work, missed service targets and holds.">
-        {attention.length === 0 ? <p className="text-[14px] text-muted">Nothing urgent. Nicely done.</p> : (
-          <ul className="divide-y divide-line">
-            {attention.map((a: any, i: number) => (
-              <li key={i} className="flex items-center justify-between gap-3 py-2.5">
-                <span className="flex items-center gap-2 text-[14px]">
-                  <span className={`h-2 w-2 shrink-0 rounded-full ${a.severity === "high" ? "bg-danger" : a.severity === "medium" ? "bg-warning" : "bg-blue-400"}`} />
-                  {a.text}
-                </span>
-                <Button size="sm" variant="secondary" href={a.id ? `/institution/opportunities/${a.id}` : a.link}>{a.action}</Button>
-              </li>
-            ))}
-          </ul>
-        )}
+      <Card title="Ask WEZA" subtitle="Read-only questions about your opportunities, demand and appetite, answered from approved tools within your permissions.">
+        <AskPanel compact />
       </Card>
     </div>
   );

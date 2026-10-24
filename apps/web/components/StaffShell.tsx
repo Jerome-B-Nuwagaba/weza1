@@ -1,15 +1,16 @@
 "use client";
 
 import {
-  BarChart3, Bell, BookOpen, Building2, ClipboardCheck, Cpu, FileSearch, Gauge, Inbox, Landmark, LayoutDashboard,
-  LifeBuoy, LogOut, Menu, MessageSquareText, Network, Package, Scale, Settings, ShieldAlert, Sliders, Users, Wrench, X,
+  Bell, Building2, Gauge, LogOut, Menu, Network, X,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createContext, useContext, useEffect, useState } from "react";
 import { api, ApiError, staffLogout, tokens } from "@/lib/api";
 import { ago } from "@/lib/format";
+import { ADMIN_SECTIONS, SECTIONS, landing, sectionOf, visibleTabs } from "./institutionSections";
 import { Logo } from "./Logo";
+import { SectionTabs } from "./SectionTabs";
 import { Badge, Button, Card, cx, Loading } from "./ui";
 
 export type Me = {
@@ -21,50 +22,7 @@ export type Me = {
 const MeCtx = createContext<{ me: Me; can: (p: string) => boolean; refresh: () => void } | null>(null);
 export const useMe = () => useContext(MeCtx)!;
 
-type Item = { href: string; label: string; icon: any; perm?: string };
-const INST_NAV: [string, Item[]][] = [
-  ["Work", [
-    { href: "/institution", label: "Command Centre", icon: LayoutDashboard, perm: "opportunity.read_meta" },
-    { href: "/institution/feed", label: "Opportunities", icon: Inbox, perm: "opportunity.read_meta" },
-    { href: "/institution/team", label: "Team", icon: Users, perm: "team.manage" },
-  ]],
-  ["Configure", [
-    { href: "/institution/products", label: "Products & appetite", icon: Package, perm: "product.read" },
-  ]],
-  ["Intelligence", [
-    { href: "/institution/reports", label: "Outcomes & reports", icon: BarChart3, perm: "analytics.read" },
-    { href: "/institution/ask", label: "Ask WEZA", icon: MessageSquareText },
-  ]],
-  ["Workspace", [
-    { href: "/institution/settings", label: "Settings", icon: Settings },
-  ]],
-];
-const ADMIN_NAV: [string, Item[]][] = [
-  ["Network", [
-    { href: "/admin", label: "Control Centre", icon: Gauge },
-    { href: "/admin/market", label: "Market State", icon: Network },
-    { href: "/admin/institutions", label: "Institutions", icon: Building2 },
-    { href: "/staff/institutions", label: "Institution onboarding", icon: ClipboardCheck, perm: "admin.institution_onboard" },
-    { href: "/admin/opportunities", label: "Opportunities", icon: Inbox },
-    { href: "/admin/customers", label: "Customer support", icon: LifeBuoy, perm: "admin.vault_lookup" },
-  ]],
-  ["Control", [
-    { href: "/admin/review", label: "Human Control Centre", icon: ClipboardCheck },
-    { href: "/admin/integrity", label: "Integrity", icon: ShieldAlert },
-    { href: "/admin/disputes", label: "Disputes", icon: Scale },
-    { href: "/admin/commercial", label: "Commercial", icon: Landmark },
-  ]],
-  ["Inspect", [
-    { href: "/admin/graph", label: "Graph Inspector", icon: FileSearch },
-    { href: "/admin/loops", label: "Loops & AI", icon: Cpu },
-    { href: "/admin/audit", label: "Audit", icon: BookOpen },
-    { href: "/admin/deliveries", label: "Events & delivery", icon: Wrench },
-    { href: "/admin/config", label: "Configuration", icon: Sliders },
-    { href: "/admin/whatsapp", label: "WhatsApp connection", icon: MessageSquareText, perm: "admin.config" },
-  ]],
-];
-// The Weza Staff area (Goal 2): bringing an institution into the marketplace. It is its own area rather than a
-// corner of the admin portal, because onboarding an institution is a different job from running the network.
+type Item = { href: string; label: string; icon: any; perm?: string; current?: boolean };
 const STAFF_NAV: [string, Item[]][] = [
   ["Onboarding", [
     { href: "/staff/institutions", label: "Institutions", icon: Building2, perm: "admin.institution_onboard" },
@@ -127,7 +85,20 @@ export function StaffShell({ area, children }: { area: "institution" | "admin" |
   );
   if (!me) return <div className="mx-auto max-w-5xl p-8"><Loading /></div>;
   const can = (p?: string) => !p || me.permissions.includes(p);
-  const nav = area === "admin" ? ADMIN_NAV : area === "staff" ? STAFF_NAV : INST_NAV;
+  // Institution and WEZA admin menus are built from the section maps in institutionSections.ts: each entry leads to the
+  // first page the user may open, and the pages of the section are its tabs. (The WEZA staff onboarding area keeps its own.)
+  const sections = area === "institution" ? SECTIONS : area === "admin" ? ADMIN_SECTIONS : null;
+  const here = sections ? sectionOf(sections, pathname) : undefined;
+  const sectionNav: [string, Item[]][] = [];
+  for (const sec of sections || []) {
+    if (sec.tabs.length && !visibleTabs(sec, can).length) continue;
+    const href = landing(sec, can);
+    if (!href) continue;
+    let group = sectionNav.find(([g]) => g === sec.group);
+    if (!group) sectionNav.push((group = [sec.group, []]));
+    group[1].push({ href, label: sec.label, icon: sec.icon, current: here?.key === sec.key });
+  }
+  const nav = area === "staff" ? STAFF_NAV : sectionNav;
   const home = area === "admin" ? "/admin" : area === "staff" ? "/staff/institutions" : "/institution";
   const active = (href: string) => (href === "/institution" || href === "/admin" ? pathname === href : pathname.startsWith(href));
 
@@ -140,7 +111,7 @@ export function StaffShell({ area, children }: { area: "institution" | "admin" |
           <div key={group}>
             <div className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wider text-muted">{group}</div>
             {visible.map((i) => (
-              <Link key={i.href} href={i.href} className={cx("flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[14px]", active(i.href) ? "bg-blue-50 font-medium text-blue-800" : "text-ink hover:bg-canvas")}>
+              <Link key={i.href} href={i.href} aria-current={(i.current ?? active(i.href)) ? "page" : undefined} className={cx("flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[14px]", (i.current ?? active(i.href)) ? "bg-blue-50 font-medium text-blue-800" : "text-ink hover:bg-canvas")}>
                 <i.icon className="h-4 w-4 shrink-0 opacity-80" />
                 {i.label}
               </Link>
@@ -187,7 +158,7 @@ export function StaffShell({ area, children }: { area: "institution" | "admin" |
             <button onClick={staffLogout} className="rounded-lg p-2 hover:bg-blue-50" aria-label="Sign out" title="Sign out"><LogOut className="h-4 w-4 text-muted" /></button>
           </header>
           {bell && <NotificationPanel area={area} onClose={() => { setBell(false); load(); }} />}
-          <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6">{children}</main>
+          <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6">{sections && <SectionTabs sections={sections} pathname={pathname} can={can} />}{children}</main>
         </div>
       </div>
     </MeCtx.Provider>

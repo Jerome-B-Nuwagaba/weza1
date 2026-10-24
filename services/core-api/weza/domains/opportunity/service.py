@@ -26,6 +26,7 @@ from weza.domains.product.models import Product, ProductVersion
 from weza.domains.trust import policy
 from weza.domains.trust import roles as canon
 from weza.domains.trust.service import audit, record_decision
+from weza.platform import classification
 from weza.platform.context import SYSTEM, Actor
 from weza.platform.controls import StateMachine, routing_paused
 from weza.platform.db import utcnow
@@ -233,7 +234,8 @@ def qualify(db: Session, actor: Actor, need: FinancialNeed, match: Match, consen
                                 "ruleset_hash": pv.ruleset_hash},
             "appetite_version": {"id": str(av.id), "version": av.version, "min_match_score": av.min_match_score}
             if av else None,
-            "match": {"id": str(match.id), "score": match.score, "components": match.components,
+            "match": {"id": str(match.id), "score": match.score, "readiness": match.readiness,
+                      "components": match.components,
                       "explanation": match.explanation, "algorithm_version": match.algorithm_version,
                       "weights_version": match.weights_version, "ruleset_hash": match.ruleset_hash},
             "quality": {"score": need.quality_score, "factors": need.quality_factors},
@@ -861,7 +863,9 @@ def view(db: Session, actor: Actor, opp_id: uuid.UUID) -> dict:
             "monthly_income": facts.get("employment.monthly_net_income"),
             "annual_income": facts.get("farm.annual_income"), "monthly_repayments": facts.get("finance.monthly_repayments"),
         }
-        customer_block["fields"] = {k: v for k, v in available.items() if k in decision.fields and v is not None}
+        # Fail closed (TSD §49): a field that the central classification does not know is never shown to an institution.
+        customer_block["fields"] = {k: v for k, v in available.items() if k in decision.fields and v is not None
+                                    and classification.is_classified(k)}
         if "phone" in decision.fields and vault.get("payout_phone"):  # verified by an SMS code in the chat
             customer_block["fields"]["payout_phone"] = vault["payout_phone"]
         for key, field in (("business.registration_number", "business_registration_number"),
@@ -948,6 +952,8 @@ def summary(db: Session, opp: Opportunity, a: Assignment | None = None, product_
         "need": purpose_label(opp.purpose_category),
         "purpose_category": opp.purpose_category, "customer_type": opp.customer_type, "sector": opp.sector,
         "district": opp.district, "match_score": round(opp.match_score), "quality_score": opp.quality_score,
+        # Only READY matches can be qualified (BRD §11), so older opportunities without the field are READY too.
+        "readiness": (snap.get("match") or {}).get("readiness") or "READY",
         "product": (snap.get("product_version") or {}).get("name"),
         "why_matched": [x["text"] for x in expl.get("matched", [])][:5],
         "near_miss": [x["text"] for x in expl.get("near_miss", [])][:3],
