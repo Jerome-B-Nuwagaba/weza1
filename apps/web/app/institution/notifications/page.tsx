@@ -42,7 +42,7 @@ export default function Notifications() {
             {["in_app", "email", "sms"].map((c) => (
               <Td key={c}><input type="checkbox" aria-label={c} checked={x.channels.includes(c)} disabled={c === "in_app"} onChange={(e) => set(i, { channels: e.target.checked ? [...x.channels, c] : x.channels.filter((y: string) => y !== c) })} /></Td>
             ))}
-            <Td><Select value={x.min_priority} onChange={(e) => set(i, { min_priority: e.target.value })} options={[["NORMAL", "Normal"], ["HIGH", "High"], ["URGENT", "Urgent"]]} className="!h-8 !w-32" /></Td>
+            <Td><Select value={x.min_priority} onChange={(e) => set(i, { min_priority: e.target.value })} options={[["NORMAL", "Normal"], ["HIGH", "High"], ["URGENT", "Urgent"]]} className="!h-9 !w-32 !text-[14px]" /></Td>
             <Td><input type="checkbox" aria-label="digest" checked={!!x.digest} onChange={(e) => set(i, { digest: e.target.checked })} /></Td>
           </tr>
         ))}

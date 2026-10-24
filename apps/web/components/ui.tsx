@@ -328,7 +328,7 @@ export const inputCls =
 
 export function Input(p: React.InputHTMLAttributes<HTMLInputElement>) {
   const crisp = useSkin() === "crisp";
-  return <input {...p} className={cx(inputCls, crisp ? "h-11 text-[15px]" : "h-10", p.className)} />;
+  return <input {...p} className={cx(inputCls, crisp ? "h-11 py-0 text-[15px]" : "h-10", p.className)} />;
 }
 
 export function Textarea(p: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
@@ -338,7 +338,7 @@ export function Textarea(p: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
 export function Select({ options, ...p }: React.SelectHTMLAttributes<HTMLSelectElement> & { options: ([string, string] | string)[] }) {
   const crisp = useSkin() === "crisp";
   return (
-    <select {...p} className={cx(inputCls, crisp ? "h-11 pr-8 text-[15px]" : "h-10", p.className)}>
+    <select {...p} className={cx(inputCls, crisp ? "h-11 py-0 pr-8 text-[15px]" : "h-10", p.className)}>
       {options.map((o) => {
         const [v, l] = Array.isArray(o) ? o : [o, o];
         return (
