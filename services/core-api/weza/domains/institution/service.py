@@ -21,11 +21,12 @@ from weza.domains.institution.models import (
 from weza.domains.misc_models import ReviewItem
 from weza.domains.product.models import Product
 from weza.domains.trust import policy
+from weza.domains.trust import roles as canon
 from weza.domains.trust.service import audit
 from weza.platform.context import Actor
 from weza.platform.controls import StateMachine
 from weza.platform.db import utcnow
-from weza.platform.errors import ValidationFailed
+from weza.platform.errors import NotFound, ValidationFailed
 from weza.platform.events import emit
 
 TERMS_VERSION = "2026.1"
@@ -56,8 +57,9 @@ def apply(db: Session, data: dict) -> tuple[Institution, User]:
     for kind in ("REPRESENTATIVE", "BUSINESS", "COMPLIANCE"):
         c = data.get(kind.lower())
         if c:
+            # The representative who applies is the contact WEZA reaches first (Goal 1 §1).
             db.add(Contact(institution_id=inst.id, kind=kind, name=c["name"], email=c["email"],
-                           phone=c.get("phone", ""), title=c.get("title", "")))
+                           phone=c.get("phone", ""), title=c.get("title", ""), is_primary=(kind == "REPRESENTATIVE")))
     admin = identity.create_user(db, email=data["admin_email"], full_name=data["admin_name"],
                                  password=data["admin_password"], kind="INSTITUTION", institution_id=inst.id,
                                  roles=["INST_ADMIN"])
@@ -107,10 +109,54 @@ def verify(db: Session, actor: Actor, inst: Institution, approve: bool, reason: 
         item.status, item.resolved_by, item.resolution = "RESOLVED", actor.display, reason
 
 
+def summary(inst: Institution) -> dict:
+    """The institution as the product specification names it (Goal 1 §1): its identity, the canonical
+    four-state status, and the metadata that says when and by whom it was activated."""
+    return {"id": str(inst.id), "legal_name": inst.legal_name, "display_name": inst.display_name,
+            "type": inst.institution_type, "status": inst.status, "canonical_status": inst.canonical_status,
+            "licence_no": inst.licence_no, "regulator": inst.regulator,
+            "activation": {"activated_at": inst.activated_at.isoformat() if inst.activated_at else None,
+                           "verified_at": inst.verified_at.isoformat() if inst.verified_at else None,
+                           "verified_by": inst.verified_by,
+                           "terms_version": inst.terms_version,
+                           "terms_accepted_at": inst.terms_accepted_at.isoformat() if inst.terms_accepted_at
+                           else None}}
+
+
+def primary_contact(db: Session, inst: Institution) -> dict | None:
+    """The one contact WEZA reaches first. At most one per institution — the database enforces it."""
+    c = db.execute(select(Contact).where(Contact.institution_id == inst.id,
+                                         Contact.is_primary.is_(True))).scalar_one_or_none()
+    return contact_summary(c) if c else None
+
+
+def contact_summary(c: Contact) -> dict:
+    return {"id": str(c.id), "kind": c.kind, "name": c.name, "email": c.email, "phone": c.phone, "title": c.title,
+            "is_primary": bool(c.is_primary)}
+
+
+def set_primary_contact(db: Session, actor: Actor, inst: Institution, contact_id: uuid.UUID) -> dict:
+    """Designate the primary contact. Only this institution's own contact can be designated."""
+    policy.require(actor, "institution.settings")
+    policy.require_tenant(actor, inst.id)
+    c = db.execute(select(Contact).where(Contact.id == contact_id,
+                                         Contact.institution_id == inst.id)).scalar_one_or_none()
+    if c is None:
+        raise NotFound("Not found.")
+    for other in db.execute(select(Contact).where(Contact.institution_id == inst.id,
+                                                  Contact.is_primary.is_(True))).scalars():
+        other.is_primary = False
+    c.is_primary = True
+    audit(db, actor, "institution.primary_contact_set", "institution", inst.id,
+          after={"contact_id": str(c.id), "name": c.name, "email": c.email})
+    return contact_summary(c)
+
+
 def checklist(db: Session, inst: Institution) -> dict:
     """READINESS_CHECK node of the onboarding graph (FSD §21). Each item links to the node that fixes it."""
     members = db.execute(select(Membership).where(Membership.institution_id == inst.id)).scalars().all()
-    roles = {r for m in members for r in m.roles}
+    # Roles are expanded so the check below holds whichever vocabulary the institution granted.
+    roles = {r for m in members for r in canon.expand(m.roles)}
     items = [
         {"key": "verified", "label": "Institution verified by WEZA", "done": inst.status not in
          ("DRAFT", "SUBMITTED", "UNDER_VERIFICATION", "REJECTED"), "link": "/institution/settings"},
@@ -177,7 +223,7 @@ def save_routing(db: Session, actor: Actor, institution_id: uuid.UUID, rules: li
     receivers = {m.user_id for m, u in db.execute(select(Membership, User).join(User, User.id == Membership.user_id)
                                                   .where(Membership.institution_id == institution_id,
                                                          User.status == "ACTIVE")).all()
-                 if set(m.roles) & {"OFFICER", "MANAGER"}}
+                 if set(canon.expand(m.roles)) & {"OFFICER", "MANAGER"}}
     for i, r in enumerate(rules):
         team_id = uuid.UUID(r["target_team_id"]) if r.get("target_team_id") else None
         if team_id and team_id not in teams:

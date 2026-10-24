@@ -1,4 +1,4 @@
-"""Demo — the customer credit-marketplace journey, step by step, to a Qualified Opportunity at Demo Bank.
+"""Demo — the customer credit-marketplace journey, step by step, to a Qualified Opportunity at Journey Demo Bank.
 
 This is the safe development entry point for the customer journey. It drives the real journey graph, the real
 matching engine, the real consent service, the real opportunity saga and the real routing through the same web
@@ -9,7 +9,7 @@ The WhatsApp channel is a live Meta integration owned elsewhere and is not used 
 
 Usage:
     python scripts/demo_marketplace_journey.py
-        # starts a throwaway local PostgreSQL, migrates, seeds, creates Demo Bank and runs the journey
+        # starts a throwaway local PostgreSQL, migrates, seeds, creates Journey Demo Bank and runs the journey
     DATABASE_URL=postgresql://... python scripts/demo_marketplace_journey.py
         # runs against an existing database (the same one the API is using)
 """
@@ -68,12 +68,12 @@ def _prepare_database(url: str) -> None:
 
 
 def _demo_bank() -> dict:
-    """Demo Bank: an ACTIVE institution with one ACTIVE product and one ACTIVE mandate, built by the real services."""
+    """Journey Demo Bank: an ACTIVE institution with one ACTIVE product and one ACTIVE mandate, built by the real services."""
     from weza.platform.db import session_scope
-    from weza.seed import seed_demo_bank
+    from weza.seed import seed_journey_demo_bank
 
     with session_scope() as db:
-        state = seed_demo_bank(db)
+        state = seed_journey_demo_bank(db)
         return {"id": str(state["inst"].id), "name": state["inst"].display_name}
 
 
@@ -221,7 +221,7 @@ def main() -> int:
         for t in j.texts():
             say(t)
 
-        step(6, "The customer chooses Demo Bank")
+        step(6, "The customer chooses Journey Demo Bank")
         demo = next(o for o in options if o["institution"] == bank["name"])
         me(f"Choose {bank['name']} — {demo['product']} (match {demo['score']}/100)")
         j.send(action="select", value=demo["match_id"])
@@ -240,7 +240,7 @@ def main() -> int:
             say(t)
         print(f"\n  Journey node after the share: {j.node} (the bureau check happens later, at the lender's stage)")
 
-        step(8, "WEZA creates the Qualified Opportunity and routes it to Demo Bank")
+        step(8, "WEZA creates the Qualified Opportunity and routes it to Journey Demo Bank")
         submitted = j.cards("submitted")[0]
         field("reference", submitted["reference"])
         field("institution", submitted["institution"])
@@ -248,7 +248,7 @@ def main() -> int:
         drain()
         _show_outcome(submitted["reference"], bank)
 
-    print("\nDemo complete. The customer can now track the request at /requests, and Demo Bank sees it in its "
+    print("\nDemo complete. The customer can now track the request at /requests, and Journey Demo Bank sees it in its "
           "opportunity feed.\n")
     return 0
 

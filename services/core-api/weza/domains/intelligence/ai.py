@@ -68,6 +68,10 @@ class ProductRuleV1(BaseModel):
     source_quote: str | None = None
 
 
+class NarrativeV1(BaseModel):
+    text: str = Field(..., min_length=1, max_length=1200)
+
+
 class ProductRuleExtractionV1(BaseModel):
     name: str | None = None
     family: str | None = None
@@ -259,6 +263,25 @@ def interpret_answer(db: Session, question: dict, text: str, subject: str | None
     if ai is None or ai.value is None:
         return None, 0.0
     return ai.value, ai.confidence
+
+
+def narrate_aggregate(db: Session, capability: str, evidence: dict, fallback: str,
+                       *, subject: str | None = None) -> str:
+    """Narrate already-aggregated evidence. The model may rephrase numbers, never invent or mutate business state."""
+    allowed = {"narrate_insight", "narrate_briefing"}
+    if capability not in allowed:
+        raise ValueError("Unsupported narrative capability")
+    system = (
+        SYSTEM_BASE.format(country="Uganda")
+        + " You are narrating aggregated WEZA marketplace evidence for institution staff. "
+          "Use only facts and numbers present in <aggregate>. Do not infer customer identities, creditworthiness or "
+          "approval likelihood. Do not recommend changing policy as an instruction; frame possible actions as review "
+          "or simulation. Keep the answer under 120 words."
+    )
+    raw = _wrap("aggregate", __import__("json").dumps(evidence, default=str, sort_keys=True)[:12_000])
+    out = _call(db, capability, NarrativeV1, system, raw, subject=subject,
+                allowed_modes=("AVAILABLE",), max_tokens=500)
+    return out.text.strip() if out is not None and out.text.strip() else fallback
 
 
 def extract_product_rules(db: Session, document_text: str, subject: str | None = None) -> dict:

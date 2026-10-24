@@ -17,7 +17,7 @@ from weza.domains.customer import service as customer_svc
 from weza.domains.customer.models import Customer, Preference
 from weza.domains.identity import service as identity
 from weza.domains.institution.models import Institution, ServiceTarget
-from weza.domains.intelligence import ai, parsing
+from weza.domains.intelligence import agents, parsing
 from weza.domains.matching import engine
 from weza.domains.matching.models import Match
 from weza.domains.matching.rules import fmt, fmt_money
@@ -130,7 +130,7 @@ def greet(ctx: Ctx, st: dict, t: Trigger) -> Step:
 def understand_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
     patch: dict = {"intent_turns": st.get("intent_turns", 0) + 1}
     if st.get("last_text"):
-        extracted = ai.extract_financial_intent(ctx.db, st["last_text"], subject=st["need_id"])
+        extracted = agents.customer_intent(ctx.db, st["last_text"], subject=st["need_id"])
         patch["intent"] = _apply_intent(ctx, st, extracted, overwrite=False)
         patch["last_text"] = None
     intent = patch.get("intent") or st.get("intent") or {}
@@ -232,7 +232,7 @@ def confirm_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
 
 def revise_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
     text = st.get("last_text") or ""
-    extracted = ai.extract_financial_intent(ctx.db, text, subject=st["need_id"])
+    extracted = agents.customer_intent(ctx.db, text, subject=st["need_id"])
     amt = parsing.parse_money_answer(text)
     if extracted.get("amount") is None and amt:
         extracted["amount"], extracted["confidence"]["amount"] = float(amt), 1.0
@@ -306,6 +306,9 @@ def _phone_verified(ctx: Ctx, st: dict, phone: str, *, method: str) -> Step:
                                                            device_hash=st.get("device_hash"))
     need.customer_id = customer.id
     need.status = "PHONE_VERIFIED"
+    need.phone_verified = True
+    need.phone_verified_at = utcnow()
+    need.phone_verification_method = "OTP" if method == "otp" else "WHATSAPP_CHANNEL"
     ctx.instance.customer_id = customer.id
     if method == "otp":  # web/app need a session; WhatsApp is identified by the chat itself
         token = identity.create_customer_session(ctx.db, customer.id, st.get("channel", "web"))
@@ -387,7 +390,7 @@ def ask_profile(ctx: Ctx, st: dict, t: Trigger) -> Step:
     value = _parse_answer(q, str(raw))
     source, confidence = "CUSTOMER", 1.0
     if value is None and str(raw).strip():
-        ai_val, ai_conf = ai.interpret_answer(ctx.db, q, str(raw), subject=st["need_id"])
+        ai_val, ai_conf = agents.customer_profile_answer(ctx.db, q, str(raw), subject=st["need_id"])
         if ai_val is not None and ai_conf >= CRITICAL_CONFIDENCE:
             value = _parse_answer(q, str(ai_val))
             source, confidence = "AI_EXTRACTED", ai_conf

@@ -23,7 +23,7 @@ from weza.domains.identity.models import User
 from weza.platform.db import session_scope
 from weza.seed import seed_config
 
-WEZA_ROLES = ["WEZA_SUPER", "WEZA_OPS", "WEZA_COMMERCIAL"]
+WEZA_ROLES = ["WEZA_SUPER", "WEZA_ADMIN", "WEZA_OPS", "WEZA_COMMERCIAL"]
 
 
 def ensure_config() -> None:

@@ -5,7 +5,7 @@ import { useApi } from "@/lib/hooks";
 import { money } from "@/lib/format";
 import { useMe } from "@/components/StaffShell";
 import { FIELD_META } from "@/components/RuleBuilder";
-import { Banner, Button, Card, EmptyState, ErrorState, Loading, PageHeader, StateBadge, Table, Td } from "@/components/ui";
+import { Banner, Button, Card, EmptyState, ErrorState, Loading, PageHeader, Stat, StateBadge, Table, Td } from "@/components/ui";
 
 const CUSTOMER_TYPE: Record<string, string> = {
   SME: "Business (SME)", SALARIED: "Salaried", AGRICULTURE: "Farmer",
@@ -32,11 +32,14 @@ export default function CommandCentre() {
   const mandates: any[] = d.active_mandates || [];
   const fresh: any[] = d.new_opportunities || [];
   const attention: any[] = d.attention || [];
+  const c = d.cards;
+  const hour = new Date().getHours();
+  const greet = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
 
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Command Centre"
+        title={`${greet}, ${me.full_name.split(" ")[0]}`}
         subtitle={d.briefing}
         actions={<>
           {can("product.create") && <Button variant="secondary" href="/institution/products">Products</Button>}
@@ -48,6 +51,15 @@ export default function CommandCentre() {
         <Banner tone="info" title="No opportunities in your queue right now">
           {d.no_lead.text} <Link href={d.no_lead.link} className="font-medium underline">Explore</Link>
         </Banner>
+      )}
+
+      {c && (
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <Stat label={c.new.label} value={c.new.value} href="/institution/feed" />
+          <Stat label={c.high_match.label} value={c.high_match.value} tone="gold" href="/institution/feed?min_match=90" />
+          <Stat label={c.unassigned.label} value={c.unassigned.value} href="/institution/feed?view=unassigned" />
+          <Stat label={c.waiting.label} value={c.waiting.value} />
+        </div>
       )}
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -107,12 +119,13 @@ export default function CommandCentre() {
         {fresh.length === 0 ? (
           <p className="text-[14px] text-muted">No new opportunities in the last 24 hours.</p>
         ) : (
-          <Table head={["Reference", "Amount", "Match", "Customer", "Purpose", "Status"]}>
+          <Table head={["Reference", "Amount", "Match", "Quality", "Customer", "Purpose", "Status"]}>
             {fresh.map((o) => (
               <tr key={o.id} className="hover:bg-canvas">
                 <Td><Link href={`/institution/opportunities/${o.id}`} className="font-medium text-blue-800 hover:underline">{o.reference}</Link></Td>
                 <Td className="num">{money(o.amount)}</Td>
                 <Td className="num">{o.match_score}%</Td>
+                <Td className="num">{o.quality_score ?? "—"}</Td>
                 <Td>{customerType(o.customer_type) || "—"}</Td>
                 <Td>{o.purpose_category ? o.purpose_category.replace(/_/g, " ").toLowerCase() : "—"}</Td>
                 <Td><StateBadge state={o.state} /></Td>

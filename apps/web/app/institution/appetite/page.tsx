@@ -22,7 +22,7 @@ export default function Appetites() {
   for (const t of routing.data?.teams || []) teams[t.id] = t.name;
   return (
     <>
-      <PageHeader title="Mandates" subtitle="Appetite is what customers you want WEZA to find right now. Each change is a new version; activation needs a second approver." actions={can("appetite.edit") && <Button href="/institution/appetite/new">New mandate</Button>} />
+      <PageHeader title="Appetite" subtitle="Define the customers you want WEZA to find right now. Each change is a new version; activation needs a second approver." actions={can("appetite.edit") && <Button href="/institution/appetite/new">New appetite</Button>} />
       {a.loading ? <Loading /> : a.error ? <ErrorState error={a.error} onRetry={a.reload} /> : a.data.appetites.length === 0 ? (
         <EmptyState title="No appetite configured" action={can("appetite.edit") && <Button href="/institution/appetite/new">Define your first mandate</Button>}>Tell WEZA what customers you want — then simulate against real anonymised demand.{!can("appetite.edit") && " Appetite is defined by a Business/Product or Credit/Risk lead — add one under Users & roles if your institution has none yet."}</EmptyState>
       ) : (

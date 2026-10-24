@@ -26,7 +26,7 @@ from weza.domains.institution.models import Contact, Institution
 from weza.domains.intelligence import insights
 from weza.domains.intelligence.parsing import parse_phone
 from weza.domains.matching.models import ClearingRun, Match, ShadowMatch
-from weza.domains.misc_models import AiCallLog, IntegrityCase, LoopMetric, Notification, ReviewItem
+from weza.domains.misc_models import AgentStep, AiCallLog, IntegrityCase, LoopMetric, Notification, ReviewItem
 from weza.domains.need.models import FinancialNeed
 from weza.domains.opportunity import service as opp_svc
 from weza.domains.opportunity.models import Assignment, Opportunity, Outcome
@@ -89,10 +89,7 @@ def overview(actor: Actor = W, db: Session = DB):
 def institutions(actor: Actor = W, db: Session = DB):
     policy.require(actor, "admin.read")
     rows = db.execute(select(Institution).order_by(Institution.created_at.desc())).scalars()
-    return {"institutions": [{"id": str(i.id), "legal_name": i.legal_name, "display_name": i.display_name,
-                              "type": i.institution_type, "status": i.status, "licence_no": i.licence_no,
-                              "regulator": i.regulator, "created_at": i.created_at.isoformat(),
-                              "activated_at": i.activated_at.isoformat() if i.activated_at else None} for i in rows]}
+    return {"institutions": [{**inst_svc.summary(i), "created_at": i.created_at.isoformat()} for i in rows]}
 
 
 @router.get("/institutions/{inst_id}")
@@ -101,11 +98,9 @@ def institution(inst_id: uuid.UUID, actor: Actor = W, db: Session = DB):
     i = db.get(Institution, inst_id)
     if i is None:
         raise NotFound("Not found.")
-    return {"id": str(i.id), "legal_name": i.legal_name, "display_name": i.display_name, "type": i.institution_type,
-            "status": i.status, "status_reason": i.status_reason, "licence_no": i.licence_no, "regulator": i.regulator,
-            "profile": i.profile, "terms_version": i.terms_version,
-            "verified_by": i.verified_by, "verified_at": i.verified_at.isoformat() if i.verified_at else None,
-            "contacts": [{"kind": c.kind, "name": c.name, "email": c.email, "phone": c.phone, "title": c.title}
+    return {**inst_svc.summary(i), "status_reason": i.status_reason, "profile": i.profile,
+            "primary_contact": inst_svc.primary_contact(db, i),
+            "contacts": [inst_svc.contact_summary(c)
                          for c in db.execute(select(Contact).where(Contact.institution_id == i.id)).scalars()],
             "checklist": inst_svc.checklist(db, i),
             "users": db.execute(select(func.count()).select_from(Membership).where(
@@ -540,6 +535,8 @@ def graph_inspector(q: str = Query(..., min_length=3, max_length=80), actor: Act
     audits = db.execute(select(AuditEvent).where(AuditEvent.object_id.in_(agg_ids + [str(o.consent_id) for o in opps]))
                         .order_by(AuditEvent.at)).scalars().all()
     ai_calls = db.execute(select(AiCallLog).where(AiCallLog.subject == str(need.id)).order_by(AiCallLog.created_at)).scalars().all()
+    agent_steps = db.execute(select(AgentStep).where(AgentStep.subject == str(need.id))
+                             .order_by(AgentStep.created_at)).scalars().all()
     return {
         "nodes": nodes, "edges": edges,
         "graph": {"id": str(gi.id), "type": gi.graph_type, "version": gi.graph_version, "current_node": gi.current_node,
@@ -560,6 +557,9 @@ def graph_inspector(q: str = Query(..., min_length=3, max_length=80), actor: Act
         "ai_calls": [{"capability": c.capability, "mode": c.mode, "model": c.model, "fallback": c.fallback_used,
                       "latency_ms": c.latency_ms, "tokens": c.input_tokens + c.output_tokens, "error": c.error,
                       "at": c.created_at.isoformat()} for c in ai_calls],
+        "agent_steps": [{"agent": s.agent, "tool": s.tool, "status": s.result_status,
+                         "latency_ms": s.latency_ms, "args_hash": s.args_hash,
+                         "at": s.created_at.isoformat()} for s in agent_steps],
     }
 
 
@@ -632,10 +632,15 @@ def loops(actor: Actor = W, db: Session = DB):
                            func.count().filter(AiCallLog.fallback_used.is_(True)),
                            func.count().filter(AiCallLog.validation_ok.is_(False)))
                     .where(AiCallLog.created_at >= since).group_by(AiCallLog.capability)).all()
+    agent_steps = db.execute(select(AgentStep.agent, AgentStep.tool, AgentStep.result_status, func.count())
+                             .where(AgentStep.created_at >= since)
+                             .group_by(AgentStep.agent, AgentStep.tool, AgentStep.result_status)).all()
     return {"node_entries": dict(node_entries),
             "instances": [{"graph": g, "status": s, "count": c} for g, s, c in statuses],
             "waiting_at": dict(waiting_at),
             "loops": [{"loop": loop, "event": e, "count": c} for loop, e, c in loop_metrics],
+            "agent_steps": [{"agent": a, "tool": t, "status": s, "count": n}
+                            for a, t, s, n in agent_steps],
             "ai": [{"capability": c, "calls": n, "avg_latency_ms": round(lat or 0), "tokens": int(t or 0),
                     "fallbacks": f, "validation_failures": v} for c, n, lat, t, f, v in ai]}
 

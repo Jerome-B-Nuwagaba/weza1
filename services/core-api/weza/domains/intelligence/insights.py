@@ -14,6 +14,7 @@ from weza.domains.admin_config import UGANDA
 from weza.domains.appetite.models import Appetite, AppetiteVersion
 from weza.domains.commercial.models import CommercialEvent
 from weza.domains.institution.models import Institution
+from weza.domains.intelligence import agents
 from weza.domains.matching import engine
 from weza.domains.matching.models import Match
 from weza.domains.matching.rules import fmt_money
@@ -159,7 +160,8 @@ def active_mandates(db: Session, actor: Actor) -> list[dict]:
 def new_opportunities(new: list, limit: int = 10) -> list[dict]:
     """The newest matched opportunities (last 24h) for the Command Centre's 'new opportunities' section."""
     return [{"id": str(o.id), "reference": o.reference, "amount": float(o.amount),
-             "match_score": round(o.match_score), "purpose_category": o.purpose_category,
+             "match_score": round(o.match_score), "quality_score": o.quality_score,
+             "purpose_category": o.purpose_category,
              "district": o.district, "customer_type": o.customer_type, "sector": o.sector,
              "state": o.state, "qualified_at": o.qualified_at.isoformat()}
             for o in sorted(new, key=lambda x: -float(x.match_score))[:limit]]
@@ -296,15 +298,16 @@ def outcome_insights_job(db: Session) -> int:
             continue
         label = reason.replace("_", " ").lower()
         crit = related[0].get("label") if related else None
+        evidence = {"declines": len(outs), "reason": reason, "count": n, "criterion": crit}
+        fallback = f"{n} of {len(outs)} declines in the last 30 days for customers who met your configured appetite were reported as '{label}'." + (f" Your current criterion is: {crit}. Review whether it reflects how you lend today?" if crit else " Consider adding a criterion that reflects this.") + " WEZA will not change your appetite automatically."
+        narrative = agents.marketplace_narrative(
+            db, "narrate_insight", evidence, fallback, subject=f"appetite:{app_id}"
+        )
         db.add(Insight(institution_id=ap.institution_id, kind="APPETITE_OUTCOME_MISMATCH", appetite_id=app_id,
                        dedupe_key=key,
                        title=f"{n} customers in '{ap.name}' were reported declined for {label}",
-                       narrative=(f"{n} of {len(outs)} declines in the last 30 days for customers who met your configured "
-                                  f"appetite were reported as '{label}'."
-                                  + (f" Your current criterion is: {crit}. Review whether it reflects how you lend "
-                                     "today?" if crit else " Consider adding a criterion that reflects this.")
-                                  + " WEZA will not change your appetite automatically."),
-                       evidence={"declines": len(outs), "reason": reason, "count": n, "criterion": crit}))
+                       narrative=narrative,
+                       evidence=evidence))
         created += 1
     # Low fill: target well behind at mid-campaign, with near-appetite demand available
     for ap, av in db.execute(select(Appetite, AppetiteVersion).join(AppetiteVersion, AppetiteVersion.id == Appetite.active_version_id)
@@ -318,11 +321,17 @@ def outcome_insights_job(db: Session) -> int:
         key = f"lowfill:{ap.id}:{utcnow():%Y-%m}"
         if db.execute(select(Insight.id).where(Insight.dedupe_key == key)).first():
             continue
+        evidence = {"fulfilled": ap.fulfilled_count, "target": av.target_count,
+                    "campaign_elapsed_share": round(elapsed / span, 2)}
+        fallback = ("More than half the campaign period has passed. Open Opportunity Radius to see demand "
+                    "just outside this mandate and simulate a change. WEZA will not change it automatically.")
+        narrative = agents.marketplace_narrative(
+            db, "narrate_insight", evidence, fallback, subject=f"appetite:{ap.id}"
+        )
         db.add(Insight(institution_id=ap.institution_id, kind="LOW_FILL", appetite_id=ap.id, dedupe_key=key,
                        title=f"'{ap.name}' is at {ap.fulfilled_count} of {av.target_count} target opportunities",
-                       narrative="More than half the campaign period has passed. Open Opportunity Radius to see demand "
-                                 "just outside this mandate and simulate a change. WEZA will not change it automatically.",
-                       evidence={"fulfilled": ap.fulfilled_count, "target": av.target_count}))
+                       narrative=narrative,
+                       evidence=evidence))
         created += 1
     return created
 

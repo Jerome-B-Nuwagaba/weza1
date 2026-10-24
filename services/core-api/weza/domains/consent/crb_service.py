@@ -144,7 +144,10 @@ def _require_selection(db: Session, actor: Actor, institution_id: uuid.UUID) -> 
 
 
 def issue_consent_otp(db: Session, actor: Actor, institution_id: uuid.UUID, *, channel: str) -> dict:
-    """WEZA's lender-bound consent OTP. v1.08 has no bureau OTP endpoint; no provider is called here."""
+    """WEZA's lender-bound consent OTP, delivered on WhatsApp for chat journeys and SMS otherwise.
+
+    v1.08 has no bureau OTP endpoint; issuing a code makes no bureau enquiry.
+    """
     match_id = _require_selection(db, actor, institution_id)
     customer = db.get(Customer, actor.id)
     vault = identity.vault_read(db, customer.vault_token)
@@ -173,8 +176,9 @@ def issue_consent_otp(db: Session, actor: Actor, institution_id: uuid.UUID, *, c
     from weza.domains.notification.service import send_customer_message
     delivered = send_customer_message(db, vault["phone"],
         f"Your WEZA consent code for {_inst_name(db, institution_id)} is {code}. "
-        "Enter it in your application to authorise the credit bureau check. It expires in 5 minutes.",
-        channel="sms", kind="otp")
+        + ("Reply here with it" if channel == "whatsapp" else "Enter it in your application")
+        + " to authorise the credit bureau check. It expires in 5 minutes.",
+        channel="whatsapp" if channel == "whatsapp" else "sms", kind="otp")
     if not delivered:
         check.status, challenge.status = "FAILED", "FAILED_DELIVERY"
         raise ValidationFailed("We couldn't send the code. Please try again.", code="OTP_DELIVERY_FAILED")

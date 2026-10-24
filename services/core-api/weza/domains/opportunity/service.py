@@ -24,6 +24,7 @@ from weza.domains.need.models import FinancialNeed
 from weza.domains.opportunity.models import Activity, Assignment, InfoRequest, Opportunity, Outcome
 from weza.domains.product.models import Product, ProductVersion
 from weza.domains.trust import policy
+from weza.domains.trust import roles as canon
 from weza.domains.trust.service import audit, record_decision
 from weza.platform.context import SYSTEM, Actor
 from weza.platform.controls import StateMachine, routing_paused
@@ -413,14 +414,14 @@ def _can_receive_work(db: Session, institution_id, user_id) -> bool:
     row = db.execute(select(Membership, User).join(User, User.id == Membership.user_id).where(
         Membership.user_id == user_id, Membership.institution_id == institution_id)).first()
     return bool(row and row[0].institution_id == institution_id and row[1].status == "ACTIVE"
-                and set(row[0].roles) & {"OFFICER", "MANAGER"})
+                and set(canon.expand(row[0].roles)) & {"OFFICER", "MANAGER"})
 
 
 def _least_loaded_officer(db: Session, institution_id, team_id) -> uuid.UUID | None:
     from weza.domains.identity.models import Membership, User
     officers = db.execute(select(Membership.user_id).join(User, User.id == Membership.user_id).where(
         Membership.institution_id == institution_id, Membership.team_id == team_id, User.status == "ACTIVE",
-        Membership.roles.contains(["OFFICER"]))).scalars().all()
+        canon.sql_any(Membership.roles, canon.INSTITUTION_OFFICER))).scalars().all()
     if not officers:
         return None
     loads = dict(db.execute(select(Assignment.user_id, func.count()).join(
@@ -1035,6 +1036,10 @@ def team_members(db: Session, institution_id) -> list[dict]:
     rows = db.execute(select(User, Membership).join(Membership, Membership.user_id == User.id)
                       .where(Membership.institution_id == institution_id)).all()
     teams = {t.id: t.name for t in db.execute(select(Team).where(Team.institution_id == institution_id)).scalars()}
-    return [{"id": str(u.id), "name": u.full_name, "email": u.email, "roles": m.roles, "status": u.status,
+    # `roles` is what the institution granted, verbatim. `role_set` is the same set expanded into both
+    # vocabularies, so a client that asks "who can receive work?" need not know which spelling is in use.
+    return [{"id": str(u.id), "name": u.full_name, "email": u.email, "roles": sorted(m.roles),
+             "role_set": sorted(canon.expand(m.roles)),
+             "status": u.status,
              "team_id": str(m.team_id) if m.team_id else None, "team": teams.get(m.team_id),
              "mfa_enrolled": u.mfa_enrolled} for u, m in rows]

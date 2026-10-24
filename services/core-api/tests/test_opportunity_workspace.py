@@ -1,10 +1,10 @@
 """Goal 5 — the institution-officer experience of a routed opportunity.
 
 The end-to-end path: a demo customer states a need, verifies their phone, is matched, consents, and is routed to
-Demo Bank; Demo Bank's officer sees it in their own queue, reads what was shared and why, records the statuses and
+Journey Demo Bank; Journey Demo Bank's officer sees it in their own queue, reads what was shared and why, records the statuses and
 reports the outcome. WEZA records — it never decides, and it never moves money.
 
-Demo Bank is built through the real institution services, so the officer here is a real, ACTIVE lender's officer
+Journey Demo Bank is built through the real institution services, so the officer here is a real, ACTIVE lender's officer
 rather than a fixture.
 """
 
@@ -18,7 +18,7 @@ from tests.helpers import idem as _k
 from weza.domains.opportunity.models import Activity, Assignment, Opportunity
 from weza.domains.trust.models import AuditEvent
 from weza.platform.db import session_scope
-from weza.seed import seed_demo_bank
+from weza.seed import seed_journey_demo_bank
 
 # No National ID: the bureau check is Just-In-Time and belongs to the lender's stage, so this journey never
 # triggers one.
@@ -29,19 +29,19 @@ OFFICER = "officer@demo.bank"
 
 @pytest.fixture(scope="module")
 def demo_bank():
-    """Demo Bank — one ACTIVE product and one ACTIVE mandate, routed to its own SME desk."""
+    """Journey Demo Bank — one ACTIVE product and one ACTIVE mandate, routed to its own SME desk."""
     with session_scope() as db:
-        state = seed_demo_bank(db)
+        state = seed_journey_demo_bank(db)
         return {"id": str(state["inst"].id), "name": state["inst"].display_name}
 
 
 def _routed_to_demo_bank(journey, phone: str, text: str):
-    """A customer journey that ends with a consented opportunity routed to Demo Bank."""
+    """A customer journey that ends with a consented opportunity routed to Journey Demo Bank."""
     j = journey(text)
     j.send(action="confirm")
     j.verify(phone)
     j.answer_profile(DEMO_ANSWERS)
-    demo = next(o for o in j.cards("options")[0]["options"] if o["institution"] == "Demo Bank")
+    demo = next(o for o in j.cards("options")[0]["options"] if o["institution"] == "Journey Demo Bank")
     j.send(action="select", value=demo["match_id"])
     j.send(action="agree", value=j.cards("consent")[0]["template_id"])
     reference = j.cards("submitted")[0]["reference"]
@@ -56,7 +56,7 @@ def _opp(reference: str):
 
 def test_the_officer_works_a_routed_opportunity_from_queue_to_reported_disbursement(
         client, as_user, journey, drain, demo_bank):
-    """Demo customer → verified → matched → consented → routed to Demo Bank → the officer views it, records the
+    """Demo customer → verified → matched → consented → routed to Journey Demo Bank → the officer views it, records the
     statuses and reports the outcome. Nothing is decided or paid by WEZA."""
     j, reference = _routed_to_demo_bank(journey, "0772400101", "I need UGX 30 million to expand my pharmacy")
     drain()
@@ -198,7 +198,7 @@ def test_an_officer_cannot_work_an_opportunity_assigned_to_someone_else(client, 
         assigned = db.get(Assignment, oid)
         assert assigned.user_id is not None
 
-    # A second Demo Bank officer, created for this test only
+    # A second Journey Demo Bank officer, created for this test only
     from weza.domains.identity import service as identity
     with session_scope() as db:
         other = identity.create_user(db, email="officer2@demo.bank", full_name="Peter Kalyango",

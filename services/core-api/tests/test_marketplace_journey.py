@@ -6,7 +6,7 @@ journey is driven through the web channel the browser client uses (`POST /api/v1
 service, the opportunity saga, the routing and the audit trail are the production ones. The only development stub
 is the one the web client already uses — the OTP code is displayed in the response in development mode.
 
-Demo Bank is built through the real institution services (apply → verify → product → mandate → routing → activate),
+Journey Demo Bank is built through the real institution services (apply → verify → product → mandate → routing → activate),
 so the journey ends at a named, ACTIVE lender rather than at a fixture.
 """
 
@@ -29,7 +29,7 @@ from weza.domains.opportunity.models import Assignment, Opportunity
 from weza.domains.trust.models import AuditEvent
 from weza.platform.context import Actor
 from weza.platform.db import session_scope
-from weza.seed import seed_demo_bank
+from weza.seed import seed_journey_demo_bank
 
 # The customer answers the minimum profile. No National ID: the bureau check is Just-In-Time and belongs to the
 # lender-selection stage, so this journey never triggers one.
@@ -38,9 +38,9 @@ DEMO_ANSWERS = {**SME_ANSWERS, "identity.nin": "skip"}
 
 @pytest.fixture(scope="module")
 def demo_bank():
-    """Demo Bank — one ACTIVE product and one ACTIVE mandate, routed to its own SME desk."""
+    """Journey Demo Bank — one ACTIVE product and one ACTIVE mandate, routed to its own SME desk."""
     with session_scope() as db:
-        state = seed_demo_bank(db)
+        state = seed_journey_demo_bank(db)
         return {"id": str(state["inst"].id), "name": state["inst"].display_name}
 
 
@@ -62,17 +62,17 @@ def _to_options(journey, phone: str, text: str, answers: dict | None = None):
 
 def _demo_option(journey):
     options = journey.cards("options")[0]["options"]
-    return next(o for o in options if o["institution"] == "Demo Bank")
+    return next(o for o in options if o["institution"] == "Journey Demo Bank")
 
 
 def test_happy_path_customer_reaches_a_qualified_opportunity_at_demo_bank(journey, drain, demo_bank):
     """Stated need → OTP-verified phone → minimum profile → explainable scores → consent → Qualified Opportunity
-    routed to Demo Bank. No bureau call: the credit check is the lender's, at their stage."""
+    routed to Journey Demo Bank. No bureau call: the credit check is the lender's, at their stage."""
     j = _to_options(journey, "0772400001", "I need UGX 30 million to expand my pharmacy")
     assert j.node == "PRESENT_OPTIONS", j.node
 
     options = j.cards("options")[0]["options"]
-    assert any(o["institution"] == "Demo Bank" for o in options)
+    assert any(o["institution"] == "Journey Demo Bank" for o in options)
     demo = _demo_option(j)
     assert demo["readiness"] == "READY"
     assert demo["product"] == "SME Working Capital Loan"
@@ -84,13 +84,13 @@ def test_happy_path_customer_reaches_a_qualified_opportunity_at_demo_bank(journe
     j.send(action="select", value=demo["match_id"])
     assert j.node == "CONSENT", j.node
     consent_card = j.cards("consent")[0]
-    assert consent_card["institution"] == "Demo Bank"  # the consent is for this institution
+    assert consent_card["institution"] == "Journey Demo Bank"  # the consent is for this institution
     assert "not a loan approval" in consent_card["text"]
 
     j.send(action="agree", value=consent_card["template_id"])
     assert j.node == "TRACKING", j.texts()
     submitted = j.cards("submitted")[0]
-    assert submitted["institution"] == "Demo Bank"
+    assert submitted["institution"] == "Journey Demo Bank"
     assert submitted["reference"].startswith("OPP-")
     drain()
 
@@ -109,7 +109,7 @@ def test_happy_path_customer_reaches_a_qualified_opportunity_at_demo_bank(journe
         assert snap["consent"]["version"] and snap["consent"]["text_hash"]
         consent = db.get(Consent, opp.consent_id)
         assert consent.status == "GRANTED" and str(consent.institution_id) == demo_bank["id"]
-        # routed to a Demo Bank officer
+        # routed to a Journey Demo Bank officer
         assignment = db.get(Assignment, opp.id)
         assert assignment is not None and assignment.user_id is not None
         assert db.get(User, assignment.user_id).email.endswith("@demo.bank")
@@ -141,7 +141,7 @@ def test_no_match_customer_is_offered_the_waiting_room_and_no_opportunity(journe
 
 
 def test_without_consent_nothing_is_shared_or_routed(journey, drain, demo_bank, client, as_user):
-    """The customer can stop at the consent step: no consent, no opportunity, and Demo Bank's workspace is
+    """The customer can stop at the consent step: no consent, no opportunity, and Journey Demo Bank's workspace is
     unchanged — nothing identifiable was routed."""
     j = _to_options(journey, "0772400003", "I need UGX 25 million to buy stock for my pharmacy")
     demo = _demo_option(j)

@@ -2,15 +2,15 @@
 
 Runs the whole path in one go, with nothing faked:
 
-    demo customer → phone verified → matched → consented → routed to Demo Bank
-    → Demo Bank's officer sees it in their queue, reads what was shared and why,
+    demo customer → phone verified → matched → consented → routed to Journey Demo Bank
+    → Journey Demo Bank's officer sees it in their queue, reads what was shared and why,
       records the statuses, asks for more information, and reports the outcome.
 
 The institution decides; WEZA records. Nothing here approves a loan or moves money.
 
 Usage:
     python scripts/demo_opportunity_workspace.py
-        # starts a throwaway local PostgreSQL, migrates, seeds, creates Demo Bank and runs the demo
+        # starts a throwaway local PostgreSQL, migrates, seeds, creates Journey Demo Bank and runs the demo
     DATABASE_URL=postgresql://... python scripts/demo_opportunity_workspace.py
         # runs against an existing database
 """
@@ -100,7 +100,7 @@ def main() -> int:
         j.answer_profile()
         say("Minimum profile complete (customer type, amount, purpose, sector, location, business age).")
 
-        step(2, "WEZA matches the customer and the customer consents to share with Demo Bank")
+        step(2, "WEZA matches the customer and the customer consents to share with Journey Demo Bank")
         options = j.cards("options")[0]["options"]
         for o in options:
             print(f"  • {o['institution']} — {o['product']} (match {o['score']}/100, readiness {o['readiness']})")
@@ -117,7 +117,7 @@ def main() -> int:
         drain()
 
         # ---------------------------------------------------------- the officer signs in
-        step(3, "Demo Bank's officer signs in")
+        step(3, "Journey Demo Bank's officer signs in")
         r = client.post("/api/v1/auth/login", json={"email": OFFICER_EMAIL, "password": OFFICER_PASSWORD})
         r.raise_for_status()
         h = {"Authorization": f"Bearer {r.json()['access_token']}"}
