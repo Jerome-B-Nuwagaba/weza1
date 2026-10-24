@@ -44,7 +44,7 @@ jobs:
           heads="$(alembic heads | grep -c '(head)')"
           echo "Alembic heads: $heads"
           test "$heads" -eq 1
-      - run: pip-audit -r requirements.txt --progress-spinner off || true
+      - run: pip-audit -r requirements.txt --progress-spinner off
       - run: pytest -q -p no:cacheprovider
 
   api-image:
@@ -63,6 +63,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t weza-api services/core-api
+      - name: Scan the image for fixable critical vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: weza-api
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
       - name: Boot container (migrate + seed + serve) and smoke-test
         run: |
           docker run -d --name api --network host -e PORT=8000 -e ENV=dev -e SEED_DEMO=true             -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/weza             -e SECRET_KEY=ci-secret -e VAULT_MASTER_KEY=ci-vault-key -e BLIND_INDEX_KEY=ci-index weza-api
