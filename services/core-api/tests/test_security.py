@@ -160,7 +160,8 @@ def test_audit_is_append_only(database):
 
 def test_zero_core_integration_boundary():
     """AT-49 / FR-039: the only outbound HTTP calls are the customer channels (WhatsApp, SMS), the AI provider, the
-    identity registry used to verify applicants and the credit bureau (gnuGRID) — there is no connector to any institution core banking,
+    identity registry used to verify applicants, the credit bureau (gnuGRID), Microsoft Entra ID sign-in for staff and the
+    Teams channel an institution chooses for its own alerts — there is no connector to any institution core banking,
     CRM, LOS or database."""
     root = Path(__file__).resolve().parents[1] / "weza"
     offenders = []
@@ -168,7 +169,8 @@ def test_zero_core_integration_boundary():
         src = f.read_text(encoding="utf8")
         if re.search(r"httpx\.(get|post|put|request|Client)|requests\.|urllib\.request", src):
             offenders.append(f.relative_to(root).as_posix())
-    assert sorted(offenders) == ["domains/notification/service.py", "domains/verification/adapters.py",
+    assert sorted(offenders) == ["domains/identity/entra.py", "domains/notification/service.py",
+                                 "domains/notification/teams.py", "domains/verification/adapters.py",
                                  "integrations/gnugrid.py"], offenders
     assert "graph.facebook.com" in (root / "domains/notification/service.py").read_text(encoding="utf8")
 
@@ -184,6 +186,8 @@ def test_every_network_touchpoint_is_known():
         "domains/notification/whatsapp_media.py": "customer channel: media customers send on WhatsApp (Meta Graph)",
         "domains/verification/adapters.py": "identity registry (gnuGRID)",
         "integrations/gnugrid.py": "credit bureau (gnuGRID CRB), Just-In-Time at lender selection",
+        "domains/identity/entra.py": "Microsoft Entra ID sign-in for staff (token exchange and published signing keys)",
+        "domains/notification/teams.py": "Microsoft Teams alerts to a channel the institution connects (Microsoft hosts only)",
         "domains/intelligence/ai.py": "AI provider (Anthropic)",
     }
     pattern = (r"\bsocket\.(create_connection|socket)\b|create_engine\(|\bpsycopg2?\.connect|\b(pyodbc|pymssql|cx_Oracle|"

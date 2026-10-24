@@ -13,6 +13,7 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
+from weza import i18n
 from weza.domains.admin_config import ANSWER_BANDS, UGANDA, region_of
 from weza.domains.consent import service as consent_svc
 from weza.domains.customer import service as customer_svc
@@ -44,6 +45,17 @@ CUSTOMER_TYPE_LABELS = {"SME": "Business owner", "SALARIED": "Salaried employee"
 RANKING_PREFS = {"LOWER_MONTHLY_PAYMENT": "Lower monthly payment", "LOW_COLLATERAL": "Little or no collateral",
                  "FAST_RESPONSE": "Fast response", "DIGITAL": "Digital process", "NEAR_ME": "Near me",
                  "SHORTER_TENOR": "Shorter repayment"}
+
+
+def customer_language(db, customer_id) -> str:
+    """The customer's saved language (TSD §72), or English when they have none or it is not supported yet."""
+    pref = db.get(Preference, customer_id) if customer_id else None
+    return i18n.language(pref.language if pref else None)
+
+
+def _t(st: dict, key: str, **values) -> str:
+    """Customer-facing wording from the language catalogue (TSD §72), in the customer's language."""
+    return i18n.t(key, st.get("lang"), **values)
 
 
 def qr(label: str, action: str, value: str | None = None) -> dict:
@@ -142,22 +154,19 @@ def _off_topic(ctx: Ctx, st: dict, reprompt: str) -> Step:
     """Politely steer back; after three in a row, pause the conversation instead of chatting on."""
     strikes = st.get("offtopic", 0) + 1
     if strikes >= OFF_TOPIC_STRIKES:
-        ctx.say("I can only help with financing requests, so I'll pause here. Message me any time you want to talk "
-                "about financing.")
+        ctx.say(_t(st, "offtopic.pause"))
         return Step(to="SAVE_EXIT", patch={"offtopic": 0, "exit_reason": "off_topic"})
-    ctx.say("I can only help with financing requests. " + reprompt)
+    ctx.say(_t(st, "offtopic.redirect", reprompt=reprompt))
     return Step(wait=Wait(REPLY, DAY), patch={"offtopic": strikes})
 
 
-_INTENT_PROMPTS = {"amount": "How much financing do you need?", "purpose": "What will you use the money for?",
-                   "customer_type": "Which best describes you: a business owner, a salaried employee or a farmer?"}
-GREET_PROMPT = "Tell me what you would like financing for, for example: I need UGX 30 million to expand my pharmacy."
+_INTENT_PROMPT_KEYS = {"amount": "prompt.amount", "purpose": "prompt.purpose", "customer_type": "prompt.customer_type"}
 
 
 def greet(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if t.kind == "ENTER":
         if st.get("first_text") and _is_off_topic(st["first_text"]):
-            ctx.say("Welcome to WEZA. I can only help with financing requests. " + GREET_PROMPT)
+            ctx.say(_t(st, "offtopic.welcome", reprompt=_t(st, "prompt.greet")))
             return Step(wait=Wait(REPLY, DAY), patch={"first_text": None, "offtopic": 1})
         if st.get("first_text"):
             return Step(to="UNDERSTAND_INTENT", patch={"last_text": st["first_text"], "first_text": None})
@@ -169,7 +178,7 @@ def greet(ctx: Ctx, st: dict, t: Trigger) -> Step:
         ctx.say("Tell me in your own words what you need financing for.")
         return Step(wait=Wait(REPLY, DAY))
     if _is_off_topic(text):
-        return _off_topic(ctx, st, GREET_PROMPT)
+        return _off_topic(ctx, st, _t(st, "prompt.greet"))
     return Step(to="UNDERSTAND_INTENT", patch={"last_text": text, "offtopic": 0})
 
 
@@ -202,7 +211,7 @@ def ask_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
         return Step(wait=Wait(REPLY, DAY))
     text, value = _text(t), t.payload.get("value")
     if not value and _is_off_topic(text):
-        return _off_topic(ctx, st, _INTENT_PROMPTS.get(field, GREET_PROMPT))
+        return _off_topic(ctx, st, _t(st, _INTENT_PROMPT_KEYS.get(field, "prompt.greet")))
     intent = dict(st.get("intent") or {})
     conf = dict(intent.get("confidence") or {})
     if field == "amount":
@@ -277,7 +286,7 @@ def confirm_intent(ctx: Ctx, st: dict, t: Trigger) -> Step:
     if not text:
         return Step(wait=Wait(REPLY, DAY))
     if _is_off_topic(text):
-        return _off_topic(ctx, st, "Tell me what to change, for example: the amount is 25 million.")
+        return _off_topic(ctx, st, _t(st, "prompt.change"))
     return Step(to="REVISE_INTENT", patch={"last_text": text})
 
 
@@ -376,7 +385,8 @@ def _phone_verified(ctx: Ctx, st: dict, phone: str, *, method: str) -> Step:
     st2 = {**st, "customer_id": str(customer.id)}
     _sync_customer_from_intent(ctx, st2)
     return Step(to="BUILD_PROFILE", patch={"customer_id": str(customer.id), "otp_challenge_id": None,
-                                           "phone_enc": None, "channel_phone_enc": None})
+                                           "phone_enc": None, "channel_phone_enc": None,
+                                           "lang": customer_language(ctx.db, customer.id)})
 
 
 def _send_otp(ctx: Ctx, st: dict, phone: str) -> Step:
@@ -454,11 +464,9 @@ def _missing_business_docs(ctx: Ctx, customer_id: uuid.UUID) -> list[str]:
 
 
 def request_id(ctx: Ctx, st: dict, t: Trigger) -> Step:
-    type_instead = qr("Type my details instead", "type_details")
+    type_instead = qr(_t(st, "id.type_instead"), "type_details")
     if t.kind == "ENTER":
-        ctx.say("To save you typing, please send a clear photo of the front of your National ID here. I'll read your "
-                "name and NIN from it and you confirm them. It is shared only with an institution you choose.",
-                quick_replies=[type_instead])
+        ctx.say(_t(st, "id.request"), quick_replies=[type_instead])
         return Step(wait=Wait(REPLY, DAY))
     a = _action(t)
     if a == "id_uploaded":
@@ -470,15 +478,13 @@ def request_id(ctx: Ctx, st: dict, t: Trigger) -> Step:
             return Step(to="CONFIRM_ID", patch={"id_read_enc": _enc(json.dumps({**read, "document_id": str(d.id)}))})
         attempts = st.get("id_attempts", 0) + 1
         if attempts >= 2:
-            ctx.say("I still couldn't read it, so let's type your details instead.")
+            ctx.say(_t(st, "id.unreadable_final"))
             return Step(to="BUILD_PROFILE", patch={"skipped": _skip(st, "id_upload"), "id_attempts": 0})
-        ctx.say("I couldn't read that clearly. Please send another photo of the front of your National ID: flat, in "
-                "good light, with all four corners showing.", quick_replies=[type_instead])
+        ctx.say(_t(st, "id.unreadable_retry"), quick_replies=[type_instead])
         return Step(wait=Wait(REPLY, DAY), patch={"id_attempts": attempts})
     if a == "type_details" or _text(t).lower() in TYPE_INSTEAD:
         return Step(to="BUILD_PROFILE", patch={"skipped": _skip(st, "id_upload")})
-    ctx.say("Please send a photo of your National ID here, or tap 'Type my details instead'.",
-            quick_replies=[type_instead])
+    ctx.say(_t(st, "id.send_or_type"), quick_replies=[type_instead])
     return Step(wait=Wait(REPLY, DAY))
 
 
@@ -486,12 +492,10 @@ def confirm_id(ctx: Ctx, st: dict, t: Trigger) -> Step:
     read = json.loads(_dec(st["id_read_enc"]))
     if t.kind == "ENTER":
         # Sent, never kept in the conversation history (ephemeral): it carries the NIN.
-        extra = "".join(f"*{label}:* {read[k]}\n" for k, label in (("date_of_birth", "Date of birth"),
-                                                                    ("expiry_date", "Card expires")) if read.get(k))
-        ctx.say(f"I read these details from your National ID:\n*Name:* {read['full_name']}\n*NIN:* {read['nin']}\n"
-                f"{extra}Are they correct?", ephemeral=True,
-                quick_replies=[qr("Yes, correct", "confirm"), qr("Send another photo", "retry"),
-                               qr("Type instead", "type_details")])
+        extra = "".join(f"*{_t(st, 'id.' + k)}:* {read[k]}\n" for k in ("date_of_birth", "expiry_date") if read.get(k))
+        ctx.say(_t(st, "id.readback", name=read["full_name"], nin=read["nin"], extra=extra), ephemeral=True,
+                quick_replies=[qr(_t(st, "id.confirm_yes"), "confirm"), qr(_t(st, "id.confirm_retry"), "retry"),
+                               qr(_t(st, "id.confirm_type"), "type_details")])
         return Step(wait=Wait(REPLY, DAY))
     a = _action(t)
     if a == "id_uploaded":  # a second photo instead of an answer
@@ -516,16 +520,15 @@ def confirm_id(ctx: Ctx, st: dict, t: Trigger) -> Step:
             d.pipeline_state = "CONFIRMED"
         audit(ctx.db, _customer_actor(st), "customer.identity_from_document", "document", read["document_id"],
               after={"fields": fields})
-        ctx.say("Thank you, your details are saved.")
+        ctx.say(_t(st, "id.saved"))
         if read.get("expiry_date") and read["expiry_date"] < utcnow().date().isoformat():
-            ctx.say(f"Note: this National ID expired on {read['expiry_date']}. You can continue, but an institution "
-                    "may ask for a current one.")
+            ctx.say(_t(st, "id.expired", date=read["expiry_date"]))
         return Step(to="BUILD_PROFILE", patch={"id_read_enc": None})
     if a in ("retry", "no"):
         return Step(to="REQUEST_ID", patch={"id_read_enc": None, "id_attempts": 0})
     if a == "type_details" or _text(t).lower() in TYPE_INSTEAD:
         return Step(to="BUILD_PROFILE", patch={"id_read_enc": None, "skipped": _skip(st, "id_upload")})
-    ctx.say("Please tap 'Yes, correct' if the details are right, or 'Send another photo'.")
+    ctx.say(_t(st, "id.tap_confirm"))
     return Step(wait=Wait(REPLY, DAY))
 
 
@@ -533,13 +536,12 @@ def request_business_docs(ctx: Ctx, st: dict, t: Trigger) -> Step:
     from weza.domains.customer.documents import DOC_TYPES
     cust_id = uuid.UUID(st["customer_id"])
     missing = _missing_business_docs(ctx, cust_id)
-    none = qr("I don't have them", "skip")
+    none = qr(_t(st, "docs.none"), "skip")
     if t.kind == "ENTER":
         if not missing:
             return Step(to="BUILD_PROFILE")
         wanted = " and your ".join(DOC_TYPES[x].lower() for x in missing)
-        ctx.say(f"Please send a photo or PDF of your {wanted} here. Institutions ask for both, and I'll fill in "
-                "your business details from them.", quick_replies=[none])
+        ctx.say(_t(st, "docs.request", wanted=wanted), quick_replies=[none])
         return Step(wait=Wait(REPLY, DAY))
     a = _action(t)
     if a == "business_doc_uploaded":
@@ -548,14 +550,14 @@ def request_business_docs(ctx: Ctx, st: dict, t: Trigger) -> Step:
             _apply_business_document(ctx, st, d)
         missing = _missing_business_docs(ctx, cust_id)
         if missing:
-            ctx.say(f"Thanks, that's saved. Now please send your {DOC_TYPES[missing[0]].lower()}, or tap "
-                    "'I don't have it'.", quick_replies=[qr("I don't have it", "skip")])
+            ctx.say(_t(st, "docs.next", document=DOC_TYPES[missing[0]].lower()),
+                    quick_replies=[qr(_t(st, "docs.none_one"), "skip")])
             return Step(wait=Wait(REPLY, DAY))
-        ctx.say("Thanks, both documents are saved.")
+        ctx.say(_t(st, "docs.saved_both"))
         return Step(to="BUILD_PROFILE")
     if a in ("skip", "no") or _text(t).lower() in ("skip", "none", "i don't have them", "i don't have it"):
         return Step(to="BUILD_PROFILE", patch={"skipped": _skip(st, "business_docs")})
-    ctx.say("Please send the document here as a photo or PDF, or tap 'I don't have them'.", quick_replies=[none])
+    ctx.say(_t(st, "docs.reminder"), quick_replies=[none])
     return Step(wait=Wait(REPLY, DAY))
 
 
@@ -586,8 +588,7 @@ def _apply_business_document(ctx: Ctx, st: dict, d) -> None:
         customer_svc.upsert_fact(ctx.db, cust_id, "business.licence_expiry", info["expiry_date"],
                                  source="AI_EXTRACTED", channel=channel, source_ref=ref)
         if info["expiry_date"] < utcnow().date().isoformat():
-            ctx.say(f"Note: this trading licence expired on {info['expiry_date']}. Institutions may ask for a "
-                    "current one.")
+            ctx.say(_t(st, "docs.licence_expired", date=info["expiry_date"]))
 
 
 def _bands(st: dict, q: dict) -> list | None:
@@ -1023,16 +1024,15 @@ def payout_number(ctx: Ctx, st: dict, t: Trigger) -> Step:
     m = ctx.db.get(Match, uuid.UUID(st["selected_match_id"]))
     inst = ctx.db.get(Institution, m.institution_id)
     actor, crb = _customer_actor(st), bool(st.get("crb_consented"))
-    options = [qr("Resend code", "resend"), qr("Change number", "change_number")]
+    options = [qr(_t(st, "payout.resend"), "resend"), qr(_t(st, "payout.change"), "change_number")]
     if t.kind == "ENTER":
-        ctx.say(f"Which mobile number should receive the money if {inst.display_name} approves your request? It must "
-                "be registered with your National ID. Tap below, or type another number.",
-                quick_replies=[qr("Use this number", "payout_this")])
+        ctx.say(_t(st, "payout.ask", institution=inst.display_name),
+                quick_replies=[qr(_t(st, "payout.use_this"), "payout_this")])
         return Step(wait=Wait(REPLY, DAY), patch={"payout_enc": None, "payout_challenge_id": None,
                                                   "crb_challenge_id": None})
     a, text = _action(t), _text(t)
     if a == "change_number":
-        ctx.say("OK, which number should receive the money?", hint=f"e.g. {UGANDA['phone']['example']}")
+        ctx.say(_t(st, "payout.change_prompt"), hint=_t(st, "payout.example", example=UGANDA["phone"]["example"]))
         return Step(wait=Wait(REPLY, DAY), patch={"payout_enc": None, "payout_challenge_id": None,
                                                   "crb_challenge_id": None})
     challenge_id = st.get("crb_challenge_id") or st.get("payout_challenge_id")
@@ -1044,8 +1044,8 @@ def payout_number(ctx: Ctx, st: dict, t: Trigger) -> Step:
         else:
             phone = parsing.parse_phone(text or str(t.payload.get("value") or ""))
         if not phone:
-            ctx.say(f"That doesn't look like a valid Ugandan mobile number. Please try again, e.g. "
-                    f"{UGANDA['phone']['example']}.", quick_replies=[qr("Use this number", "payout_this")])
+            ctx.say(_t(st, "payout.invalid", example=UGANDA["phone"]["example"]),
+                    quick_replies=[qr(_t(st, "payout.use_this"), "payout_this")])
             return Step(wait=Wait(REPLY, DAY))
         return _send_payout_code(ctx, st, inst, phone, crb)
     phone, code = _dec(st["payout_enc"]), "".join(ch for ch in text if ch.isdigit())
@@ -1058,18 +1058,16 @@ def payout_number(ctx: Ctx, st: dict, t: Trigger) -> Step:
             patch = {"crb_challenge_id": None} if exc.code in ("OTP_LOCKED", "OTP_EXPIRED") else {}
             return Step(wait=Wait(REPLY, DAY), patch=patch)
         if res["status"] == "VERIFIED":
-            ctx.say(f"Thank you. Your number is verified and your National ID details match the credit bureau record. "
-                    f"{inst.display_name} will see a summary of your credit history.")
+            ctx.say(_t(st, "payout.verified_bureau", institution=inst.display_name))
         elif res["status"] not in crb_service.FAILED:
-            ctx.say(f"Thank you, your number is verified. The credit bureau check couldn't be completed right now; "
-                    f"your request continues and {inst.display_name} will do its own checks.")
+            ctx.say(_t(st, "payout.verified_bureau_pending", institution=inst.display_name))
     else:
         res = identity.verify_otp(ctx.db, uuid.UUID(challenge_id), code)
         if not res.ok:
             ctx.say(res.message, quick_replies=options)
             patch = {"payout_challenge_id": None} if res.code in ("OTP_LOCKED", "OTP_EXPIRED") else {}
             return Step(wait=Wait(REPLY, DAY), patch=patch)
-        ctx.say("Thank you, your number is verified.")
+        ctx.say(_t(st, "payout.verified"))
     cust = ctx.db.get(Customer, actor.id)
     identity.vault_update(ctx.db, cust.vault_token, payout_phone=phone)
     audit(ctx.db, actor, "customer.payout_number_verified", "match", m.id, institution_id=inst.id,
@@ -1081,7 +1079,7 @@ def payout_number(ctx: Ctx, st: dict, t: Trigger) -> Step:
 def _send_payout_code(ctx: Ctx, st: dict, inst: Institution, phone: str, crb: bool) -> Step:
     from weza.domains.consent import crb_service
     patch: dict = {"payout_enc": _enc(phone)}
-    options = [qr("Resend code", "resend"), qr("Change number", "change_number")]
+    options = [qr(_t(st, "payout.resend"), "resend"), qr(_t(st, "payout.change"), "change_number")]
     masked = identity.mask_phone(phone)
     if crb:
         try:
@@ -1090,22 +1088,20 @@ def _send_payout_code(ctx: Ctx, st: dict, inst: Institution, phone: str, crb: bo
             ctx.say(exc.message, quick_replies=options)
             return Step(wait=Wait(REPLY, DAY), patch=patch)
         patch["crb_challenge_id"], dev_code = str(ch["challenge_id"]), ch.get("dev_code")
-        how = "on WhatsApp" if ch.get("delivered_via") == "whatsapp" else f"by SMS to {masked}"
-        ctx.say(f"I've sent a 10-digit code {how}. Type it here. Entering it confirms this number is yours "
-                f"and authorises the credit bureau check for {inst.display_name}.", quick_replies=options)
+        how = _t(st, "payout.how_whatsapp") if ch.get("delivered_via") == "whatsapp" else _t(st, "payout.how_sms", masked=masked)
+        ctx.say(_t(st, "payout.sent_crb", how=how, institution=inst.display_name), quick_replies=options)
     else:
         chat_phone = identity.vault_read(ctx.db, ctx.db.get(Customer, ctx.instance.customer_id).vault_token).get("phone")
         via = "whatsapp" if st.get("channel") == "whatsapp" and phone == chat_phone else "sms"
         res = identity.issue_otp(ctx.db, phone, ip=st.get("ip", ""), journey_id=ctx.instance.id, deliver_via=via)
         if not res.ok and res.code != "OTP_COOLDOWN":
-            ctx.say(res.message, quick_replies=[qr("Change number", "change_number")])
+            ctx.say(res.message, quick_replies=[qr(_t(st, "payout.change"), "change_number")])
             return Step(wait=Wait(REPLY, DAY), patch=patch)
         if res.ok and res.challenge is not None:
             patch["payout_challenge_id"] = str(res.challenge.id)
         dev_code = res.dev_code
-        how = "on WhatsApp" if via == "whatsapp" else f"by SMS to {masked}"
-        ctx.say(f"I've sent a 6-digit code {how}. Type it here to confirm this number is yours."
-                if res.ok else "Please wait a moment, then use the code we already sent.", quick_replies=options)
+        how = _t(st, "payout.how_whatsapp") if via == "whatsapp" else _t(st, "payout.how_sms", masked=masked)
+        ctx.say(_t(st, "payout.sent", how=how) if res.ok else _t(st, "payout.wait"), quick_replies=options)
     ctx.card("otp_input", {"masked": masked, "dev_code": dev_code, "purpose": "payout"})
     return Step(wait=Wait(REPLY, DAY), patch=patch)
 

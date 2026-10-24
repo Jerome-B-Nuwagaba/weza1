@@ -63,8 +63,11 @@ def test_a_dry_run_changes_nothing_then_a_real_run_anonymises_an_idle_customer_o
         assert db.execute(select(func.count()).select_from(Fact).where(Fact.customer_id == cid)).scalar_one() == 0
         doc = db.execute(select(Document).where(Document.customer_id == cid)).scalar_one()
         assert doc.pipeline_state == "DELETED" and doc.sha256 and db.get(DocumentBlob, doc.id) is None  # hash is kept
-        actions = set(db.execute(select(AuditEvent.action).where(AuditEvent.object_id == str(cid))).scalars())
-        assert {"retention.customer_anonymised", "retention.document_deleted"} <= actions
+        doc_id = str(doc.id)
+        assert db.execute(select(AuditEvent.id).where(AuditEvent.object_id == str(cid),
+                                                      AuditEvent.action == "retention.customer_anonymised")).first()
+        assert db.execute(select(AuditEvent.id).where(AuditEvent.object_id == doc_id,
+                                                      AuditEvent.action == "retention.document_deleted")).first()
     with session_scope() as db:  # idempotent: a second run has nothing left to do for this customer
         retention.run(db, apply=True)
         assert db.execute(select(func.count()).select_from(AuditEvent).where(

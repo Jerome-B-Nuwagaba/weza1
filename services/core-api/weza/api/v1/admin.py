@@ -15,6 +15,7 @@ from weza.api.deps import DB, require_step_up, weza_actor
 from weza.domains.admin_config import get_config, publish_config
 from weza.domains.appetite import service as appetite_svc
 from weza.domains.appetite.models import Appetite
+from weza.domains.commercial import referral as referrals
 from weza.domains.commercial import service as commercial
 from weza.domains.commercial.models import CommercialEvent, Contract, Dispute
 from weza.domains.consent.models import Consent
@@ -443,6 +444,23 @@ def set_contract(inst_id: uuid.UUID, body: ContractIn, actor: Actor = W, db: Ses
                     qualified_definition=definition, effective_from=date.today()))
     audit(db, actor, "contract.updated", "institution", inst_id, after=body.model_dump())
     return commercial_overview(actor, db)
+
+
+# ------------------------------------------------------------------ partner and campaign links (BRD §5, TSD §73)
+
+
+@router.get("/referral-links")
+def referral_link(source: str | None = Query(None, max_length=40), campaign: str | None = Query(None, max_length=40),
+                  partner: str | None = Query(None, max_length=40), referral: str | None = Query(None, max_length=40),
+                  text: str = Query("Hi", max_length=200), actor: Actor = W, db: Session = DB):
+    """A click-to-WhatsApp link and a printable QR code that tag every customer who arrives through it with its source,
+    campaign, partner and referral code. Generating one changes nothing: the lineage is recorded when a customer
+    actually arrives."""
+    policy.require(actor, "admin.commercial")
+    link = referrals.whatsapp_link(source, campaign, partner, referral, text)
+    ref = referrals.reference(source, campaign, partner, referral)
+    audit(db, actor, "referral_link.created", "referral_link", ref[:64], after={"reference": ref})
+    return {"link": link, "reference": ref, "qr_svg": referrals.qr_svg(link)}
 
 
 # ------------------------------------------------------------------ retention (TSD §70)

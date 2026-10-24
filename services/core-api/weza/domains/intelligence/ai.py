@@ -5,6 +5,7 @@ budget check → PII minimisation → untrusted-content wrapping → provider ca
 → deterministic fallback → ai_call_log. AI output is always a proposal; deterministic services decide.
 """
 
+import json
 import logging
 import time
 from datetime import timedelta
@@ -75,6 +76,31 @@ class BusinessDocumentV1(BaseModel):
     business_name: str | None = None
     registration_number: str | None = Field(None, description="URSB registration or licence number as printed")
     expiry_date: str | None = Field(None, description="YYYY-MM-DD, for a licence")
+    confidence: float = 0.0
+
+
+class DocumentClassificationV1(BaseModel):
+    doc_type: str = Field("other", description="One of the document types WEZA accepts")
+    legible: bool = True
+    confidence: float = 0.0
+
+
+class MatchExplanationV1(BaseModel):
+    summary: str = Field("", description="One or two plain sentences, at most 280 characters")
+    highlights: list[str] = []
+
+
+class InstitutionQueryV1(BaseModel):
+    """A question from an institution's staff, turned into ONE read-only tool call (TSD §9). The AI only proposes; WEZA
+    validates every field and runs the tool itself, under the user's permissions."""
+    tool: str = Field(..., description="The tool that answers the question")
+    sector: str | None = None
+    customer_type: str | None = None
+    min_match: int | None = None
+    limit: int | None = None
+    field: str | None = None
+    op: str | None = None
+    value: float | str | None = None
     confidence: float = 0.0
 
 
@@ -368,6 +394,70 @@ def read_business_document(db: Session, mime: str, data: bytes, subject: str | N
             "business_name": (ai.business_name or "").strip()[:120] or None,
             "registration_number": (ai.registration_number or "").strip()[:40] or None,
             "expiry_date": (ai.expiry_date or "")[:10] or None}
+
+
+def classify_document(db: Session, mime: str, data: bytes, subject: str | None = None) -> dict | None:
+    """DocumentClassification v1: which kind of document a stored, scanned upload is. Only called after the malware scan
+    (TSD §42) and only when the customer's caption and filename did not say. A proposal: the caller keeps it only when
+    confident."""
+    from weza.domains.customer.documents import DOC_TYPES
+    if not get_settings().ai_document_extraction:
+        return None
+    system = SYSTEM_BASE.format(country="Uganda") + (
+        " Classify the attached document. doc_type must be exactly one of: " + ", ".join(DOC_TYPES) + ". Use "
+        "national_id for a National ID card, business_registration for a business registration certificate, "
+        "trading_licence for a trading licence, payslip, bank_statement, mobile_money_statement, employment_letter, "
+        "farm_records for land or farm documents, otherwise other. Set legible false if it cannot be read.")
+    out = _call(db, "classify_document", DocumentClassificationV1, system, "Classify this document.", subject=subject,
+                allowed_modes=("AVAILABLE",), attachment=(mime, data))
+    if out is None or out.doc_type not in DOC_TYPES or out.doc_type == "product_document":
+        return None
+    return {"doc_type": out.doc_type, "legible": out.legible, "confidence": out.confidence}
+
+
+def explain_match(db: Session, explanation: dict, fallback: str, subject: str | None = None) -> str:
+    """MatchExplanation v1: phrase the match reasons in plain words. The reasons are already decided by WEZA's rules;
+    the model may only reword them, never add a reason, a number or a promise. Falls back to `fallback` (TSD §76)."""
+    facts = {k: [x.get("text") if isinstance(x, dict) else str(x) for x in explanation.get(k, [])][:6]
+             for k in ("matched", "near_miss", "outstanding")}
+    if not any(facts.values()):
+        return fallback
+    system = SYSTEM_BASE.format(country="Uganda") + (
+        " Rewrite these match reasons as one or two friendly, plain sentences (at most 280 characters). Use only the "
+        "reasons given. Do not add facts or numbers, and never say or imply that credit is approved, likely or "
+        "guaranteed: the match shows fit with an institution's criteria, not a decision.")
+    out = _call(db, "explain_match", MatchExplanationV1, system, _wrap("customer_text", json.dumps(facts)),
+                subject=subject, allowed_modes=("AVAILABLE",))
+    text = (out.summary if out else "").strip()
+    banned = ("approved", "guarantee", "will get", "definitely", "certain")
+    return text[:280] if text and not any(w in text.lower() for w in banned) else fallback
+
+
+def parse_institution_query(db: Session, question: str, tools: dict[str, set[str]],
+                            subject: str | None = None) -> dict | None:
+    """InstitutionQuery v1: choose ONE tool and its arguments for a staff question the keyword router did not recognise.
+    `tools` maps each approved tool to the argument names it accepts; anything else is dropped. Returns
+    {"tool", "args"} or None (the caller then uses its deterministic default)."""
+    system = SYSTEM_BASE.format(country="Uganda") + (
+        " Choose the one read-only tool that best answers the institution staff member's question. tool must be one of: "
+        + ", ".join(sorted(tools)) + ". Only fill the fields that tool needs. sector must be one of: "
+        + ", ".join(UGANDA["sectors"]) + ". customer_type is SME, SALARIED or AGRICULTURE.")
+    out = _call(db, "parse_institution_query", InstitutionQueryV1, system, _wrap("customer_text", redact_text(question)),
+                subject=subject, allowed_modes=("AVAILABLE", "DEGRADED"))
+    if out is None or out.tool not in tools or out.confidence < 0.6:
+        return None
+    args: dict = {}
+    if out.sector in UGANDA["sectors"]:
+        args["sector"] = out.sector
+    if out.customer_type in ("SME", "SALARIED", "AGRICULTURE"):
+        args["customer_type"] = out.customer_type
+    if out.min_match is not None and 0 <= out.min_match <= 100:
+        args["min_match"] = out.min_match
+    if out.limit is not None and 1 <= out.limit <= 20:
+        args["limit"] = out.limit
+    if out.field and out.op and out.value is not None:
+        args.update(field=out.field, op=out.op, value=out.value)
+    return {"tool": out.tool, "args": {k: v for k, v in args.items() if k in tools[out.tool]}}
 
 
 def extract_product_rules(db: Session, document_text: str, subject: str | None = None) -> dict:

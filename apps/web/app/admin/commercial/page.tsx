@@ -5,6 +5,7 @@ import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/hooks";
 import { moneyFull } from "@/lib/format";
 import { ActionError } from "@/components/ActionError";
+import { ReferralLinks } from "@/components/ReferralLinks";
 import { useMe } from "@/components/StaffShell";
 import { Button, ErrorState, Field, Input, Loading, Modal, PageHeader, Stat, Table, Td } from "@/components/ui";
 
@@ -58,6 +59,7 @@ export default function Commercial() {
           </div>
         )}
       </Modal>
+      {can("admin.commercial") && <div className="mt-6"><ReferralLinks /></div>}
     </>
   );
 }

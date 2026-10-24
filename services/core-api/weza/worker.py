@@ -15,7 +15,7 @@ import weza.consumers  # noqa: F401 — registers consumers
 import weza.domains.need.journey  # noqa: F401 — registers graphs
 from weza.config import get_settings
 from weza.domains.appetite import service as appetite_svc
-from weza.domains.intelligence import insights
+from weza.domains.intelligence import briefs, insights
 from weza.domains.matching import engine
 from weza.domains.matching.models import WaitingEntry
 from weza.domains.misc_models import MarketSnapshot
@@ -123,6 +123,7 @@ JOBS: list[tuple[str, float, Callable[[], object]]] = [
     ("hourly_clearing", 3600, hourly_clearing),
     ("nightly", 86400, nightly),
     ("retention", 86400, retention_job),
+    ("briefs", 900, _sweep(briefs.send_due)),  # idempotent: one brief per person per day (Monday: and per week)
 ]
 
 

@@ -51,7 +51,7 @@ INSTITUTION_ASSISTANT = AgentSpec(
     "institution_assistant",
     frozenset({
         "search_opportunities", "get_demand_summary", "get_product_performance",
-        "get_near_match_analysis", "simulate_appetite", "get_team_queue",
+        "get_near_match_analysis", "simulate_appetite", "get_team_queue", "parse_institution_query",
     }),
     3,
 )
@@ -160,6 +160,22 @@ def read_business_document(db: Session, mime: str, data: bytes, *, subject: str 
     return run_step(
         db, DOCUMENT_EXTRACTION, "read_business_document", {"mime": mime, "bytes": len(data)},
         lambda: ai.read_business_document(db, mime, data, subject=subject), subject=subject,
+    )
+
+
+def classify_document(db: Session, mime: str, data: bytes, *, subject: str | None = None) -> dict | None:
+    """Which kind of document a stored, scanned upload is. Only the size and type are logged, never the file."""
+    return run_step(
+        db, DOCUMENT_EXTRACTION, "classify_document", {"mime": mime, "bytes": len(data)},
+        lambda: ai.classify_document(db, mime, data, subject=subject), subject=subject,
+    )
+
+
+def parse_institution_query(db: Session, question: str, tools: dict[str, set[str]], *,
+                            subject: str | None = None) -> dict | None:
+    return institution_tool(
+        db, "parse_institution_query", {"question_length": len(question)},
+        lambda: ai.parse_institution_query(db, question, tools, subject=subject), subject=subject, step_no=1,
     )
 
 

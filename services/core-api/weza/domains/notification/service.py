@@ -12,9 +12,9 @@ from sqlalchemy.orm import Session
 
 from weza.config import get_settings
 from weza.domains.identity.models import Membership, User
-from weza.domains.institution.models import NotificationPref
+from weza.domains.institution.models import Institution, NotificationPref
 from weza.domains.misc_models import ChannelMessage, Notification, WhatsappStatusReceipt
-from weza.domains.notification import retry_queue
+from weza.domains.notification import retry_queue, teams
 from weza.domains.trust import roles as canon
 from weza.platform import crypto
 from weza.platform.controls import channel_disabled
@@ -453,6 +453,22 @@ def _recipients(db: Session, institution_id: uuid.UUID, roles: list[str] | None,
     return out
 
 
+def channel_usable(db: Session, institution_id, user: User, channel: str) -> bool:
+    """Whether a message on this channel can actually reach this person. A channel that cannot is not chosen at all,
+    rather than being recorded as sent: in-app and email always work; Teams needs the institution's connected channel;
+    SMS needs a mobile number on the person's account. Push and WhatsApp for staff are not set up."""
+    if channel == "in_app":
+        return True
+    if channel == "email":
+        return bool(user.email)
+    if channel == "teams":
+        inst = db.get(Institution, institution_id)
+        return bool(inst and teams.configured(inst.profile))
+    if channel == "sms":
+        return bool((user.preferences or {}).get("phone"))
+    return False
+
+
 def _channels_for(db: Session, institution_id, user: User, event_type: str, priority: str) -> list[str]:
     prefs = db.execute(select(NotificationPref).where(NotificationPref.institution_id == institution_id,
                                                       NotificationPref.event_type == event_type)).scalars().all()
@@ -463,7 +479,7 @@ def _channels_for(db: Session, institution_id, user: User, event_type: str, prio
             channels = list(dict.fromkeys(["in_app", *pref.channels]))
     elif priority in ("HIGH", "URGENT"):
         channels = ["in_app", "email"]
-    return channels
+    return [c for c in channels if channel_usable(db, institution_id, user, c)]
 
 
 def notify_institution(db: Session, institution_id: uuid.UUID, event_type: str, *, title: str, body: str = "",
@@ -530,8 +546,23 @@ def deliver(db: Session, note: Notification, user: User | None = None) -> None:
             user = user or db.get(User, note.recipient_id)
             _send_email(user.email if user else "", note.title, note.body)
             note.status = "SENT"
-        else:
+        elif note.channel == "teams":
+            inst = db.get(Institution, note.institution_id) if note.institution_id else None
+            url = teams.webhook(inst.profile) if inst else None
+            if not url:
+                raise teams.TeamsError("this institution has no Teams channel connected")
+            teams.post(url, note.title, note.body, note.link)
             note.status = "SENT"
+        elif note.channel == "sms":
+            user = user or db.get(User, note.recipient_id)
+            phone = (user.preferences or {}).get("phone") if user else None
+            if not phone:
+                raise ValueError("no mobile number on this account")
+            if not send_customer_message(db, phone, f"WEZA: {note.title}", channel="sms", kind="staff_alert"):
+                raise RuntimeError("the SMS provider did not accept the message")
+            note.status = "SENT"
+        else:  # never claim a delivery that did not happen: an unknown channel fails visibly and is dead-lettered
+            raise ValueError(f"no delivery method for channel '{note.channel}'")
         note.next_attempt_at = None
     except Exception as exc:  # noqa: BLE001 — retried with backoff by the worker, then dead-lettered
         retry_queue.record_failure(note, exc)

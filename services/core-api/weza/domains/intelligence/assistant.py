@@ -146,7 +146,8 @@ def run_tool(db: Session, actor: Actor, name: str, args: dict, *, step_no: int =
 # ------------------------------------------------------------------ deterministic router
 
 
-def _route(question: str) -> list[tuple[str, dict]]:
+def _route_keywords(question: str) -> list[tuple[str, dict]] | None:
+    """The tool calls for a question the keyword rules recognise, or None when none of them applies."""
     q = question.lower()
     sector, _ = parsing.parse_sector(q)
     ctype, c = parsing.parse_customer_type(q)
@@ -166,8 +167,34 @@ def _route(question: str) -> list[tuple[str, dict]]:
         return [("get_product_performance", {})]
     if "team" in q or "queue" in q or "unassigned" in q or "workload" in q:
         return [("get_team_queue", {})]
-    return [("search_opportunities", {"sector": sector, "customer_type": ctype if c >= 0.8 else None,
-                                      "min_match": 75 if "best" in q or "top" in q else None})]
+    if sector or c >= 0.8 or "best" in q or "top" in q or "opportunit" in q or "lead" in q:
+        return [("search_opportunities", {"sector": sector, "customer_type": ctype if c >= 0.8 else None,
+                                          "min_match": 75 if "best" in q or "top" in q else None})]
+    return None
+
+
+def _route(question: str) -> list[tuple[str, dict]]:
+    """Keyword routing, with a plain opportunity search for anything the rules do not recognise."""
+    return _route_keywords(question) or [("search_opportunities", {})]
+
+
+def _plan(db: Session, actor: Actor, question: str) -> list[tuple[str, dict]]:
+    """What to run for a question. Recognised questions use the keyword rules. For the rest, the AI may PROPOSE one tool
+    (InstitutionQuery, TSD §9); WEZA validates it against the approved tools and runs it under the user's permissions.
+    No AI, or an invalid proposal, means the plain search."""
+    known = _route_keywords(question)
+    if known:
+        return known
+    if ai.effective_mode(db) in ("AVAILABLE", "DEGRADED"):
+        try:
+            plan = agents.parse_institution_query(db, question, {n: set(spec[2]) for n, spec in TOOLS.items()},
+                                                  subject=str(actor.id))
+        except Exception:  # noqa: BLE001 — a failed proposal is just "no proposal"
+            log.warning("institution_query_parse_failed")
+            plan = None
+        if plan:
+            return [(plan["tool"], plan["args"])]
+    return [("search_opportunities", {})]
 
 
 def _render(name: str, r: dict) -> str:
@@ -223,7 +250,7 @@ def ask(db: Session, actor: Actor, question: str) -> dict:
             db.add(LoopMetric(loop="institution_assistant", event="FALLBACK", subject=str(actor.id)))
     calls = []
     answer_parts = []
-    for step_no, (name, args) in enumerate(_route(question)[:MAX_TOOL_CALLS], start=1):
+    for step_no, (name, args) in enumerate(_plan(db, actor, question)[:MAX_TOOL_CALLS], start=1):
         try:
             r = run_tool(db, actor, name, args, step_no=step_no)
         except Exception as exc:  # noqa: BLE001 — permission or data errors become a safe message

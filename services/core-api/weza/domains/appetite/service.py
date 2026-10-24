@@ -2,7 +2,7 @@
 approval is human (HUMAN_APPROVE_APPETITE_CHANGE, maker-checker); WEZA never changes appetite autonomously."""
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -234,6 +234,31 @@ def set_lifecycle(db: Session, actor: Actor, ap: Appetite, to: str, reason: str)
           reason=reason)
     emit(db, "AppetiteActivated" if to == "ACTIVE" else "AppetitePaused", topic="institution",
          aggregate_type="appetite", aggregate_id=ap.id, institution_id=ap.institution_id, data={"status": to})
+
+
+WAITING_DAYS = 7  # no opportunity for this long and the mandate is shown as waiting for demand
+
+
+def demand_state(db: Session, ap: Appetite) -> dict:
+    """Where a mandate stands in the two-sided market (FSD-WAIT-002): an active mandate with too little demand right now
+    is WAITING, not idle or broken. It stays eligible for future matching until it is paused, full or expired."""
+    from weza.domains.opportunity.models import Opportunity
+    if ap.lifecycle_status == "PAUSED" or ap.capacity_state == "PAUSED":
+        return {"state": "PAUSED", "message": "Paused: it receives no opportunities until it is resumed."}
+    if ap.lifecycle_status == "EXPIRED":
+        return {"state": "EXPIRED", "message": "Expired: its campaign period has ended."}
+    if ap.lifecycle_status != "ACTIVE":
+        return {"state": ap.lifecycle_status, "message": ""}
+    if ap.capacity_state == "FULL":
+        return {"state": "FULL", "message": "At its capacity limit: it receives opportunities again when the limit resets "
+                                            "or is raised."}
+    last = db.execute(select(func.max(Opportunity.qualified_at)).where(Opportunity.appetite_id == ap.id)).scalar_one()
+    if last is not None and last >= utcnow() - timedelta(days=WAITING_DAYS):
+        days = (utcnow() - last).days
+        return {"state": "RECEIVING", "message": "Receiving opportunities" + (" (latest today)" if days == 0 else
+                                                                            f" (latest {days} day{'s' if days != 1 else ''} ago)")}
+    return {"state": "WAITING", "message": "Waiting for demand: it stays active and will receive matching opportunities "
+                                           "as they arrive, until it is paused, full or expired."}
 
 
 def expiry_sweep(db: Session) -> int:

@@ -16,6 +16,51 @@ from weza.platform.events import emit
 
 RULE_VERSION = "integrity_v1"
 WEIGHTS = {"high": 60, "medium": 30}
+# Suspicious referral / partner activity (TSD §41). Codes are marketing identifiers, never personal data.
+REFERRAL_BURST_PER_DAY = 20  # customers arriving through one partner+referral code in 24 hours
+REFERRAL_FLAGGED_MIN, REFERRAL_FLAGGED_SHARE = 3, 0.4  # flagged customers from the same code, and their share
+# Repeated disputes (TSD §41): an institution disputing most of what it is billed is a pattern worth a human's look.
+DISPUTE_MIN, DISPUTE_SHARE, DISPUTE_DAYS = 3, 0.5, 90
+
+
+def _referral_signals(db: Session, customer: Customer, now) -> list[dict]:
+    from weza.domains.commercial.models import Attribution
+    a = db.get(Attribution, customer.attribution_id) if customer.attribution_id else None
+    if a is None or not (a.partner_code or a.referral_code):
+        return []
+    same_code = select(Attribution.id).where(Attribution.partner_code.is_not_distinct_from(a.partner_code),
+                                             Attribution.referral_code.is_not_distinct_from(a.referral_code))
+    states = db.execute(select(Customer.integrity_state).where(
+        Customer.attribution_id.in_(same_code), Customer.created_at >= now - timedelta(days=1))).scalars().all()
+    detail = {"partner": a.partner_code, "referral": a.referral_code, "customers_24h": len(states)}
+    out = []
+    if len(states) > REFERRAL_BURST_PER_DAY:
+        out.append({"kind": "REFERRAL_BURST", "weight": WEIGHTS["medium"], "detail": detail})
+    flagged = sum(1 for s in states if s != "NORMAL")
+    if flagged >= REFERRAL_FLAGGED_MIN and flagged / len(states) >= REFERRAL_FLAGGED_SHARE:
+        out.append({"kind": "REFERRAL_ABUSE", "weight": WEIGHTS["high"], "detail": {**detail, "flagged": flagged}})
+    return out
+
+
+def check_dispute_pattern(db: Session, institution_id: uuid.UUID) -> ReviewItem | None:
+    """After a billing dispute: if this institution is disputing most of what it is billed, ask a person to look.
+    Disputes are legitimate, so this only raises a review item; it never changes billing or blocks anything."""
+    from weza.domains.commercial.models import CommercialEvent, Dispute
+    since = utcnow() - timedelta(days=DISPUTE_DAYS)
+    disputes = db.execute(select(func.count()).select_from(Dispute).where(
+        Dispute.institution_id == institution_id, Dispute.created_at >= since)).scalar_one()
+    billed = db.execute(select(func.count()).select_from(CommercialEvent).where(
+        CommercialEvent.institution_id == institution_id, CommercialEvent.kind == "QUALIFIED_OPPORTUNITY",
+        CommercialEvent.status != "NOT_BILLABLE", CommercialEvent.created_at >= since)).scalar_one()
+    if disputes < DISPUTE_MIN or not billed or disputes / billed < DISPUTE_SHARE:
+        return None
+    db.add(IntegritySignal(kind="REPEATED_DISPUTES", subject_type="institution", subject_id=str(institution_id),
+                           weight=WEIGHTS["medium"], rule_version=RULE_VERSION,
+                           detail={"disputes": disputes, "billed": billed, "days": DISPUTE_DAYS}))
+    return add_review(db, "REPEATED_DISPUTES", f"Institution disputed {disputes} of {billed} billed opportunities in "
+                      f"{DISPUTE_DAYS} days", "institution", institution_id, severity="MEDIUM",
+                      detail={"disputes": disputes, "billed": billed}, due_hours=120,
+                      dedupe_key=f"REPEATED_DISPUTES:{institution_id}:{utcnow():%Y-%m}")
 
 
 def evaluate_customer(db: Session, customer: Customer, need: FinancialNeed) -> tuple[str, list[dict]]:
@@ -37,6 +82,7 @@ def evaluate_customer(db: Session, customer: Customer, need: FinancialNeed) -> t
             Customer.device_hash == customer.device_hash, Customer.created_at >= now - timedelta(days=7))).scalar_one()
         if devices > 3:
             signals.append({"kind": "DEVICE_REUSE", "weight": WEIGHTS["medium"], "detail": {"customers": devices}})
+    signals += _referral_signals(db, customer, now)
     from weza.domains.verification.service import latest as latest_identity_check
     check = latest_identity_check(db, customer.id)
     if check is not None and check.status in ("NOT_FOUND", "MISMATCH"):

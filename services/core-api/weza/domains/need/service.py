@@ -47,7 +47,8 @@ def start_journey(db: Session, *, channel: str, attribution: dict | None = None,
     db.add(need)
     db.flush()
     state = {"need_id": str(need.id), "channel": channel, "ip": crypto.sha256_hex(ip) if ip else "",
-             "device_hash": device_hash, "intent": {}, "customer_id": str(customer_id) if customer_id else None}
+             "device_hash": device_hash, "intent": {}, "customer_id": str(customer_id) if customer_id else None,
+             "lang": journey.customer_language(db, customer_id)}
     if first_text:
         state["first_text"] = first_text
     if channel_phone:

@@ -32,6 +32,7 @@ from weza.domains.institution.models import (
 from weza.domains.intelligence import agents, assistant, insights
 from weza.domains.matching import engine
 from weza.domains.misc_models import Notification
+from weza.domains.notification import teams
 from weza.domains.opportunity import service as opp_svc
 from weza.domains.opportunity.models import (
     Assignment,
@@ -215,6 +216,33 @@ def reset_user_password(user_id: uuid.UUID, body: PasswordResetIn, actor: Actor 
 class PasswordChangeIn(BaseModel):
     current_password: str = Field(..., max_length=200)
     new_password: str = Field(..., min_length=12, max_length=200)
+
+
+class PhoneIn(BaseModel):
+    phone: str = Field("", max_length=32)  # empty removes it
+
+
+@router.get("/me/phone")
+def my_phone(actor: Actor = A, db: Session = DB):
+    phone = (db.get(User, actor.id).preferences or {}).get("phone")
+    return {"set": bool(phone), "masked": identity.mask_phone(phone) if phone else None}
+
+
+@router.put("/me/phone")
+def set_my_phone(body: PhoneIn, actor: Actor = A, db: Session = DB):
+    """A mobile number on your own account, so the institution can send you SMS alerts (BRD §20). Never shown to
+    customers or to anyone else in the institution."""
+    from weza.domains.intelligence.parsing import parse_phone
+    user = db.get(User, actor.id)
+    prefs = {k: v for k, v in (user.preferences or {}).items() if k != "phone"}
+    if body.phone.strip():
+        phone = parse_phone(body.phone)
+        if not phone:
+            raise ValidationFailed("Enter a valid Ugandan mobile number, e.g. 0772 123 456.", code="INVALID_PHONE")
+        prefs["phone"] = phone
+    user.preferences = prefs
+    audit(db, actor, "users.phone_saved", "user", user.id, after={"set": "phone" in prefs})
+    return my_phone(actor, db)
 
 
 @router.post("/password")
@@ -453,6 +481,7 @@ def appetites(actor: Actor = A, db: Session = DB):
             products = [{"id": str(x.id), "name": x.name} for x in db.execute(
                 select(Product).where(Product.id.in_(list(version.product_ids)))).scalars()]
         out.append({"id": str(ap.id), "name": ap.name, "lifecycle_status": ap.lifecycle_status,
+                    "demand": appetite_svc.demand_state(db, ap),
                     "capacity_state": ap.capacity_state, "capacity_override": ap.capacity_override,
                     "fulfilled_count": ap.fulfilled_count, "fulfilled_value": float(ap.fulfilled_value or 0),
                     "active_version": cur.version if cur else None, "latest_version": latest.version,
@@ -634,6 +663,45 @@ def put_prefs(body: PrefsIn, actor: Actor = A, db: Session = DB):
     policy.require(actor, "institution.settings")
     inst_svc.save_notification_prefs(db, actor, actor.institution_id, body.prefs)
     return get_prefs(actor, db)
+
+
+class ChannelsIn(BaseModel):
+    teams_webhook_url: str | None = Field(None, max_length=600)  # empty or null disconnects Teams
+
+
+@router.get("/notification-channels")
+def get_channels(actor: Actor = A, db: Session = DB):
+    """Which delivery channels beyond in-app and email are connected. The Teams address itself is never returned."""
+    inst = db.get(Institution, actor.institution_id)
+    return {"teams_configured": teams.configured(inst.profile if inst else None)}
+
+
+@router.put("/notification-channels")
+def put_channels(body: ChannelsIn, actor: Actor = A, db: Session = DB):
+    policy.require(actor, "institution.settings")
+    inst = db.get(Institution, actor.institution_id)
+    inst.profile = teams.set_webhook(inst.profile, body.teams_webhook_url)
+    audit(db, actor, "notifications.channels_saved", "institution", inst.id,
+          after={"teams": bool((body.teams_webhook_url or "").strip())})
+    return get_channels(actor, db)
+
+
+@router.post("/notification-channels/teams/test")
+def test_teams(actor: Actor = A, db: Session = DB):
+    """Post a test card to the connected Teams channel, so the administrator sees it work before relying on it."""
+    from weza.platform.controls import rate_limit
+    policy.require(actor, "institution.settings")
+    rate_limit(db, f"teams:test:{actor.institution_id}", 6, 600, "Too many test messages. Try again in a few minutes.")
+    inst = db.get(Institution, actor.institution_id)
+    url = teams.webhook(inst.profile)
+    if not url:
+        raise ValidationFailed("Connect a Teams channel first.", code="TEAMS_NOT_CONNECTED")
+    try:
+        teams.post(url, "WEZA test message", f"{inst.display_name} is connected to Microsoft Teams. WEZA alerts you choose "
+                   "Teams for will appear here.", "/institution/notifications")
+    except teams.TeamsError as exc:
+        raise ValidationFailed(str(exc), code="TEAMS_FAILED") from exc
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ command centre, my day, feed

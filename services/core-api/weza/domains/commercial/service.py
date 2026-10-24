@@ -136,6 +136,8 @@ def open_dispute(db: Session, actor: Actor, event_id: uuid.UUID, reason: str, de
           after={"reason": reason})
     emit(db, "DisputeOpened", topic="commercial", aggregate_type="dispute", aggregate_id=d.id,
          institution_id=ev.institution_id, data={"reason": reason})
+    from weza.domains.integrity.service import check_dispute_pattern
+    check_dispute_pattern(db, ev.institution_id)  # a pattern of disputes goes to a person; it never blocks the dispute
     return d
 
 

@@ -274,12 +274,32 @@ _HINTS = [
 ]
 
 
-def guess_doc_type(caption: str | None, filename: str | None, outstanding: list[str]) -> str:
+def hint_doc_type(caption: str | None, filename: str | None) -> str | None:
+    """The document type the customer's own caption or filename names, if it names one."""
     text = f"{caption or ''} {filename or ''}".lower()
-    for pattern, doc_type in _HINTS:
-        if re.search(pattern, text):
-            return doc_type
-    return outstanding[0] if outstanding else "other"
+    return next((doc_type for pattern, doc_type in _HINTS if re.search(pattern, text)), None)
+
+
+def guess_doc_type(caption: str | None, filename: str | None, outstanding: list[str]) -> str:
+    return hint_doc_type(caption, filename) or (outstanding[0] if outstanding else "other")
+
+
+CLASSIFY_MIN_CONFIDENCE = 0.85
+
+
+def _classify_stored(db: Session, d: Document, guessed: str, data: bytes, need_id: uuid.UUID) -> str:
+    """The customer did not say what this is. Now that the file has passed the malware scan and is stored, the AI may
+    suggest its type (DocumentClassification, TSD §9, §42); WEZA keeps the suggestion only when it is confident and the
+    file is legible, otherwise the guess from what is outstanding stands."""
+    from weza.domains.intelligence import agents, ai
+    from weza.platform import classification
+    if not ai.can_read_documents(db):
+        return guessed
+    found = agents.classify_document(db, d.mime, data, subject=str(need_id))
+    if not found or not found["legible"] or found["confidence"] < CLASSIFY_MIN_CONFIDENCE or found["doc_type"] == guessed:
+        return guessed
+    d.doc_type, d.classification = found["doc_type"], classification.document_level(found["doc_type"])
+    return found["doc_type"]
 
 
 def _active_journey(db: Session, phone_index: str):
@@ -347,6 +367,7 @@ def _process_media(db: Session, row: WhatsappInbox, data: dict) -> None:
         doc_type = guess_doc_type(data.get("caption"), data.get("filename"), missing or list(BUSINESS_DOCS))
         doc_type = doc_type if doc_type in BUSINESS_DOCS else (missing or list(BUSINESS_DOCS))[0]
     else:
+        hinted = hint_doc_type(data.get("caption"), data.get("filename")) is not None
         doc_type = guess_doc_type(data.get("caption"), data.get("filename"),
                                   _outstanding_doc_types(db, need_id, customer_id))
     d = docs.ingest(db, customer_id, doc_type=doc_type, filename=(data.get("filename") or "whatsapp-upload")[:200],
@@ -354,6 +375,8 @@ def _process_media(db: Session, row: WhatsappInbox, data: dict) -> None:
     if d.pipeline_state != "STORED":
         return reply((d.reject_reason or "I couldn't accept that file.") + " Please send a clear PDF, JPG or PNG.",
                      "DOC_REJECTED")
+    if node not in ID_NODES and node != "REQUEST_BUSINESS_DOCS" and not hinted:
+        doc_type = _classify_stored(db, d, doc_type, media.data, need_id)
     label = docs.DOC_TYPES[doc_type]
     journeys._persist(db, gi, "IN", {"type": "text", "text": f"[Document sent: {label}]"}, "whatsapp",
                       row.provider_message_id)

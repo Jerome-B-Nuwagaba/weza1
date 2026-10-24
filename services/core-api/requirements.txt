@@ -13,5 +13,6 @@ PyJWT==2.15.1
 PyOTP==2.10.0
 pypdf==6.19.0
 python-multipart==0.0.32
+segno==1.6.6
 SQLAlchemy==2.1.4
 uvicorn[standard]==0.54.0

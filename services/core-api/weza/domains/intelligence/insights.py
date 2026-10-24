@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from weza.domains.admin_config import UGANDA
+from weza.domains.appetite import service as appetite_svc
 from weza.domains.appetite.models import Appetite, AppetiteVersion
 from weza.domains.commercial.models import CommercialEvent
 from weza.domains.institution.models import Institution
@@ -166,6 +167,7 @@ def active_mandates(db: Session, actor: Actor) -> list[dict]:
                 select(Product).where(Product.id.in_(list(av.product_ids)))).scalars()]
         out.append({"id": str(ap.id), "name": ap.name, "status": ap.lifecycle_status,
                     "capacity_state": ap.capacity_state, "version": av.version if av else None,
+                    "demand": appetite_svc.demand_state(db, ap),
                     "min_match_score": av.min_match_score if av else None,
                     "products": products, "criteria": (av.criteria if av else []) or [],
                     "target_count": av.target_count if av else None,

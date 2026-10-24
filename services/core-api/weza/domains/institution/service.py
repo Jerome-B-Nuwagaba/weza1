@@ -39,7 +39,7 @@ INSTITUTION_SM = StateMachine("Institution", {
 })
 DEFAULT_NOTIFICATION_EVENTS = ["OpportunityRouted", "HighMatchOpportunity", "OpportunityAssigned",
                                "ServiceTargetApproaching", "ServiceTargetBreached", "InfoRequestFulfilled",
-                               "InfoRequestExpired", "DailyBrief", "AppetiteInsight"]
+                               "InfoRequestExpired", "DailyBrief", "WeeklyBrief", "AppetiteInsight"]
 PRIORITIES = ("NORMAL", "HIGH", "URGENT")
 
 
@@ -271,7 +271,7 @@ def save_notification_prefs(db: Session, actor: Actor, institution_id: uuid.UUID
             raise ValidationFailed("Priority must be NORMAL, HIGH or URGENT.", code="INVALID_PREF")
         seen.add(event)
         # in_app is always on: alerts can't be silenced entirely
-        channels = ["in_app", *[c for c in p.get("channels", []) if c in ("email", "sms") and c != "in_app"]]
+        channels = ["in_app", *[c for c in p.get("channels", []) if c in ("email", "sms", "teams") and c != "in_app"]]
         clean.append((event, list(dict.fromkeys(channels)), p.get("min_priority", "NORMAL"), bool(p.get("digest"))))
     who = NotificationPref.user_id.is_(None) if user_id is None else NotificationPref.user_id == user_id
     for row in db.execute(select(NotificationPref).where(NotificationPref.institution_id == institution_id, who)).scalars():
@@ -285,4 +285,4 @@ def save_notification_prefs(db: Session, actor: Actor, institution_id: uuid.UUID
 
 def default_notification_prefs() -> list[dict]:
     return [{"event_type": e, "channels": ["in_app", "email"] if e in ("ServiceTargetBreached", "HighMatchOpportunity")
-             else ["in_app"], "min_priority": "NORMAL", "digest": e == "DailyBrief"} for e in DEFAULT_NOTIFICATION_EVENTS]
+             else ["in_app"], "min_priority": "NORMAL", "digest": e in ("DailyBrief", "WeeklyBrief")} for e in DEFAULT_NOTIFICATION_EVENTS]
